@@ -39,6 +39,7 @@ The level tapes start from the debug-menu level select (`tools/re/level_select.m
 | Save / load | `tlk_headless --frames 3000 --save-at 3000 s.state`, then `--load s.state --frames 6000` in a new process | same hash as an uninterrupted run |
 | Speedruns vs BizHawk | `tools/ram_sync_compare.py <headless ram log> <BizHawk ram log>` | in sync to the last poll (6987M 36,904, 6781M 37,093, 4735M 38,870) |
 | All Bugs | `scripts/check_allbugs.sh` | `ALLBUGS PASS` |
+| Remap / menu | `SDL_VIDEO_DRIVER=dummy build/tlk_sdl --rom <rom> --no-audio --selftest-remap` (under Xvfb the virtual pad's events don't arrive) | `PASS (0 failed)` |
 | Exit widths | `scripts/check_exit_mx.py` | 0 `WRONG` |
 | Window | run `tlk_sdl` and look | the right picture (one change once passed every hash with a black window) |
 
