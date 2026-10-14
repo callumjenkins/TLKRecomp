@@ -86,7 +86,7 @@ void aot_pace_diag_init(void) {
     g_aot_apu_thresh = tlk_bridge_apu_flush_thresh();
     const char *p = getenv("TLK_HWLOG");
     if (!p || !*p) return;
-    s_hwlog = fopen(p, "w");
+    s_hwlog = fopen(p, "wb");
     if (!s_hwlog) return;
     const char *f = getenv("TLK_HWLOG_FROM");
     s_hwlog_from = f ? atoi(f) : 0;

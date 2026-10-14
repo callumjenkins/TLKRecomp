@@ -275,7 +275,7 @@ static void PcHook(uint32_t pc24, int m, int x) {
         static int init; static unsigned long from, to; static FILE *tf;
         if (!init) {
             const char *e = getenv("TLK_TRACE_OPCODES"); init = 1;
-            if (e) { char path[512] = {0}; if (sscanf(e, "%lu,%lu,%511s", &from, &to, path) == 3) tf = fopen(path, "w"); }
+            if (e) { char path[512] = {0}; if (sscanf(e, "%lu,%lu,%511s", &from, &to, path) == 3) tf = fopen(path, "wb"); }
         }
         if (tf && s_polls_total >= from && s_polls_total < to)
             fprintf(tf, "%06X %llu\n", pc24, (unsigned long long)g_cpu.master_cycles);
@@ -377,7 +377,8 @@ int main(int argc, char **argv) {
         interp_bridge_add_pre_opcode_hook(0x00A07C, PollHook);
         g_tlk_aot_pad_read_hook = PollHookCompiled; /* task CC: compiled $C0A05D / $C0A073 */
     }
-    FILE *ram_log = ram_log_path ? fopen(ram_log_path, "w") : NULL;
+    /* Logs are opened "wb" so a Windows build writes the same bytes (no CRLF). */
+    FILE *ram_log = ram_log_path ? fopen(ram_log_path, "wb") : NULL;
     if (ram_log_path && !ram_log) { fprintf(stderr, "cannot write %s\n", ram_log_path); return 7; }
 
     unsigned long active_frames = 0;
@@ -413,7 +414,7 @@ int main(int argc, char **argv) {
         }
         { /* Diagnostics: TLK_FRAME_LOG=path writes "frame fnv1a(WRAM) $0A0A fnv1a(VRAM)" per frame. */
             static FILE *fl; static int finit;
-            if (!finit) { const char *e = getenv("TLK_FRAME_LOG"); if (e) fl = fopen(e, "w"); finit = 1; }
+            if (!finit) { const char *e = getenv("TLK_FRAME_LOG"); if (e) fl = fopen(e, "wb"); finit = 1; }
             if (fl) {
                 uint32_t h = 2166136261u;
                 for (size_t k = 0; k < 0x20000; k++) h = (h ^ g_ram[k]) * 16777619u;
@@ -498,7 +499,7 @@ int main(int argc, char **argv) {
     }
 
     if (log_path) {
-        FILE *f = fopen(log_path, "w");
+        FILE *f = fopen(log_path, "wb");
         if (!f) { fprintf(stderr, "cannot write %s\n", log_path); return 7; }
         fprintf(f, "{\n  \"title\": \"tlk\",\n  \"frames\": %ld,\n", ran);
         fprintf(f, "  \"g_fail\": %s,\n", g_fail ? "true" : "false");
@@ -538,7 +539,7 @@ int main(int argc, char **argv) {
     }
 
     if (s_interp_hist) {
-        FILE *hf = fopen(getenv("TLK_INTERP_HIST"), "w");
+        FILE *hf = fopen(getenv("TLK_INTERP_HIST"), "wb");
         if (hf) {
             for (uint32_t pc = 0; pc < (1u << 24); pc++)
                 if (s_interp_hist[pc]) fprintf(hf, "%06X %u\n", (unsigned)pc, (unsigned)s_interp_hist[pc]);
@@ -546,7 +547,7 @@ int main(int argc, char **argv) {
         }
     }
     if (s_mx_hist) {
-        FILE *hf = fopen(getenv("TLK_MX_HIST"), "w");
+        FILE *hf = fopen(getenv("TLK_MX_HIST"), "wb");
         if (hf) {
             for (uint32_t pc = 0; pc < (1u << 24); pc++)
                 if (s_mx_hist[pc]) fprintf(hf, "%06X %u\n", (unsigned)pc, (unsigned)s_mx_hist[pc]);

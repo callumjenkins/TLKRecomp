@@ -67,7 +67,7 @@ void TlkCallPairOpcode(uint32_t pc, int m, int x) {
 
 void TlkCallPairWrite(void) {
     if (!s_mask) return;
-    FILE *f = fopen(s_path, "w");
+    FILE *f = fopen(s_path, "wb");
     if (!f) return;
     for (uint32_t pc = 0; pc < (1u << 24); pc++)
         if (s_mask[pc]) fprintf(f, "%06X %u\n", (unsigned)pc, (unsigned)s_mask[pc]);
