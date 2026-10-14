@@ -24,15 +24,26 @@
  * call bookkeeping's per-run state is swapped at every switch so they see the
  * same state as before.
  *
- * Off under --lle (SNESRECOMP_LLE_BOUNCE=0) and with TLK_FIBER=0. */
+ * Off under --lle (SNESRECOMP_LLE_BOUNCE=0) and with TLK_FIBER=0.
+ *
+ * Two backends with the same switch points: ucontext + an mmap'd stack on
+ * Linux/macOS, the Win32 fiber API on Windows (ucontext does not exist
+ * there). Both give the game the same 64 MB stack. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <ucontext.h>
 
 #include "cpu_state.h"
+
+/* After cpu_state.h: windows.h would otherwise clash with types.h over
+ * FORCEINLINE. */
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <ucontext.h>
+#endif
 
 int tlk_interp_bridge_run_until_quiescent_raw(CpuState *cpu, uint32_t entry_pc24);
 size_t tlk_bridge_ctx_size(void);
@@ -63,8 +74,12 @@ static int s_no_aot, s_no_interp, s_no_poll;  /* TLK_FIBER_OFF=aot,interp,poll (
 static int s_state = G_IDLE;
 static int s_on_game;
 static int s_created;
+#ifdef _WIN32
+static LPVOID s_main_fiber, s_game_fiber;
+#else
 static ucontext_t s_main_uc, s_game_uc;
 static void *s_stack;
+#endif
 
 static CpuState *s_cpu;
 static uint32_t s_run_pc;
@@ -95,11 +110,14 @@ static int enabled(void) {
             fprintf(stderr, "[tlk_fiber] context too large, fibers off\n");
             s_enabled = 0;
         }
+#ifndef _WIN32
+        /* Windows: CreateFiberEx reserves the stack in enter_game. */
         if (s_enabled) {
             s_stack = mmap(NULL, FIBER_STACK_BYTES, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
             if (s_stack == MAP_FAILED) { s_stack = NULL; s_enabled = 0; }
         }
+#endif
         if (getenv("TLK_FIBER_STATS")) {
             extern void tlk_fiber_stats(void);
             atexit(tlk_fiber_stats);
@@ -113,14 +131,51 @@ void tlk_fiber_stats(void) {
             s_stat_switch, s_stat_resume, s_stat_abort);
 }
 
-static void game_main(void) {
+/* Game side -> driver side (the driver resumes after its own switch). */
+static void to_driver(void) {
+#ifdef _WIN32
+    SwitchToFiber(s_main_fiber);
+#else
+    swapcontext(&s_game_uc, &s_main_uc);
+#endif
+}
+
+static void game_loop(void) {
     for (;;) {
         s_run_result = tlk_interp_bridge_run_until_quiescent_raw(s_cpu, s_run_pc);
         s_state = G_IDLE;
         s_on_game = 0;
-        swapcontext(&s_game_uc, &s_main_uc);
+        to_driver();
     }
 }
+
+#ifdef _WIN32
+static VOID CALLBACK game_main(LPVOID unused) { (void)unused; game_loop(); }
+
+/* The driver thread becomes a fiber once; the game fiber reserves the same
+ * 64 MB stack as the mmap above (committed on demand). Fatal on failure:
+ * enabled() has already promised fibers. */
+static void create_game(void) {
+    s_main_fiber = ConvertThreadToFiber(NULL);
+    if (!s_main_fiber && GetLastError() == ERROR_ALREADY_FIBER)
+        s_main_fiber = GetCurrentFiber();
+    s_game_fiber = s_main_fiber ? CreateFiberEx(0, FIBER_STACK_BYTES, 0, game_main, NULL) : NULL;
+    if (!s_game_fiber) {
+        fprintf(stderr, "[tlk_fiber] fiber creation failed (%lu)\n", (unsigned long)GetLastError());
+        abort();
+    }
+}
+#else
+static void game_main(void) { game_loop(); }
+
+static void create_game(void) {
+    getcontext(&s_game_uc);
+    s_game_uc.uc_stack.ss_sp = s_stack;
+    s_game_uc.uc_stack.ss_size = FIBER_STACK_BYTES;
+    s_game_uc.uc_link = NULL;
+    makecontext(&s_game_uc, game_main, 0);
+}
+#endif
 
 /* Driver -> game. The bridge/call state of the driver side is saved and the
  * game side's restored (a fresh run starts from the driver's own state). */
@@ -132,15 +187,15 @@ static void enter_game(int resume) {
         tlk_infra_ctx_restore(s_game_infra);
     }
     if (!s_created) {
-        getcontext(&s_game_uc);
-        s_game_uc.uc_stack.ss_sp = s_stack;
-        s_game_uc.uc_stack.ss_size = FIBER_STACK_BYTES;
-        s_game_uc.uc_link = NULL;
-        makecontext(&s_game_uc, game_main, 0);
+        create_game();
         s_created = 1;
     }
     s_on_game = 1;
+#ifdef _WIN32
+    SwitchToFiber(s_game_fiber);
+#else
     swapcontext(&s_main_uc, &s_game_uc);
+#endif
     /* Back on the driver: the game either finished its run (its state is
      * balanced back to ours) or suspended (switch_to_driver saved it). */
     tlk_bridge_ctx_restore(s_main_bridge);
@@ -210,7 +265,7 @@ static int switch_to_driver(CpuState *cpu, uint32_t resume_pc24) {
     tlk_bridge_ctx_save(s_game_bridge);
     tlk_infra_ctx_save(s_game_infra);
     s_on_game = 0;
-    swapcontext(&s_game_uc, &s_main_uc);
+    to_driver();
     /* Resumed (enter_game restored our bridge/call state). */
     s_on_game = 1;
     if (s_abort) {
