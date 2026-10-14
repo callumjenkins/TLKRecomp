@@ -30,6 +30,12 @@ for gamepads. To force one: SDL_VIDEO_DRIVER=x11 (or wayland),
 SDL_AUDIO_DRIVER=pulseaudio (or pipewire, alsa). ./tlk_sdl --list-drivers
 prints what is compiled in.
 
+Windows x86_64 (the .zip): the same program as tlk_sdl.exe, with SDL3 and
+the C runtime built in, so it needs no DLLs. Put the .sfc next to
+tlk_sdl.exe and double-click it, or run it from a terminal with --rom as
+above. tlk_sdl.ini, the save-state slots and last_session.rec go in the
+folder it is started from.
+
 Options: --scale N, --fullscreen, --no-audio, --config file.ini, --help.
 
 Keys (defaults)
