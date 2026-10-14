@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
+#include "tlk_compat.h"
 
 struct SpcPlayer;
 
@@ -32,5 +32,5 @@ void RtlDrawPpuFrame(uint8 *pixel_buffer, size_t pitch, uint32 render_flags) {
     (void)pixel_buffer; (void)pitch; (void)render_flags;
 }
 
-void MkDir(const char *s) { mkdir(s, 0755); }
+void MkDir(const char *s) { tlk_mkdir(s, 0755); }
 void ChangeWindowScale(int scale_step) { (void)scale_step; }

@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "tlk_compat.h"
 
 extern uint8_t g_ram[];
 
