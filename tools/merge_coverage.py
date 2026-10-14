@@ -8,7 +8,7 @@ or raw trace/fallback logs, and proposes:
   3. `indirect_dispatch <pc16> <count> ptrcall|ptrtail targets:<pc24>,...`
      updates or new directives for resolved indirect jump/call targets.
 
-Syntax adheres to HANDOFF.md and snesrecomp/recompiler/v2/cfg_loader.py:
+Syntax adheres to snesrecomp/recompiler/v2/cfg_loader.py:
   bank = 0xC0
   func <name> <hex_pc16> [end:<hex>] [entry_mx:M,X] [exit_mx:M,X] [tail_call:<hex>]
   entry_mx_at <pc16> <m> <x>

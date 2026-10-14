@@ -1,7 +1,7 @@
 /* tlk_decomp.c -- native execution of the $C1CCFE decompressor loop (and
  * other force_lle loading loops) at interpreter timing.
  *
- * $C1CCFE (custom LZ/RLE, see tlk-map/decompress.py) is the hottest
+ * $C1CCFE (custom LZ/RLE, see tools/re/decompress.py) is the hottest
  * interpreted code during level loads. It cannot be compiled as is:
  *   - its long-copy command calls a 4-byte routine it writes into WRAM on
  *     every call ($C1CD27-$C1CD3D: 54 bb bb 6B = MVN bb,bb / RTL at $7E2006);
