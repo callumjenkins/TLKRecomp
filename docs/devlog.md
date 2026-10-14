@@ -1885,3 +1885,34 @@ interp_share.py: 3.8%; l01_right 5000 f: 4.83 / 4.82 / 4.80 s
 
 `patches/snesrecomp/0011-rts-call-continuation.patch` (new), `recomp/bankc0.cfg`,
 `recomp/bankc3.cfg`, `recomp/bankc4.cfg`, `recomp/bankc5.cfg`, this file, `docs/function_count.md`.
+
+## Task WIN: Windows x86_64 cross build (MinGW-w64), checked under Wine
+
+`cmake/mingw-w64-x86_64.cmake` + `-DTLK_STATIC_SDL=ON` builds `build-win/tlk_headless.exe` and `tlk_sdl.exe` with
+x86_64-w64-mingw32-gcc 16.2. SDL3 3.4.10 and the MinGW runtime are static (snesrecomp's
+`SNESRECOMP_STATIC_RUNTIME` adds `-static`); imports are Windows system DLLs and the UCRT `api-ms-win-crt-*` set only.
+The generated C and the codegen are untouched.
+
+- `runner/tlk_fiber.c`: a Win32 fiber backend (`ConvertThreadToFiber`, `CreateFiberEx` with the same 64 MB stack
+  reserve, `SwitchToFiber`) beside ucontext; same switch points. Wine: `switches=674 resumes=673 aborts=0` at
+  f600, as on Linux.
+- `runner/tlk_compat.h`: `setenv` (via `_putenv_s`) and a one-argument `mkdir` on Windows.
+- Logs (`--ram-log`, `TLK_FRAME_LOG`, `TLK_HWLOG`, ...) open `"wb"`: in text mode the Windows build wrote CRLF and the
+  All Bugs RAM log was not byte-identical (same content otherwise).
+- `sdl_main.c`: `\` accepted as a separator for the slot/recording paths and the ROM search; the remap self-test
+  falls back to `%TEMP%` when `TMPDIR` is unset.
+- `CMakeLists.txt`: the Linux-only SDL backend options are not forced on Windows.
+- `scripts/package_win.sh` -> `dist/TLKRecomp-windows-x86_64.zip` (stripped `tlk_sdl.exe` + notes, CRLF), refuses
+  non-system DLL imports.
+- LLP64: `long` holds frame counts (< 2^31) and `unsigned long` stats/`g_tlk_fiber_gen` (compared for equality
+  only); none needs 64 bits. Formats match their types.
+
+Wine 11.17, Windows exe vs Linux `build/tlk_headless`, identical frame and WRAM hashes: no input 600/3000 and 6987M
+1200/6000, default and `--lle`; 15 play tapes at f5000 (l00-l13 mix, d_03/d_09/d_13, t_continue_yes/no, t_pause,
+gameover); save at 3000 / load in a new process -> 6000 `946033bd10683657` (also a Linux-written state loaded by the
+exe); allbugsF 60,648 frames `--ram-log` byte-identical (sha256 `7b6094ab...`). `tlk_sdl.exe` 6987M `--hash-at
+600,1200,3000` = Linux `tlk_sdl`; `--selftest-remap` PASS. Savestate files differ in 6 bytes between any two runs
+(a host pointer inside the rollback blob; also between two Linux runs), not a platform difference.
+
+Not verified: real Windows, audio, gamepads, the file dialog (the "Choose ROM" message box renders under Wine/Xvfb),
+pre-Windows-10 systems (UCRT).

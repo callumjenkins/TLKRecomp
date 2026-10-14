@@ -23,6 +23,17 @@ Build (Linux: cmake, ninja, gcc/clang, Python 3, SDL3):
 
     ./build.sh
 
+Windows x86_64, cross-built on Linux with MinGW-w64 (`x86_64-w64-mingw32-gcc`); SDL3 (pinned, fetched) and the MinGW
+runtime are linked statically, so the `.exe` files need only system DLLs:
+
+    python3 scripts/generate_snesrecomp.py   # if generated/ is empty
+    cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DTLK_STATIC_SDL=ON
+    cmake --build build-win --target tlk_headless tlk_sdl
+
+`build-win/tlk_headless.exe` and `tlk_sdl.exe` run under Wine with the same arguments as the Linux builds
+(`docs/VERIFYING.md`).
+
 Run:
 
     build/tlk_sdl --rom "/path/to/Lion King, The (USA).sfc"
@@ -80,7 +91,8 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     pad_start = start
 
 Packaging: `scripts/package.sh` builds `dist/TLKRecomp-linux-x86_64.tar.gz` (binary + README + license notes, no ROM
-and no game data). `cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
+and no game data). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` the same way from the MinGW
+cross build (`build-win/`). `cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
 
 ## Repository layout
 

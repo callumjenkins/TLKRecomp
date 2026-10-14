@@ -41,6 +41,7 @@ The level tapes start from the debug-menu level select (`tools/re/level_select.m
 | All Bugs | `scripts/check_allbugs.sh` | `ALLBUGS PASS` |
 | Remap / menu | `SDL_VIDEO_DRIVER=dummy build/tlk_sdl --rom <rom> --no-audio --selftest-remap` (under Xvfb the virtual pad's events don't arrive) | `PASS (0 failed)` |
 | Exit widths | `scripts/check_exit_mx.py` | 0 `WRONG` |
+| Windows build | `build-win/tlk_headless.exe` (README, MinGW cross build) under Wine, same arguments as `build/tlk_headless`: standard set default and `--lle`, play tapes, save/load, All Bugs `--ram-log` | same frame/WRAM hashes as Linux; RAM log byte-identical (`cmp`) |
 | Window | run `tlk_sdl` and look | the right picture (one change once passed every hash with a black window) |
 
 Expected hashes on the current tree: frame 600 `57ccb8d5b24918fd`, 3000 `89a48d6c4f12621b`, 6987M 1200
