@@ -1,0 +1,95 @@
+diff --color -ruN a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py	2026-10-12 13:46:16.329227064 -0600
++++ b/recompiler/v2/emit_function.py	2026-10-12 14:02:02.730628466 -0600
+@@ -55,6 +55,66 @@
+ )
+ 
+ 
++
++# TLK task U: pushed-frame RTS calls. `rts_call <site_pc24> return:<pc24>` in a
++# cfg names an RTS whose popped frame was pushed by the routine itself
++# (`PEA <ret-1> / ... / DEC / PHA / RTS`): it calls the pushed target, which
++# returns through the PEA frame to <ret> inside the same routine (`frame:3`:
++# PHK / PEA frame, the target RTLs). Emitted as a
++# paired call on the pushed frame plus a goto to the compiled continuation.
++_TLK_RTS_CALLS = None
++
++
++def _tlk_rts_calls() -> Dict[int, Tuple[int, int]]:
++    global _TLK_RTS_CALLS
++    if _TLK_RTS_CALLS is None:
++        _TLK_RTS_CALLS = {}
++        d = os.environ.get('SNESRECOMP_TLK_CFG_DIR')
++        if d:
++            for cfgp in sorted(pathlib.Path(d).glob('*.cfg')):
++                for line in cfgp.read_text().splitlines():
++                    t = line.split('#', 1)[0].split()
++                    if (len(t) in (3, 4) and t[0] == 'rts_call'
++                            and t[2].startswith('return:')):
++                        frame = 2
++                        if len(t) == 4 and t[3].startswith('frame:'):
++                            frame = int(t[3][6:])
++                        _TLK_RTS_CALLS[int(t[1], 16) & 0xFFFFFF] = (
++                            int(t[2][7:], 16) & 0xFFFFFF, frame)
++    return _TLK_RTS_CALLS
++
++
++def _tlk_rts_call_lines(op, addr, local_labels) -> Optional[List[str]]:
++    if not isinstance(op, Return) or op.long or op.interrupt or addr is None:
++        return None
++    site = addr & 0xFFFFFF
++    rc = _tlk_rts_calls().get(site)
++    if rc is None:
++        return None
++    ret, frame = rc
++    gotos = []
++    for m in (0, 1):
++        for x in (0, 1):
++            lab = f"L_{ret & 0xFFFF:04X}_M{m}X{x}"
++            if lab in local_labels:
++                gotos.append(f"  if (cpu->m_flag == {m} && cpu->x_flag == {x}) goto {lab};")
++    return [
++        f"{{ /* TLK task U: pushed-frame RTS call at ${site:06X}, continuation ${ret:06X} */",
++        "  cpu->S = (uint16)(cpu->S + 1);",
++        "  uint16 _rc_lo = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
++        "  cpu->S = (uint16)(cpu->S + 1);",
++        "  uint16 _rc_hi = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
++        "  uint32 _rc_t = ((uint32)cpu->PB << 16) | (uint32)((((_rc_hi << 8) | _rc_lo) + 1u) & 0xFFFFu);",
++        f"  RecompReturn _rc_r = cpu_dispatch_call_pc_pushed(cpu, _rc_t, 0x{site:06x}u, {frame}, NULL);",
++        "  if (_rc_r != RECOMP_RETURN_NORMAL) {",
++        "    cpu_trace_mark_nlr_exit(BD_EXIT_KIND_SKIP_PROPAGATION);",
++        "return (RecompReturn)((int)_rc_r - 1);",
++        "  }",
++    ] + gotos + [
++        f"return interp_tier_dispatch_balanced(cpu, 0x{ret:06x}u, 0x{site:06x}u, _entry_s, _hrv, false);",
++        "}",
++    ]
++
+ def _label_for(key: DecodeKey) -> str:
+     """C label name for a block keyed by (pc, m, x)."""
+     pc = key.pc & 0xFFFF
+@@ -1812,7 +1872,10 @@
+                                 )
+                         block_terminated = True
+                 elif isinstance(op, Return):
+-                    for ln in emit_op(op, getattr(di_insn, 'addr', None)):
++                    _tlk_rc = _tlk_rts_call_lines(
++                        op, getattr(di_insn, 'addr', None), local_labels)
++                    for ln in (_tlk_rc if _tlk_rc is not None
++                               else emit_op(op, getattr(di_insn, 'addr', None))):
+                         lines.append(ln)
+                     block_terminated = True
+                 elif isinstance(op, IndirectGoto):
+diff --color -ruN a/tools/v2_emit.py b/tools/v2_emit.py
+--- a/tools/v2_emit.py	2026-10-12 13:46:16.330822279 -0600
++++ b/tools/v2_emit.py	2026-10-12 13:46:42.345118603 -0600
+@@ -232,6 +232,9 @@
+         help="entry-PC range per bank translation unit (default: 0x800; "
+              "0 disables sharding)")
+     args = parser.parse_args()
++    # TLK task U: emit_function reads `rts_call` lines from the cfgs.
++    if getattr(args, 'cfg_dir', None):
++        os.environ['SNESRECOMP_TLK_CFG_DIR'] = str(args.cfg_dir)
+     if args.analysis_backend == "python":
+         parser.error("the Python analyzer was retired; the native analyzer "
+                      "is the only one (drop --analysis-backend python)")

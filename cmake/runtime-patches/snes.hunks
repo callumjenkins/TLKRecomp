@@ -1,0 +1,175 @@
+file: runner/src/snes/snes.c
+
+# Task I: NTSC short scanline. On a non-interlaced NTSC field with the field
+# flag set, line 240 is 1360 master clocks instead of 1364 (bsnes
+# Counter/lineclocks), so fields alternate 357368 and 357364 clocks (average
+# 357366, which is what common_rtl.hunks maps the SPC clock against). The
+# pinned beam always walks 1364, so every second field the CPU got 4 clocks
+# bsnes does not have, and the CPU drifted 2 clocks per frame against the SPC
+# (3,300 by poll 1660 of TAS 6987M). The field flag is host state (not in the
+# frozen savestate blob): it starts long at power-on and flips at each V=0.
+@@ short-line-state
+<<<<
+int snes_frame_counter;
+====
+int snes_frame_counter;
+static bool s_short_field;  /* Task I: this field's line 240 is 1360 clocks */
+static inline uint32_t snes_line_clocks(const Snes *snes, uint32_t v) {
+  return (v == 240u && s_short_field && !(snes->ppu && PPU_interlace(snes->ppu)))
+      ? 1360u : 1364u;
+}
+>>>>
+
+@@ short-line-span
+<<<<
+    uint32_t span = 1364u - h;
+====
+    const uint32_t line_clocks = snes_line_clocks(snes, v);
+    if (h >= line_clocks) h = line_clocks - 1u;  /* entered mid-line on a long field */
+    uint32_t span = line_clocks - h;
+>>>>
+
+@@ short-line-irq-wrap
+<<<<
+        if (h >= 1364u) {
+          h = 0; v++; if (v >= 262u) v = 0;
+====
+        if (h >= line_clocks) {
+          h = 0; v++; if (v >= 262u) { v = 0; s_short_field = !s_short_field; }
+>>>>
+
+@@ short-line-wrap
+<<<<
+    if (h >= 1364u) {
+      h = 0;
+      v++;
+      if (v == 225u) { snes->rdnmiPending = true; ppu_rasterFieldBoundary(); }
+      if (v >= 262u) {
+        v = 0;
+====
+    if (h >= line_clocks) {
+      h = 0;
+      v++;
+      if (v == 225u) { snes->rdnmiPending = true; ppu_rasterFieldBoundary(); }
+      if (v >= 262u) {
+        v = 0;
+        s_short_field = !s_short_field;
+>>>>
+
+@@ short-line-until-line
+<<<<
+  if (v == line && h == 0u) return 0;
+  lines = (line > v) ? (line - v) : (262u - v + line);
+  return lines * 1364u - h;
+}
+====
+  if (v == line && h == 0u) return 0;
+  lines = (line > v) ? (line - v) : (262u - v + line);
+  {
+    bool shortf = s_short_field;
+    uint32_t total = 0, cur = v;
+    for (uint32_t i = 0; i < lines; i++) {
+      total += (cur == 240u && shortf && !(snes->ppu && PPU_interlace(snes->ppu))) ? 1360u : 1364u;
+      if (++cur >= 262u) { cur = 0; shortf = !shortf; }
+    }
+    (void)lines;
+    return total - h;
+  }
+}
+>>>>
+
+# Task I: enabling NMI ($4200 bit 7, 0 -> 1) while the vblank NMI flag is still
+# set (RDNMI not yet read) raises an NMI at once on hardware; the pinned
+# runtime left this as a TODO and only ever delivered NMI at V=225. TLK ends
+# each level load with NMI off and turns it back on wherever the load
+# finishes. On 6987M poll 638 that is 39,000 clocks into vblank: bsnes takes
+# the NMI there, the runtime waited a whole extra field, and the level started
+# one frame late (one extra lag frame on every tape). Latch the request and arm
+# an immediate interpreter deadline so the frame driver (beam_frame_driver.hunks)
+# regains control at the next instruction boundary and delivers the NMI.
+@@ late-nmi-latch
+<<<<
+      snes->nmiEnabled = val & 0x80;
+      if(!snes->hIrqEnabled && !snes->vIrqEnabled) {
+        snes->inIrq = false;
+      }
+====
+      {
+        const bool nmi_was_enabled = snes->nmiEnabled;
+        snes->nmiEnabled = val & 0x80;
+        if (!nmi_was_enabled && snes->nmiEnabled && snes->rdnmiPending &&
+            snes->vPos >= 225u) {
+          extern void interp_bridge_set_master_deadline(uint64_t master_clock);
+          s_late_nmi = true;
+          interp_bridge_set_master_deadline(1);  /* yield at the next boundary */
+        }
+      }
+      if(!snes->hIrqEnabled && !snes->vIrqEnabled) {
+        snes->inIrq = false;
+      }
+>>>>
+
+@@ late-nmi-state
+<<<<
+static bool s_short_field;  /* Task I: this field's line 240 is 1360 clocks */
+====
+static bool s_short_field;  /* Task I: this field's line 240 is 1360 clocks */
+static bool s_late_nmi;     /* Task I: NMI enabled mid-vblank with the flag set */
+bool snes_take_late_nmi(void) {
+  const bool pending = s_late_nmi;
+  s_late_nmi = false;
+  return pending;
+}
+>>>>
+
+# Task N: export the line length (short line 240) for the DRAM refresh
+# position in common_cpu_infra.c (dram-refresh-at-beam-position).
+@@ short-line-export
+<<<<
+static inline uint32_t snes_line_clocks(const Snes *snes, uint32_t v) {
+  return (v == 240u && s_short_field && !(snes->ppu && PPU_interlace(snes->ppu)))
+      ? 1360u : 1364u;
+}
+====
+static inline uint32_t snes_line_clocks(const Snes *snes, uint32_t v) {
+  return (v == 240u && s_short_field && !(snes->ppu && PPU_interlace(snes->ppu)))
+      ? 1360u : 1364u;
+}
+uint32_t tlk_snes_line_clocks(const Snes *snes, uint32_t v) { return snes_line_clocks(snes, v); }
+>>>>
+
+# Task S: savestates. The short-scanline field flag and a pending late NMI are
+# host statics outside snes_saveload; the TLK savestate (runner/tlk_savestate.c)
+# stores them next to the guest blob.
+@@ savestate-short-field-export
+<<<<
+uint32_t tlk_snes_line_clocks(const Snes *snes, uint32_t v) { return snes_line_clocks(snes, v); }
+====
+uint32_t tlk_snes_line_clocks(const Snes *snes, uint32_t v) { return snes_line_clocks(snes, v); }
+int tlk_snes_short_field_get(void) { return s_short_field ? 1 : 0; }
+void tlk_snes_short_field_set(int v) { s_short_field = v != 0; }
+int tlk_snes_late_nmi_get(void) { return s_late_nmi ? 1 : 0; }
+void tlk_snes_late_nmi_set(int v) { s_late_nmi = v != 0; }
+>>>>
+
+# Task Y: the legacy static-recomp $4212 polling tick (hPos += 64 per read,
+# beamMasterLast unchanged, so the beam stays ahead of the master clock) runs
+# only while g_interp_apu_driving is 0, i.e. for reads from compiled code. That
+# made the picture depend on which code is compiled: --lle runs the main thread
+# on the interpreter (no tick) but the frame-driver interrupt handlers compiled
+# (tick: NMI H-blank wait $C0A2EC), while default mode also ticked in compiled
+# main-thread code (joypad wait $C0A073, called from $C5017D). The idle run then
+# left --lle at f2557 (DRAM refresh 64 clocks off) and showed a different
+# picture f7085-~10000. The tick is part of the calibrated timeline (removing it
+# everywhere desyncs TAS 6987M at poll 1785), so keep it exactly where --lle
+# has it: compiled code inside a frame-driver interrupt (beam_frame_driver.hunks
+# interrupt-depth). Compiled main-thread code now polls like the interpreter.
+@@ 4212-poll-tick-interrupt-only
+<<<<
+      if (!g_interp_apu_driving)
+        snes_advance_beam(snes, 64, false);
+====
+      extern int tlk_frame_interrupt_depth;
+      if (!g_interp_apu_driving && tlk_frame_interrupt_depth > 0)
+        snes_advance_beam(snes, 64, false);
+>>>>

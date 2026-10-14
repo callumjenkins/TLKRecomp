@@ -1,0 +1,80 @@
+# Task I: deliver the NMI that snes.hunks (late-nmi-latch) raises when a game
+# enables NMI during vblank with the NMI flag still set. The $4200 write arms an
+# immediate deadline, so the interpreter returns here at the next instruction
+# boundary; take the NMI before anything else, exactly like the field-start one.
+# A request left over at a field boundary is dropped: that field's own NMI is
+# about to run.
+file: runner/src/beam_frame_driver.c
+
+@@ late-nmi-decl
+<<<<
+void snes_beam_frame_driver_run_frame(void) {
+====
+bool snes_take_late_nmi(void);  /* snes.hunks */
+
+void snes_beam_frame_driver_run_frame(void) {
+>>>>
+
+@@ late-nmi-clear-at-field-start
+<<<<
+  if (!booting && g_snes->nmiEnabled) {
+    g_snes->inNmi = true;
+====
+  (void)snes_take_late_nmi();
+  if (!booting && g_snes->nmiEnabled) {
+    g_snes->inNmi = true;
+>>>>
+
+@@ late-nmi-deliver
+<<<<
+      if (interp_bridge_lle_took_wai())
+        s_wai_halted = true;
+    }
+====
+      if (interp_bridge_lle_took_wai())
+        s_wai_halted = true;
+    }
+    if (snes_take_late_nmi() && g_snes->nmiEnabled &&
+        g_cpu.master_cycles < frame_end) {
+      s_wai_halted = false;
+      g_snes->inNmi = true;
+      run_interrupt(nmi_vector(), frame_end);
+      g_snes->inNmi = false;
+      continue;
+    }
+>>>>
+
+# Task S: savestates. The driver's resume PC and WAI halt are host statics; the
+# TLK savestate (runner/tlk_savestate.c) stores them next to the guest blob.
+@@ savestate-driver-export
+<<<<
+static bool s_wai_halted;
+
+====
+static bool s_wai_halted;
+
+uint32_t tlk_bfd_resume_pc_get(void) { return s_resume_pc; }
+void tlk_bfd_resume_pc_set(uint32_t pc) { s_resume_pc = pc; }
+int tlk_bfd_wai_halted_get(void) { return s_wai_halted ? 1 : 0; }
+void tlk_bfd_wai_halted_set(int v) { s_wai_halted = v != 0; }
+
+>>>>
+
+# Task Y: count frame-driver interrupts in progress, for the $4212 polling tick
+# (snes.hunks 4212-poll-tick-interrupt-only).
+@@ interrupt-depth
+<<<<
+static void run_interrupt(uint32_t vector, uint64_t deadline) {
+====
+int tlk_frame_interrupt_depth;
+static void run_interrupt(uint32_t vector, uint64_t deadline) {
+>>>>
+
+@@ interrupt-depth-run
+<<<<
+  (void)interp_bridge_run_interrupt(&g_cpu, vector);
+====
+  tlk_frame_interrupt_depth++;
+  (void)interp_bridge_run_interrupt(&g_cpu, vector);
+  tlk_frame_interrupt_depth--;
+>>>>

@@ -1,0 +1,41 @@
+diff -ruN a/recompiler/v2/aot_pace.py b/recompiler/v2/aot_pace.py
+--- a/recompiler/v2/aot_pace.py	2026-10-12 06:45:06.829797264 -0600
++++ b/recompiler/v2/aot_pace.py	2026-10-12 06:45:17.596998749 -0600
+@@ -289,3 +289,20 @@
+                      f"((int)({cyc}) - {L + len(acc)}) : 0)")
+     mc = " + ".join([f"{const}u"] + terms)
+     return cyc, mc, not terms and not dyn_c
++
++
++def insn_bus_c(op: int, m: int, x: int, operand: int, code_spd: str):
++    """C expression for the master clocks of this instruction's bus bytes
++    (fetches + data/pointer/stack accesses, no internal cycles): where the
++    interpreter's s_interp_bus_master stands at its last access. Used to time
++    an APU-port access at its own bus cycle (task I). None without accesses."""
++    L = length(op, m, x)
++    _, _, acc = model(op, m, x, operand)
++    if not acc:
++        return None
++    try:
++        terms = [f"{L * int(code_spd)}u"]
++    except ValueError:
++        terms = [f"{L}u * ({code_spd})"]
++    terms += [f"aot_spd((uint32_t)({_c(a)}))" for a in acc]
++    return " + ".join(terms)
+diff -ruN a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py	2026-10-12 06:45:06.829893484 -0600
++++ b/recompiler/v2/emit_function.py	2026-10-12 06:45:17.608683534 -0600
+@@ -1534,6 +1534,13 @@
+                     di_insn.opcode, di_insn.m_flag, di_insn.x_flag,
+                     _aot_raw_operand(rom, di_insn), _blk_spd_expr)
+                 _aot_pc = getattr(di_insn, 'addr', 0) & 0xFFFFFF
++                _aot_bus = aot_pace.insn_bus_c(
++                    di_insn.opcode, di_insn.m_flag, di_insn.x_flag,
++                    _aot_raw_operand(rom, di_insn), _blk_spd_expr)
++                if _aot_bus is not None:
++                    # Task N: bus clocks up to the data access, read by the
++                    # APU-port timing in cpu_state.c (cmake/runtime-patches).
++                    lines.append(f"g_aot_bus_mc = {_aot_bus};")
+                 if _aot_static:
+                     _aot_charge = f"aot_pace_point(cpu, {_aot_cyc}u, {_aot_mcx}, 0x{_aot_pc:06X}u)"
+                 else:

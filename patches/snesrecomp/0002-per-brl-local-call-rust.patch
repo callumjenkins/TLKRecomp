@@ -1,0 +1,20 @@
+--- a/recompiler-rs/src/insn.rs
++++ b/recompiler-rs/src/insn.rs
+@@ -560,6 +560,17 @@
+         _ => 0,
+     };
+ 
++    // PER+BRL local call (`PER $+2 / BRL helper`, helper returns with RTS):
++    // PER pushes exactly the return-1 frame a JSR at the BRL would push, so
++    // the pair decodes as a frame-neutral 3-byte NOP plus `JSR helper`.
++    // Opcode bytes are kept, so the cycle model still charges PER and BRL.
++    if op == 0x62 && word() == 0x0002 && data.get(offset + 3) == Some(&0x82) {
++        return Some(Insn::new((bank << 16) | pc, op, "NOP", Imp, 0, length));
++    }
++    if op == 0x82 && offset >= 3 && data[offset - 3..offset] == [0x62, 0x02, 0x00] {
++        return Some(Insn::new((bank << 16) | pc, op, "JSR", Abs, operand, length));
++    }
++
+     Some(Insn::new(
+         (bank << 16) | pc,
+         op,

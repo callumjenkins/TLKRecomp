@@ -1,0 +1,20 @@
+--- a/recompiler/snes65816.py
++++ b/recompiler/snes65816.py
+@@ -497,6 +497,17 @@
+     elif mode == IMM:              operand = b(1) if length == 2 else word()
+     else:                          operand = 0
+ 
++    # PER+BRL local call (`PER $+2 / BRL helper`, helper returns with RTS):
++    # PER pushes exactly the return-1 frame a JSR at the BRL would push, so
++    # the pair decodes as a frame-neutral 3-byte NOP plus `JSR helper`.
++    # Opcode bytes are kept, so the cycle model still charges PER and BRL.
++    if op == 0x62 and word() == 0x0002 and offset + 3 < len(data) \
++            and data[offset + 3] == 0x82:
++        return Insn((bank << 16) | pc, op, 'NOP', IMP, 0, length)
++    if op == 0x82 and offset >= 3 and data[offset - 3] == 0x62 \
++            and data[offset - 2] == 0x02 and data[offset - 1] == 0x00:
++        return Insn((bank << 16) | pc, op, 'JSR', ABS, operand, length)
++
+     return Insn((bank << 16) | pc, op, mnem, mode, operand, length)
+ 
+ 

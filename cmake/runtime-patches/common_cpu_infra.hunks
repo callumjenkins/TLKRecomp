@@ -1,0 +1,168 @@
+# Task M: exact AOT pacing (runner/aot_pace.c) needs the master clock at which
+# the next DRAM refresh line is charged, to run its slow path at the same
+# instruction boundary as the interpreter's per-opcode snes_refresh_charge().
+# Export only; no behaviour change. Task N: follows task I's beam-position
+# refresh (hunk below).
+file: runner/src/common_cpu_infra.c
+
+@@ refresh-next-export
+<<<<
+void snes_refresh_exempt(void) { g_refresh_charged_upto = g_cpu.master_cycles; }
+====
+void snes_refresh_exempt(void) { g_refresh_charged_upto = g_cpu.master_cycles; }
+/* Task N: H position at master t and the length of that line, from the
+ * beam. Compiled code walks the beam lazily, so t can lie a line before or
+ * after the beam's last synced point; stepping across a line boundary uses
+ * the real line length (short line 240, snes.hunks), not 1364, so the
+ * refresh lands where the interpreter (beam synced every opcode) puts it. */
+uint32_t tlk_snes_line_clocks(const Snes *snes, uint32_t v);
+static uint64_t tlk_refresh_h_at(uint64_t t, uint64_t *line_len) {
+  const uint64_t bml = g_snes->beamMasterLast;
+  uint64_t h = g_snes->hPos;
+  uint32_t v = g_snes->vPos;
+  uint64_t len = tlk_snes_line_clocks(g_snes, v);
+  if (t >= bml) {
+    uint64_t d = t - bml;
+    for (int i = 0; i < 4 && h + d >= len; i++) {
+      d -= len - h; h = 0; v = v + 1u >= 262u ? 0u : v + 1u;
+      len = tlk_snes_line_clocks(g_snes, v);
+    }
+    h = (h + d) % len;
+  } else {
+    uint64_t back = bml - t;
+    for (int i = 0; i < 4 && back > h; i++) {
+      back -= h; v = v ? v - 1u : 261u;
+      len = tlk_snes_line_clocks(g_snes, v); h = len;
+    }
+    h = back <= h ? h - back : (h + 1364u - back % 1364u) % 1364u;
+  }
+  if (line_len) *line_len = len;
+  return h;
+}
+static uint64_t tlk_refresh_to_next(uint64_t t) {
+  uint64_t len;
+  uint64_t h = tlk_refresh_h_at(t, &len);
+  /* h == 538: the refresh at t was already taken, next one a line later. */
+  return h < 538u ? 538u - h : len - h + 538u;
+}
+uint64_t tlk_refresh_next_master(void) {
+  if (g_refresh_charged_upto == 0) return 0;
+  if (g_snes) {
+    /* Task I model (dram-refresh-at-beam-position): due at the next H=538
+     * crossing after g_refresh_charged_upto. Report a few clocks early (an
+     * early slow path only re-predicts). */
+    uint64_t t = g_refresh_charged_upto;
+    uint64_t r = t + tlk_refresh_to_next(t);
+    return r > t + 8u ? r - 8u : t + 1u;
+  }
+  return g_refresh_charged_upto + (1364u - s_refresh_phase % 1364u);
+}
+>>>>
+
+# Task I: DRAM refresh once per scanline at its beam position.
+#
+# The pinned tax charges 40 clocks after every 1364 clocks of *other* time:
+# the 40 it adds is excluded from the phase, so it fires every 1404 clocks
+# (255 refreshes per 262-line frame instead of 262, ~300 free clocks a frame),
+# and at an arbitrary point of the line. bsnes stalls the CPU 40 clocks when
+# the beam passes H=538 (CPU rev 2) on every line. Where the stall lands
+# decides which side of a CPU<->SPC handshake edge an access falls, so it
+# feeds the lag-frame divergence against bsnes (INTEGRATE.md).
+#
+# Fix: take the H position of the last charged point from the beam
+# (hPos + time since beamMasterLast) and charge 40 clocks for each H=538
+# crossing up to now; the stall itself moves the beam, so successive
+# refreshes are exactly one line apart. Without a beam (no g_snes) fall back to
+# the old phase accumulator.
+
+@@ dram-refresh-at-beam-position
+<<<<
+  uint64_t delta = m - g_refresh_charged_upto;
+  s_refresh_phase += delta;
+  uint64_t lines = s_refresh_phase / 1364u;
+====
+  uint64_t delta = m - g_refresh_charged_upto;
+  if (g_snes && delta <= 4096u * 1364u) {
+    uint64_t t = g_refresh_charged_upto;
+    uint64_t end = m;
+    /* Next H=538 crossing after t, from the beam (task N: tlk_refresh_to_next
+     * steps across lines with their real length). */
+    uint64_t to_next = tlk_refresh_to_next(t);
+    while (t + to_next <= end) {
+      t += to_next;
+      end += 40u;          /* the stall delays everything after it */
+      t += 40u;
+      to_next = 1364u - 40u;
+    }
+    g_cpu.master_cycles = end;
+    s_refresh_phase = 0;
+    g_refresh_charged_upto = g_cpu.master_cycles;
+    return;
+  }
+  s_refresh_phase += delta;
+  uint64_t lines = s_refresh_phase / 1364u;
+>>>>
+
+# Task Q: compiled-code fibers (runner/tlk_fiber.c) keep a suspended compiled
+# call chain alive on its own C stack while the frame driver runs interrupts
+# and the next field on the host stack. The host-side call bookkeeping (the
+# recomp call stack and its per-slot entry-S records, the tail-call return
+# context, the interrupt-context depth) belongs to whichever stack is running,
+# so the fiber module saves and restores it at every switch.
+
+@@ fiber-call-context-export
+<<<<
+void RecompStackPop(void) { recomp_stack_pop_common(1); }
+====
+void RecompStackPop(void) { recomp_stack_pop_common(1); }
+
+typedef struct TlkInfraCtx {
+  int top;
+  const char *stack[RECOMP_STACK_DEPTH];
+  uint16_t entry_s[RECOMP_STACK_DEPTH];
+  uint8_t entry_s_valid[RECOMP_STACK_DEPTH];
+  uint8_t entry_return_frame[RECOMP_STACK_DEPTH];
+  uint8_t entry_tailcall[RECOMP_STACK_DEPTH];
+  uint8_t tc_valid;
+  uint16_t tc_entry_s;
+  uint8_t tc_hrv;
+  unsigned irq_depth;
+  const char *last;
+  int wlog_slot;
+  uint8_t hrv;
+} TlkInfraCtx;
+size_t tlk_infra_ctx_size(void) { return sizeof(TlkInfraCtx); }
+void tlk_infra_ctx_save(void *buf) {
+  TlkInfraCtx *c = (TlkInfraCtx *)buf;
+  c->top = g_recomp_stack_top;
+  memcpy(c->stack, g_recomp_stack, sizeof c->stack);
+  memcpy(c->entry_s, g_cpu_entry_s, sizeof c->entry_s);
+  memcpy(c->entry_s_valid, g_cpu_entry_s_valid, sizeof c->entry_s_valid);
+  memcpy(c->entry_return_frame, g_cpu_entry_return_frame, sizeof c->entry_return_frame);
+  memcpy(c->entry_tailcall, g_cpu_entry_tailcall, sizeof c->entry_tailcall);
+  c->tc_valid = g_tailcall_context_valid;
+  c->tc_entry_s = g_tailcall_entry_s;
+  c->tc_hrv = g_tailcall_hrv;
+  c->irq_depth = g_interrupt_context_depth;
+  c->last = g_last_recomp_func;
+  c->wlog_slot = g_wlog_aot_slot;
+  c->hrv = g_cpu.host_return_valid;
+}
+void tlk_infra_ctx_restore(const void *buf) {
+  const TlkInfraCtx *c = (const TlkInfraCtx *)buf;
+  g_recomp_stack_top = c->top;
+  memcpy(g_recomp_stack, c->stack, sizeof c->stack);
+  memcpy(g_cpu_entry_s, c->entry_s, sizeof c->entry_s);
+  memcpy(g_cpu_entry_s_valid, c->entry_s_valid, sizeof c->entry_s_valid);
+  memcpy(g_cpu_entry_return_frame, c->entry_return_frame, sizeof c->entry_return_frame);
+  memcpy(g_cpu_entry_tailcall, c->entry_tailcall, sizeof c->entry_tailcall);
+  g_tailcall_context_valid = c->tc_valid;
+  g_tailcall_entry_s = c->tc_entry_s;
+  g_tailcall_hrv = c->tc_hrv;
+  g_interrupt_context_depth = c->irq_depth;
+  g_last_recomp_func = c->last;
+  g_wlog_aot_slot = c->wlog_slot;
+  g_cpu.host_return_valid = c->hrv;
+}
+int tlk_infra_tailcall_pending(void) { return g_tailcall_context_valid; }
+>>>>

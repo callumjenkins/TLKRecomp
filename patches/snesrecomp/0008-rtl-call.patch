@@ -1,0 +1,53 @@
+diff --color -ruN a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py	2026-10-12 17:43:07.386020941 -0600
++++ b/recompiler/v2/emit_function.py	2026-10-12 17:43:07.397706191 -0600
+@@ -85,13 +85,33 @@
+ 
+ 
+ def _tlk_rts_call_lines(op, addr, local_labels) -> Optional[List[str]]:
+-    if not isinstance(op, Return) or op.long or op.interrupt or addr is None:
++    if not isinstance(op, Return) or op.interrupt or addr is None:
+         return None
+     site = addr & 0xFFFFFF
+     rc = _tlk_rts_calls().get(site)
+     if rc is None:
+         return None
+     ret, frame = rc
++    # TLK task X: an RTL site (`PHK / PEA <ret-1> / <push 24-bit target-1> /
++    # RTL`) pops the bank byte too; the target is in that bank.
++    if op.long:
++        pop_t = [
++            "  cpu->S = (uint16)(cpu->S + 1);",
++            "  uint16 _rc_lo = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
++            "  cpu->S = (uint16)(cpu->S + 1);",
++            "  uint16 _rc_hi = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
++            "  cpu->S = (uint16)(cpu->S + 1);",
++            "  uint32 _rc_bk = (uint32)cpu_read8(cpu, 0x00, cpu->S);",
++            "  uint32 _rc_t = (_rc_bk << 16) | (uint32)((((_rc_hi << 8) | _rc_lo) + 1u) & 0xFFFFu);",
++        ]
++    else:
++        pop_t = [
++            "  cpu->S = (uint16)(cpu->S + 1);",
++            "  uint16 _rc_lo = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
++            "  cpu->S = (uint16)(cpu->S + 1);",
++            "  uint16 _rc_hi = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
++            "  uint32 _rc_t = ((uint32)cpu->PB << 16) | (uint32)((((_rc_hi << 8) | _rc_lo) + 1u) & 0xFFFFu);",
++        ]
+     gotos = []
+     for m in (0, 1):
+         for x in (0, 1):
+@@ -99,12 +119,8 @@
+             if lab in local_labels:
+                 gotos.append(f"  if (cpu->m_flag == {m} && cpu->x_flag == {x}) goto {lab};")
+     return [
+-        f"{{ /* TLK task U: pushed-frame RTS call at ${site:06X}, continuation ${ret:06X} */",
+-        "  cpu->S = (uint16)(cpu->S + 1);",
+-        "  uint16 _rc_lo = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
+-        "  cpu->S = (uint16)(cpu->S + 1);",
+-        "  uint16 _rc_hi = (uint16)cpu_read8(cpu, 0x00, cpu->S);",
+-        "  uint32 _rc_t = ((uint32)cpu->PB << 16) | (uint32)((((_rc_hi << 8) | _rc_lo) + 1u) & 0xFFFFu);",
++        f"{{ /* TLK task U: pushed-frame RT{'L' if op.long else 'S'} call at ${site:06X}, continuation ${ret:06X} */",
++    ] + pop_t + [
+         f"  RecompReturn _rc_r = cpu_dispatch_call_pc_pushed(cpu, _rc_t, 0x{site:06x}u, {frame}, NULL);",
+         "  if (_rc_r != RECOMP_RETURN_NORMAL) {",
+         "    cpu_trace_mark_nlr_exit(BD_EXIT_KIND_SKIP_PROPAGATION);",

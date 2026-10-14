@@ -1,0 +1,125 @@
+# Task I: SPC700 opcodes take effect on their last base cycle, not their first.
+#
+# LakeSnes' apu_cycle runs a whole SPC opcode (all reads and writes) on the
+# opcode's first cycle and then idles for the rest. On hardware (and bsnes)
+# the data access is the last bus cycle: `MOV $F4,A` writes the CPU-visible
+# port 3 cycles later, `MOV A,$F4` samples the CPU's port at its end. So every
+# CPU<->SPC handshake round trip came out several SPC cycles short. TLK's
+# streaming sample upload ($C21F84: CMP $2140 / BEQ, one pair per echo) ran
+# ~15% faster per byte pair than in BizHawk (812-916 vs 956-1004 master clocks),
+# moved more data per frame and changed which frames lag (6987M poll 1661).
+#
+# Fix: at an opcode boundary count down the opcode's base cycles and run it on
+# the last one; a taken branch's extra cycles idle afterwards. Bit 7 of
+# cpuCyclesLeft marks "counting down to execute" (opcodes take <= 12 cycles),
+# so the frozen savestate layout is unchanged and old states still load.
+file: runner/src/snes/apu.c
+
+@@ apu-cycle-execute-on-last-cycle
+<<<<
+  if(apu->cpuCyclesLeft == 0) {
+    /* Sample PC right BEFORE running the opcode — so PC reflects the
+     * instruction we're about to execute, not the post-opcode PC. */
+#if SNESRECOMP_SPC_DIAGNOSTICS
+    g_spc_pc_histogram[apu->spc->pc]++;
+    if (apu->spc->pc > g_spc_pc_max_seen) g_spc_pc_max_seen = apu->spc->pc;
+#endif
+    apu->cpuCyclesLeft = spc_runOpcode(apu->spc);
+  }
+  apu->cpuCyclesLeft--;
+====
+  if(apu->cpuCyclesLeft == 0) {
+    int base = spc_peekOpcodeCycles(apu->spc);
+    if (base < 1) base = 1;
+    apu->cpuCyclesLeft = (uint8_t)(0x80 | base);
+  }
+  if(apu->cpuCyclesLeft & 0x80) {
+    int base_left = apu->cpuCyclesLeft & 0x7f;
+    if(base_left == 1) {
+      int base = spc_peekOpcodeCycles(apu->spc);
+      if (base < 1) base = 1;
+      /* Sample PC right BEFORE running the opcode — so PC reflects the
+       * instruction we're about to execute, not the post-opcode PC. */
+#if SNESRECOMP_SPC_DIAGNOSTICS
+      g_spc_pc_histogram[apu->spc->pc]++;
+      if (apu->spc->pc > g_spc_pc_max_seen) g_spc_pc_max_seen = apu->spc->pc;
+#endif
+      int used = spc_runOpcode(apu->spc);
+      int extra = used > base ? used - base : 0;
+      apu->cpuCyclesLeft = (uint8_t)(extra + 1);
+    }
+  }
+  apu->cpuCyclesLeft--;
+  if(apu->cpuCyclesLeft == 0x80) apu->cpuCyclesLeft = 0;
+>>>>
+
+@@ apu-peek-decl
+<<<<
+void apu_cycle(Apu* apu) {
+====
+int spc_peekOpcodeCycles(Spc* spc);  /* spc.hunks */
+
+void apu_cycle(Apu* apu) {
+>>>>
+
+# Task I: anchor the CPU->SPC port timeline at the guest clock, not wherever
+# the SPC happened to be at the first port write. Until that write the SPC is
+# paced by the legacy relative catch-up, which in tlk_headless leaves it 4494
+# SPC cycles (~0.26 frame) behind guest time (first write: guest 79914, SPC
+# 75420). Every later port event kept that phase error, so the sound driver's
+# timer ticks sat at a different point of each CPU frame than on hardware,
+# where CPU and SMP leave reset together. On the first anchor, if the SPC is
+# behind, map guest time 1:1 onto SPC cycles; the SPC then runs forward to the
+# write's guest time before applying it.
+@@ apu-port-anchor-at-guest-clock
+<<<<
+  if (!apu->portTimeValid || guest_cycle < apu->portLastGuest) {
+    apu->portGuestAnchor = guest_cycle;
+    apu->portTargetAnchor = apu->portClock;
+    apu->portTimeValid = true;
+====
+  if (!apu->portTimeValid || guest_cycle < apu->portLastGuest) {
+    const bool first = !apu->portTimeValid;
+    apu->portGuestAnchor = guest_cycle;
+    apu->portTargetAnchor = apu->portClock;
+    if (first && apu->portClock < guest_cycle &&
+        guest_cycle - apu->portClock < 65536u)  /* boot, not a state load */
+      apu->portTargetAnchor = guest_cycle;
+    apu->portTimeValid = true;
+>>>>
+
+# Task I: DSP sample phase. LakeSnes runs a whole DSP sample (all eight voices,
+# ENDX/ENVX updates, KON/KOFF) on one SPC cycle out of every 32, at cycles
+# 0, 32, 64... after reset. bsnes (blargg's DSP) spreads that work over the 32
+# cycles, so the point where the sound driver sees a voice-end (ENDX, read
+# every tick at SPC $0976) or a key-on take effect falls a few cycles later.
+# TLK's driver changes how long its tick runs on those flags, and that decides
+# the latency of CPU sound commands ($C22388) and with it lag frames (6987M
+# poll 1738: command acknowledged after 3548 vs 7088 master clocks in bsnes).
+# Starting the counter at 25 runs each DSP sample on cycle 7 mod 32.
+#
+# Task DSP: 25 is derived from bsnes v115 power-on, not fitted. In bsnes the
+# SMP and DSP leave reset together: SMP::power (sfc/smp/smp.cpp:40) starts at
+# the IPL vector with no reset delay, DSP::power zeroes dsp.clock
+# (sfc/dsp/dsp.cpp:50) and SPC_DSP::reset sets m.phase = 0
+# (sfc/dsp/SPC_DSP.cpp:872). Every SMP bus cycle first calls SMP::step
+# (sfc/smp/timing.cpp:35), which runs spc_dsp.run(1) via synchronizeDSP
+# (sfc/smp/smp.cpp:15, sfc/dsp/dsp.cpp:12), i.e. one DSP phase per SPC cycle:
+# SMP cycle j runs DSP phase j mod 32, so a DSP sample period starts (phase 0)
+# on SMP cycles 0, 32, 64... LakeSnes' apu_reset instead sets
+# cpuCyclesLeft = 7 (snesrecomp/runner/src/snes/apu.c:61): the SPC idles 7
+# cycles before its first opcode, so bsnes SMP cycle j is our APU cycle j + 7.
+# Keeping the DSP sample on phase 0 of the SMP's own timeline therefore puts it
+# on our cycle 7 mod 32: (start + 7) & 31 == 0, start = 25. This agrees with
+# the earlier measurement: 25 was the only start value that kept all four TAS
+# replays in sync; 24 and 26 desync 6987M/6781M/4735M at poll 1785, 27/28/31
+# desync 2716M at poll 1775 (INTEGRATE.md).
+@@ apu-dsp-sample-phase
+<<<<
+  apu->dspAdr = 0;
+  apu->cycles = 0;
+====
+  apu->dspAdr = 0;
+  apu->cycles = 25;  /* bsnes DSP phase 0 = SMP cycle 0 = our cycle 7 (7-cycle reset delay) */
+  { const char *e = getenv("TLK_DSP_PHASE"); if (e) apu->cycles = (uint64_t)strtoul(e, NULL, 10); }  /* Task O: experiments */
+>>>>

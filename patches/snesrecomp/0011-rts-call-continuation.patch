@@ -1,0 +1,324 @@
+diff --color -ruN a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+--- a/recompiler/v2/codegen.py	2026-10-13 10:36:58.403438174 -0600
++++ b/recompiler/v2/codegen.py	2026-10-13 10:37:10.436345459 -0600
+@@ -1405,6 +1405,29 @@
+     return f"(((uint32)cpu->PB << 16) | 0x{pc24 & 0xFFFF:04x}u)"
+ 
+ 
++_TLK_PTRCALL_TAIL = None
++
++
++def _tlk_ptrcall_tail_targets(site_pc24: int):
++    """TLK task FF: `ptrcall_tail <site_pc24> targets:<pc24,...>` -- pointers
++    at a PHK+PEA+JML ptrcall site that do not return through the pushed frame
++    (they reach the level loader's S reset). They keep the pre-ptrcall
++    behaviour: a balanced tail dispatch into the interpreter from the site."""
++    global _TLK_PTRCALL_TAIL
++    if _TLK_PTRCALL_TAIL is None:
++        _TLK_PTRCALL_TAIL = {}
++        import os
++        d = os.environ.get('SNESRECOMP_TLK_CFG_DIR')
++        if d:
++            for cfgp in sorted(pathlib.Path(d).glob('*.cfg')):
++                for line in cfgp.read_text().splitlines():
++                    t = line.split('#', 1)[0].split()
++                    if len(t) == 3 and t[0] == 'ptrcall_tail' and t[2].startswith('targets:'):
++                        _TLK_PTRCALL_TAIL[int(t[1], 16) & 0xFFFFFF] = [
++                            int(v, 16) & 0xFFFFFF for v in t[2][8:].split(',') if v]
++    return _TLK_PTRCALL_TAIL.get(site_pc24 & 0xFFFFFF, [])
++
++
+ def _emit_indirect_dispatch(insn) -> List[str]:
+     """Emit a real switch for an indirect JMP/JML/JSR whose static
+     target list the decoder recovered (via cfg `indirect_dispatch` or
+@@ -1654,6 +1677,11 @@
+             for stmt in emitter_helpers.modify_p_via_mirrors(0x30, "sep"):
+                 lines.append(f"    {stmt}")
+             lines.append("  }")
++        if is_call and kind == 'long':
++            for _tt in _tlk_ptrcall_tail_targets(site_pc24):
++                lines.append(f"  if (_target == 0x{_tt:06x}u) {{  /* TLK task FF: ptrcall_tail (no return through the frame) */")
++                lines.append(f"return interp_tier_dispatch_balanced(cpu, _target, 0x{site_pc24:06x}u, _entry_s, _hrv, true);")
++                lines.append("  }")
+         lines.append("  switch (_target) {")
+         # Multiple table slots may resolve to the same target PC (e.g., a
+         # dispatch table with shared/default handlers). The switch keys
+diff --color -ruN a/recompiler/v2/decoder.py b/recompiler/v2/decoder.py
+--- a/recompiler/v2/decoder.py	2026-10-13 08:35:23.080123959 -0600
++++ b/recompiler/v2/decoder.py	2026-10-13 10:37:10.435246082 -0600
+@@ -865,6 +865,36 @@
+                                     unknown_callee_exit_sites))]
+ 
+ 
++# TLK task FF: pushed-frame calls whose continuation is decoded into the
++# calling routine (cfgs in SNESRECOMP_TLK_CFG_DIR); mirrors recompiler-rs
++# decoder.rs tlk_cfg_continuations:
++#   rts_call <site> return:<ret> [frame:N]   RTS / RTL / JML at <site>
++#   rts_return <rts_site> return:<ret> via:<jmp_site>   JMP abs at <jmp_site>
++_TLK_CONTINUATIONS = None
++
++
++def _tlk_rts_call_return(site_pc24: int) -> Optional[int]:
++    global _TLK_CONTINUATIONS
++    if _TLK_CONTINUATIONS is None:
++        _TLK_CONTINUATIONS = {}
++        import os
++        d = os.environ.get('SNESRECOMP_TLK_CFG_DIR')
++        if d:
++            for cfgp in sorted(pathlib.Path(d).glob('*.cfg')):
++                for line in cfgp.read_text().splitlines():
++                    t = line.split('#', 1)[0].split()
++                    if len(t) < 3 or not t[2].startswith('return:'):
++                        continue
++                    ret = int(t[2][7:], 16) & 0xFFFFFF
++                    if t[0] == 'rts_call':
++                        _TLK_CONTINUATIONS[int(t[1], 16) & 0xFFFFFF] = ret
++                    elif t[0] == 'rts_return':
++                        for w in t[3:]:
++                            if w.startswith('via:'):
++                                _TLK_CONTINUATIONS[int(w[4:], 16) & 0xFFFFFF] = ret
++    return _TLK_CONTINUATIONS.get(site_pc24 & 0xFFFFFF)
++
++
+ def _labeled_successors(insn: Insn, key: DecodeKey, bank: int,
+                         callee_exit_mx: Optional[Dict] = None,
+                         callee_exit_mx_modes: Optional[Dict] = None,
+@@ -906,6 +936,11 @@
+ 
+     mnem = insn.mnem
+ 
++    if mnem in ('RTS', 'RTL') or (mnem == 'JMP' and insn.mode == LONG):
++        _tlk_ret = _tlk_rts_call_return(addr24(bank, pc))
++        if _tlk_ret is not None and (_tlk_ret >> 16) == (bank & 0xFF):
++            return [(DecodeKey(_tlk_ret, key.m, key.x, key.p_stack), 'jump')]
++
+     if mnem in _TERMINATORS:
+         return []
+ 
+@@ -920,6 +955,13 @@
+ 
+     if mnem == 'JMP':
+         if insn.mode == ABS:
++            _tlk_ret = _tlk_rts_call_return(addr24(bank, pc))
++            if _tlk_ret is not None and (_tlk_ret >> 16) == (bank & 0xFF):
++                # The body's PLP / RTS pops the routine's PHP (if any) and the PEA.
++                _st = tuple(post_p_stack)
++                _rm, _rx = _st[-1] if _st else (post_m, post_x)
++                return [(DecodeKey(addr24(bank, insn.operand), post_m, post_x, post_p_stack), 'jump'),
++                        (DecodeKey(_tlk_ret, _rm, _rx, _st[:-1]), 'jump')]
+             return [(DecodeKey(addr24(bank, insn.operand), post_m, post_x, post_p_stack), 'jump')]
+         # INDIR / INDIR_X (table-dispatch) and LONG (cross-bank) — no
+         # static successors at this layer.
+diff --color -ruN a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py	2026-10-13 09:01:13.695739597 -0600
++++ b/recompiler/v2/emit_function.py	2026-10-13 10:37:10.435832361 -0600
+@@ -136,6 +136,87 @@
+         "}",
+     ]
+ 
++_TLK_RTS_RETURNS = None
++
++
++def _tlk_rts_returns() -> Dict[int, List[int]]:
++    """TLK task FF: `rts_return <rts_site> return:<ret> via:<jmp_site>`: the
++    routine pushes <ret-1> and JMPs into a shared body whose RTS at <rts_site>
++    pops it. In a routine that has <ret> as a label, that RTS first checks the
++    live frame: popped == <ret-1> in the same bank -> pop and goto <ret> (what
++    the hardware does); anything else runs the normal RTS."""
++    global _TLK_RTS_RETURNS
++    if _TLK_RTS_RETURNS is None:
++        _TLK_RTS_RETURNS = {}
++        d = os.environ.get('SNESRECOMP_TLK_CFG_DIR')
++        if d:
++            for cfgp in sorted(pathlib.Path(d).glob('*.cfg')):
++                for line in cfgp.read_text().splitlines():
++                    t = line.split('#', 1)[0].split()
++                    if len(t) >= 3 and t[0] == 'rts_return' and t[2].startswith('return:'):
++                        _TLK_RTS_RETURNS.setdefault(int(t[1], 16) & 0xFFFFFF, []).append(
++                            int(t[2][7:], 16) & 0xFFFFFF)
++    return _TLK_RTS_RETURNS
++
++
++def _tlk_rts_return_lines(op, addr, local_labels) -> List[str]:
++    if not isinstance(op, Return) or op.long or op.interrupt or addr is None:
++        return []
++    site = addr & 0xFFFFFF
++    out = []
++    for ret in _tlk_rts_returns().get(site, []):
++        gotos = []
++        for m in (0, 1):
++            for x in (0, 1):
++                lab = f"L_{ret & 0xFFFF:04X}_M{m}X{x}"
++                if lab in local_labels:
++                    gotos.append(f"    if (cpu->m_flag == {m} && cpu->x_flag == {x}) {{ cpu->S = (uint16)(cpu->S + 2); goto {lab}; }}")
++        if not gotos:
++            continue
++        out += [
++            f"{{ /* TLK task FF: RTS at ${site:06X} through this routine's pushed frame -> ${ret:06X} */",
++            "  uint16 _rr = (uint16)(cpu_read8(cpu, 0x00, (uint16)(cpu->S + 1)) | (cpu_read8(cpu, 0x00, (uint16)(cpu->S + 2)) << 8));",
++            f"  if (cpu->PB == 0x{ret >> 16:02X} && _rr == 0x{(ret - 1) & 0xFFFF:04X}) {{",
++        ] + gotos + ["  }", "}"]
++    return out
++
++
++def _tlk_jml_call_lines(insn, local_labels) -> Optional[List[str]]:
++    """TLK task FF: `rts_call <site> return:<ret> frame:3` on a JML: the
++    routine pushed PHK / PEA <ret-1> and JMLs to a routine that RTLs through
++    that frame. Emitted as a call on the pushed frame plus a goto to the
++    compiled continuation (same as the RTS/RTL form)."""
++    from v2.lowering import LONG as _LONG_MODE
++    if getattr(insn, 'mnem', '') != 'JMP' or getattr(insn, 'mode', None) != _LONG_MODE:
++        return None
++    site = getattr(insn, 'addr', 0) & 0xFFFFFF
++    rc = _tlk_rts_calls().get(site)
++    if rc is None:
++        return None
++    ret, frame = rc
++    tgt = insn.operand & 0xFFFFFF
++    gotos = []
++    for m in (0, 1):
++        for x in (0, 1):
++            lab = f"L_{ret & 0xFFFF:04X}_M{m}X{x}"
++            if lab in local_labels:
++                gotos.append(f"  if (cpu->m_flag == {m} && cpu->x_flag == {x}) goto {lab};")
++    return [
++        f"{{ /* TLK task FF: pushed-frame JML call at ${site:06X} -> ${tgt:06X}, continuation ${ret:06X} */",
++        "  uint8 _rc_pb = cpu->PB;",
++        f"  cpu->PB = 0x{tgt >> 16:02X};",
++        f"  RecompReturn _rc_r = cpu_dispatch_call_pc_pushed(cpu, 0x{tgt:06x}u, 0x{site:06x}u, {frame}, NULL);",
++        "  cpu->PB = _rc_pb;",
++        "  if (_rc_r != RECOMP_RETURN_NORMAL) {",
++        "    cpu_trace_mark_nlr_exit(BD_EXIT_KIND_SKIP_PROPAGATION);",
++        "return (RecompReturn)((int)_rc_r - 1);",
++        "  }",
++    ] + gotos + [
++        f"return interp_tier_dispatch_balanced(cpu, 0x{ret:06x}u, 0x{site:06x}u, _entry_s, _hrv, false);",
++        "}",
++    ]
++
++
+ def _label_for(key: DecodeKey) -> str:
+     """C label name for a block keyed by (pc, m, x)."""
+     pc = key.pc & 0xFFFF
+@@ -1702,7 +1783,11 @@
+                     # asm trampoline and keeps the simulated SNES stack
+                     # balanced (PHK+PER setup was skipped above).
+                     insn = di_insn
+-                    if getattr(insn, 'dispatch_entries', None):
++                    _tlk_jc = _tlk_jml_call_lines(insn, local_labels)
++                    if _tlk_jc is not None:
++                        lines.extend(_tlk_jc)
++                        block_terminated = True
++                    elif getattr(insn, 'dispatch_entries', None):
+                         from v2.codegen import _emit_dispatch
+                         for ln in _emit_dispatch(insn):
+                             lines.append(ln)
+@@ -1895,6 +1980,8 @@
+                 elif isinstance(op, Return):
+                     _tlk_rc = _tlk_rts_call_lines(
+                         op, getattr(di_insn, 'addr', None), local_labels)
++                    lines.extend(_tlk_rts_return_lines(
++                        op, getattr(di_insn, 'addr', None), local_labels))
+                     for ln in (_tlk_rc if _tlk_rc is not None
+                                else emit_op(op, getattr(di_insn, 'addr', None))):
+                         lines.append(ln)
+diff --color -ruN a/recompiler-rs/src/decoder.rs b/recompiler-rs/src/decoder.rs
+--- a/recompiler-rs/src/decoder.rs	2026-10-13 08:22:06.462502515 -0600
++++ b/recompiler-rs/src/decoder.rs	2026-10-13 10:37:10.433665607 -0600
+@@ -777,6 +777,57 @@
+     (pea_operand + 1) & 0xFFFF
+ }
+ 
++// TLK task FF: pushed-frame calls whose continuation is decoded into the
++// calling routine (cfgs in SNESRECOMP_TLK_CFG_DIR):
++//   rts_call <site> return:<ret> [frame:N]  RTS / RTL / JML at <site> calls the
++//       pushed or named target; the routine continues at <ret>.
++//   rts_return <rts_site> return:<ret> via:<jmp_site>  `PEA <ret-1> / ... / JMP
++//       <body>` at <jmp_site>; the body's RTS at <rts_site> returns to <ret>.
++// The successor carries the site widths; the emitted goto checks the live
++// widths and falls back to the interpreter on any other M/X.
++fn tlk_cfg_continuations() -> &'static HashMap<u32, u32> {
++    static MAP: std::sync::OnceLock<HashMap<u32, u32>> = std::sync::OnceLock::new();
++    MAP.get_or_init(|| {
++        let mut m = HashMap::new();
++        if let Ok(dir) = std::env::var("SNESRECOMP_TLK_CFG_DIR") {
++            if let Ok(rd) = std::fs::read_dir(&dir) {
++                for ent in rd.flatten() {
++                    let p = ent.path();
++                    if p.extension().and_then(|e| e.to_str()) != Some("cfg") {
++                        continue;
++                    }
++                    let Ok(text) = std::fs::read_to_string(&p) else { continue };
++                    for line in text.lines() {
++                        let line = line.split('#').next().unwrap_or("");
++                        let t: Vec<&str> = line.split_whitespace().collect();
++                        if t.len() < 3 || !t[2].starts_with("return:") {
++                            continue;
++                        }
++                        let Ok(ret) = u32::from_str_radix(&t[2][7..], 16) else { continue };
++                        let site = if t[0] == "rts_call" {
++                            u32::from_str_radix(t[1], 16).ok()
++                        } else if t[0] == "rts_return" {
++                            t.iter()
++                                .find(|w| w.starts_with("via:"))
++                                .and_then(|w| u32::from_str_radix(&w[4..], 16).ok())
++                        } else {
++                            None
++                        };
++                        if let Some(site) = site {
++                            m.insert(site & 0xFFFFFF, ret & 0xFFFFFF);
++                        }
++                    }
++                }
++            }
++        }
++        m
++    })
++}
++
++fn tlk_rts_call_return(site_pc24: u32) -> Option<u32> {
++    tlk_cfg_continuations().get(&(site_pc24 & 0xFFFFFF)).copied()
++}
++
+ /// Compute (DecodeKey, edge_kind) successor tuples for one decoded insn. Port of
+ /// `_labeled_successors`.
+ fn labeled_successors(
+@@ -793,6 +844,16 @@
+     let next_pc = (pc + insn.length as u32) & 0xFFFF;
+     let mnem = insn.mnem;
+ 
++    if mnem == "RTS" || mnem == "RTL" || (mnem == "JMP" && insn.mode == Mode::Long) {
++        if let Some(ret) = tlk_rts_call_return(addr24(bank, pc)) {
++            if (ret >> 16) == bank {
++                return vec![(
++                    DecodeKey::with_stack(ret, key.m, key.x, key.p_stack.clone()),
++                    "jump",
++                )];
++            }
++        }
++    }
+     if is_terminator(mnem) {
+         return vec![];
+     }
+@@ -816,10 +877,19 @@
+     }
+     if mnem == "JMP" {
+         if insn.mode == Mode::Abs {
+-            return vec![(
+-                DecodeKey::with_stack(addr24(bank, insn.operand), post_m, post_x, post_p_stack),
++            let mut v = vec![(
++                DecodeKey::with_stack(addr24(bank, insn.operand), post_m, post_x, post_p_stack.clone()),
+                 "jump",
+             )];
++            if let Some(ret) = tlk_rts_call_return(addr24(bank, pc)) {
++                if (ret >> 16) == bank {
++                    // The body's PLP / RTS pops the routine's PHP (if any) and the PEA.
++                    let mut st = post_p_stack;
++                    let (rm, rx) = st.pop().unwrap_or((post_m, post_x));
++                    v.push((DecodeKey::with_stack(ret, rm, rx, st), "jump"));
++                }
++            }
++            return v;
+         }
+         if insn.mode == Mode::Long {
+             // JML is a cross-routine tail transfer even when its explicit

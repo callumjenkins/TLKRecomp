@@ -1,0 +1,72 @@
+diff --color -ruN a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+--- a/recompiler/v2/codegen.py	2026-10-13 03:18:38.100426281 -0600
++++ b/recompiler/v2/codegen.py	2026-10-13 03:29:39.787547474 -0600
+@@ -590,7 +590,16 @@
+     if k == SegKind.DP_INDIRECT:
+         # ((D + dp) word) (+ Y if indirect-Y), DB-bank.
+         ptr_addr = f"(uint16)(cpu->D + {seg.offset:#06x})"
+-        return ("cpu->DB", f"(uint16)(cpu_read16(cpu, 0x00, {ptr_addr}){idx})")
++        if seg.index is None:
++            return ("cpu->DB", f"(uint16)(cpu_read16(cpu, 0x00, {ptr_addr}))")
++        # TLK task CC: (dp),Y is 24-bit: DB:ptr + Y carries into the bank
++        # (W65C816S; interp816). The old uint16 wrap misread every bank
++        # crossing: TLK $C09BA6 `LDA ($F8),Y` with DB=$CF, Y=$DF00 must read
++        # bank $D0 (object walker target $C0B155, d_08 f1656).
++        idx_reg = "cpu->X" if seg.index == Reg.X else "cpu->Y"
++        eff24 = (f"(((uint32)cpu->DB << 16) + "
++                 f"(uint32)cpu_read16(cpu, 0x00, {ptr_addr}) + (uint32){idx_reg})")
++        return (f"(uint8)(({eff24}) >> 16)", f"(uint16)({eff24})")
+     if k == SegKind.DP_INDIRECT_LONG:
+         # ((D + dp) long) (+ Y).  The indexed form adds Y to the full
+         # 24-bit pointer, including carry into the bank.  Keeping the pointer's
+@@ -624,8 +633,10 @@
+         return ("cpu->DB", f"cpu_read16(cpu, 0x00, {ptr_addr})")
+     if k == SegKind.STACK_REL_INDIRECT_Y:
+         ptr_addr = f"(uint16)(cpu->S + {seg.offset:#06x})"
+-        return ("cpu->DB",
+-                f"(uint16)(cpu_read16(cpu, 0x00, {ptr_addr}) + cpu->Y)")
++        # TLK task CC: (sr,S),Y carries into the bank like (dp),Y.
++        eff24 = (f"(((uint32)cpu->DB << 16) + "
++                 f"(uint32)cpu_read16(cpu, 0x00, {ptr_addr}) + (uint32)cpu->Y)")
++        return (f"(uint8)(({eff24}) >> 16)", f"(uint16)({eff24})")
+     raise ValueError(f"unsupported SegKind {k}")
+ 
+ 
+@@ -1152,6 +1163,7 @@
+         return ["{ uint8 _old_p = cpu->P; uint16 _old_s = cpu->S;",
+                 *(f"  {s}" for s in emitter_helpers.pop_byte_assign(field)),
+                 "  cpu_p_to_mirrors(cpu);",
++                "  if (cpu->x_flag) { cpu->X &= 0xFF; cpu->Y &= 0xFF; }  /* TLK task CC: x=1 zeroes XH/YH */",
+                 "  cpu_trace_stack_op(cpu, 0, CPU_STACK_OP_PLP, _old_s, +1);",
+                 "  cpu_trace_event(cpu, 0, CPU_TR_PLP, _old_p, cpu->P);",
+                 "  cpu_trace_px_record(cpu, 0, 2 /*PLP*/, _old_p, cpu->P); }"]
+@@ -2106,6 +2118,7 @@
+         lines.append("    cpu_mirrors_to_p(cpu);")
+         lines.append("    cpu->P = (uint8)(cpu->P | 0x30);")
+         lines.append("    cpu_p_to_mirrors(cpu);")
++        lines.append("    cpu->X &= 0xFF; cpu->Y &= 0xFF;  /* TLK task CC: x=1 zeroes XH/YH */")
+         lines.append("    cpu_trace_px_record(cpu, 0, 1 /*SEP*/, _old_p, cpu->P);")
+         lines.append("  }")
+     # Option-1 cpu->S ABI: the ExecutePtr trampoline's own return frame is
+@@ -2467,6 +2480,7 @@
+         return [
+             "cpu_trace_event(cpu, 0, CPU_TR_RTI, 0, 0);",
+             "{ cpu->S = (uint16)(cpu->S + 1); cpu->P = cpu_read8(cpu, 0x00, cpu->S); cpu_p_to_mirrors(cpu);",
++            "  if (cpu->x_flag) { cpu->X &= 0xFF; cpu->Y &= 0xFF; }  /* TLK task CC: x=1 zeroes XH/YH */",
+             "  cpu->S = (uint16)(cpu->S + 2);  /* pull + discard PC */",
+             "  if (!cpu->emulation) cpu->S = (uint16)(cpu->S + 1);  /* native: pull + discard PB */",
+             "  cpu_trace_px_record(cpu, 0, 3 /*RTI*/, cpu->P, cpu->P);",
+diff --color -ruN a/recompiler/v2/emitter_helpers.py b/recompiler/v2/emitter_helpers.py
+--- a/recompiler/v2/emitter_helpers.py	2026-10-13 03:18:38.099233788 -0600
++++ b/recompiler/v2/emitter_helpers.py	2026-10-13 03:18:49.303157543 -0600
+@@ -144,6 +144,10 @@
+         "cpu_mirrors_to_p(cpu);",
+         modify,
+         "cpu_p_to_mirrors(cpu);",
++        # TLK task CC: x=1 zeroes the high bytes of X and Y (65816). Without
++        # it a stale 16-bit Y/X survives SEP #$10 and reappears after the next
++        # REP #$10 (object walker target $C0B155, d_08 f1656).
++        *(["if (cpu->x_flag) { cpu->X &= 0xFF; cpu->Y &= 0xFF; }"] if kind == "sep" and (mask & 0x10) else []),
+         f"cpu_trace_px_record(cpu, 0, {px_kind} /*{px_label}*/, _old_p, cpu->P);",
+     ]
+ 

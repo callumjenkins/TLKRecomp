@@ -1,0 +1,1529 @@
+diff -ruN a/recompiler/v2/aot_pace.py b/recompiler/v2/aot_pace.py
+--- a/recompiler/v2/aot_pace.py
++++ b/recompiler/v2/aot_pace.py
+@@ -0,0 +1,291 @@
++"""Exact interpreter-equivalent master-clock cost of one 65816 instruction.
++
++The LLE step loop (runner/src/snes/interp_bridge.c) charges every executed
++opcode as
++
++    master = sum(region_speed(a) for each bus access a) + 6 * max(0, cyc - n_bus)
++
++where the bus accesses are the opcode/operand fetches plus the data, pointer,
++stack and vector transfers the interpreter core (interp816.c) performs, and
++cyc is the core's cycle count (cyclesPerOpcode + its runtime adds). This
++module describes, per (opcode, m, x, operand), the same quantities as small
++expressions over the instruction's PRE-state, in a syntax that is valid both
++as C (after register renaming, see c_expr) and as Python (tests evaluate the
++model against the interpreter core itself).
++
++Expression vocabulary (pre-state):
++  D X Y S DB PB          registers (X/Y already 8-bit when x=1)
++  PEEK0(a)               byte at bank $00 address a (side-effect free)
++  PEEK(a24)              byte at 24-bit address (side-effect free)
++  XCROSS(base, idx)      1 if base+idx crosses a page from base, else 0
++  DPL                    1 if (D & 0xFF) != 0, else 0
++"""
++from __future__ import annotations
++
++# ── opcode table ─────────────────────────────────────────────────────────
++IMP, ACC, IMM_M, IMM_X, IMM8, DP, DPX, DPY, IDP, IDX, IDY, IDL, ILY, SR, ISY, \
++    ABS, ABX, ABY, ABL, ALX, REL, RLL, JIND, JIAX, JIAL, BM = range(26)
++
++_ALU = {0x00: 'ORA', 0x20: 'AND', 0x40: 'EOR', 0x60: 'ADC', 0x80: 'STA',
++        0xA0: 'LDA', 0xC0: 'CMP', 0xE0: 'SBC'}
++_ALU_MODES = {0x01: IDX, 0x03: SR, 0x05: DP, 0x07: IDL, 0x09: IMM_M, 0x0D: ABS,
++              0x0F: ABL, 0x11: IDY, 0x12: IDP, 0x13: ISY, 0x15: DPX, 0x17: ILY,
++              0x19: ABY, 0x1D: ABX, 0x1F: ALX}
++
++OPS: dict = {}
++for base, mn in _ALU.items():
++    for off, mode in _ALU_MODES.items():
++        OPS[base + off] = (mn, mode)
++OPS[0x89] = ('BIT', IMM_M)
++for base, mn in {0x00: 'ASL', 0x20: 'ROL', 0x40: 'LSR', 0x60: 'ROR'}.items():
++    OPS[base + 0x06] = (mn, DP); OPS[base + 0x0A] = (mn, ACC)
++    OPS[base + 0x0E] = (mn, ABS); OPS[base + 0x16] = (mn, DPX)
++    OPS[base + 0x1E] = (mn, ABX)
++OPS.update({
++    0xC6: ('DEC', DP), 0xCE: ('DEC', ABS), 0xD6: ('DEC', DPX), 0xDE: ('DEC', ABX),
++    0x3A: ('DEC', ACC), 0xE6: ('INC', DP), 0xEE: ('INC', ABS), 0xF6: ('INC', DPX),
++    0xFE: ('INC', ABX), 0x1A: ('INC', ACC),
++    0x04: ('TSB', DP), 0x0C: ('TSB', ABS), 0x14: ('TRB', DP), 0x1C: ('TRB', ABS),
++    0x24: ('BIT', DP), 0x2C: ('BIT', ABS), 0x34: ('BIT', DPX), 0x3C: ('BIT', ABX),
++    0x64: ('STZ', DP), 0x74: ('STZ', DPX), 0x9C: ('STZ', ABS), 0x9E: ('STZ', ABX),
++    0x84: ('STY', DP), 0x8C: ('STY', ABS), 0x94: ('STY', DPX),
++    0x86: ('STX', DP), 0x8E: ('STX', ABS), 0x96: ('STX', DPY),
++    0xA0: ('LDY', IMM_X), 0xA4: ('LDY', DP), 0xAC: ('LDY', ABS), 0xB4: ('LDY', DPX),
++    0xBC: ('LDY', ABX),
++    0xA2: ('LDX', IMM_X), 0xA6: ('LDX', DP), 0xAE: ('LDX', ABS), 0xB6: ('LDX', DPY),
++    0xBE: ('LDX', ABY),
++    0xC0: ('CPY', IMM_X), 0xC4: ('CPY', DP), 0xCC: ('CPY', ABS),
++    0xE0: ('CPX', IMM_X), 0xE4: ('CPX', DP), 0xEC: ('CPX', ABS),
++    0x08: ('PHP', IMP), 0x28: ('PLP', IMP), 0x48: ('PHA', IMP), 0x68: ('PLA', IMP),
++    0x8B: ('PHB', IMP), 0xAB: ('PLB', IMP), 0x0B: ('PHD', IMP), 0x2B: ('PLD', IMP),
++    0x4B: ('PHK', IMP), 0xDA: ('PHX', IMP), 0xFA: ('PLX', IMP), 0x5A: ('PHY', IMP),
++    0x7A: ('PLY', IMP), 0xF4: ('PEA', ABS), 0xD4: ('PEI', DP), 0x62: ('PER', RLL),
++    0x4C: ('JMP', ABS), 0x5C: ('JML', ABL), 0x6C: ('JMP', JIND), 0x7C: ('JMP', JIAX),
++    0xDC: ('JML', JIAL), 0x20: ('JSR', ABS), 0x22: ('JSL', ABL), 0xFC: ('JSR', JIAX),
++    0x60: ('RTS', IMP), 0x6B: ('RTL', IMP), 0x40: ('RTI', IMP),
++    0x00: ('BRK', IMM8), 0x02: ('COP', IMM8), 0x42: ('WDM', IMM8),
++    0x82: ('BRL', RLL), 0x80: ('BRA', REL),
++    0x10: ('BPL', REL), 0x30: ('BMI', REL), 0x50: ('BVC', REL), 0x70: ('BVS', REL),
++    0x90: ('BCC', REL), 0xB0: ('BCS', REL), 0xD0: ('BNE', REL), 0xF0: ('BEQ', REL),
++    0x54: ('MVN', BM), 0x44: ('MVP', BM),
++    0xC2: ('REP', IMM8), 0xE2: ('SEP', IMM8),
++})
++for op, mn in {0x18: 'CLC', 0x38: 'SEC', 0x58: 'CLI', 0x78: 'SEI', 0xB8: 'CLV',
++               0xD8: 'CLD', 0xF8: 'SED', 0xEA: 'NOP', 0xAA: 'TAX', 0xA8: 'TAY',
++               0x8A: 'TXA', 0x98: 'TYA', 0x9A: 'TXS', 0xBA: 'TSX', 0x9B: 'TXY',
++               0xBB: 'TYX', 0x5B: 'TCD', 0x7B: 'TDC', 0x1B: 'TCS', 0x3B: 'TSC',
++               0xE8: 'INX', 0xC8: 'INY', 0xCA: 'DEX', 0x88: 'DEY', 0xEB: 'XBA',
++               0xFB: 'XCE', 0xCB: 'WAI', 0xDB: 'STP'}.items():
++    OPS[op] = (mn, IMP)
++assert len(OPS) == 256, len(OPS)
++
++_READ = {'ORA', 'AND', 'EOR', 'ADC', 'LDA', 'CMP', 'SBC', 'BIT', 'LDX', 'LDY',
++         'CPX', 'CPY'}
++_WRITE = {'STA', 'STZ', 'STX', 'STY'}
++_RMW = {'ASL', 'ROL', 'LSR', 'ROR', 'DEC', 'INC', 'TSB', 'TRB'}
++_XWIDTH = {'LDX', 'LDY', 'CPX', 'CPY', 'STX', 'STY'}
++_DP_MODES = {DP, DPX, DPY, IDP, IDX, IDY, IDL, ILY}
++
++# Base cycles (interp816.c cyclesPerOpcode) and the core's static M/X adds,
++# measured from the core itself (TLKRecomp tools/aot_pace/verify.py --derive):
++# BASE[(op, m, x)].
++try:
++    from v2.aot_pace_table import BASE  # noqa: E402
++except ImportError:  # standalone (tests)
++    from aot_pace_table import BASE  # noqa: E402
++
++
++def length(op: int, m: int, x: int) -> int:
++    mn, mode = OPS[op]
++    if mode in (IMP, ACC):
++        return 1
++    if mode == IMM_M:
++        return 2 if m else 3
++    if mode == IMM_X:
++        return 2 if x else 3
++    if mode in (IMM8, DP, DPX, DPY, IDP, IDX, IDY, IDL, ILY, SR, ISY, REL):
++        return 2
++    if mode in (ABS, ABX, ABY, RLL, JIND, JIAX, JIAL, BM):
++        return 3
++    return 4  # ABL, ALX
++
++
++def _h(v: int) -> str:
++    return f"0x{v:X}"
++
++
++def model(op: int, m: int, x: int, operand: int):
++    """Return (static_cycles, dyn_cycle_exprs, data_addr_exprs).
++
++    data_addr_exprs are 24-bit address expressions, one per data/pointer/
++    stack/vector bus byte the interpreter core transfers (code fetches are
++    accounted separately by length()). dyn_cycle_exprs each evaluate to 0/1.
++    Taken-branch cycles are not included (the emitter charges them on the
++    taken edge)."""
++    mn, mode = OPS[op]
++    cyc = BASE[(op, m, x)]
++    dyn: list = []
++    acc: list = []
++    o = operand
++    wide = (not x) if mn in _XWIDTH else (not m)
++    n = 2 if wide else 1
++
++    def b0(e):  # bank-0 address expression
++        return f"(({e}) & 0xFFFF)"
++
++    def stack_push(k):
++        for i in range(k):
++            acc.append(b0(f"S - {i}"))
++
++    def stack_pull(k):
++        for i in range(k):
++            acc.append(b0(f"S + {i + 1}"))
++
++    if mode in _DP_MODES or mn == 'PEI':
++        dyn.append("DPL")
++
++    # Effective data addresses (lo, hi) for the memory modes.
++    ea = None  # list of 24-bit address exprs for the data bytes
++    if mn in _READ | _WRITE | _RMW and mode not in (IMM_M, IMM_X, ACC):
++        o8 = o & 0xFF
++        if mode == DP:
++            ea = [b0(f"D + {_h(o8)} + {i}") for i in range(n)]
++        elif mode == DPX:
++            ea = [b0(f"D + {_h(o8)} + X + {i}") for i in range(n)]
++        elif mode == DPY:
++            ea = [b0(f"D + {_h(o8)} + Y + {i}") for i in range(n)]
++        elif mode in (IDP, IDX, IDY, IDL, ILY, ISY):
++            if mode == IDX:
++                p = f"D + {_h(o8)} + X"
++            elif mode == ISY:
++                p = f"S + {_h(o8)}"
++            else:
++                p = f"D + {_h(o8)}"
++            nptr = 3 if mode in (IDL, ILY) else 2
++            for i in range(nptr):
++                acc.append(b0(f"{p} + {i}"))
++            ptr16 = f"(PEEK0({b0(p)}) | (PEEK0({b0(p + ' + 1')}) << 8))"
++            if mode in (IDL, ILY):
++                ptr = f"({ptr16} | (PEEK0({b0(p + ' + 2')}) << 16))"
++            else:
++                ptr = f"((DB << 16) + {ptr16})"
++            if mode in (IDY, ILY, ISY):
++                ea = [f"(({ptr} + Y + {i}) & 0xFFFFFF)" for i in range(n)]
++                if mode == IDY and mn in _READ:
++                    if x:
++                        dyn.append(f"XCROSS({ptr16}, Y)")
++            else:
++                ea = [f"(({ptr} + {i}) & 0xFFFFFF)" for i in range(n)]
++        elif mode == SR:
++            ea = [b0(f"S + {_h(o8)} + {i}") for i in range(n)]
++        elif mode == ABS:
++            ea = [f"(((DB << 16) + {_h(o & 0xFFFF)} + {i}) & 0xFFFFFF)" for i in range(n)]
++        elif mode in (ABX, ABY):
++            r = 'X' if mode == ABX else 'Y'
++            ea = [f"(((DB << 16) + {_h(o & 0xFFFF)} + {r} + {i}) & 0xFFFFFF)"
++                  for i in range(n)]
++            if mn in _READ and x:
++                dyn.append(f"XCROSS({_h(o & 0xFFFF)}, {r})")
++        elif mode == ABL:
++            ea = [f"(({_h(o & 0xFFFFFF)} + {i}) & 0xFFFFFF)" for i in range(n)]
++        elif mode == ALX:
++            ea = [f"(({_h(o & 0xFFFFFF)} + X + {i}) & 0xFFFFFF)" for i in range(n)]
++        else:
++            raise AssertionError((op, mode))
++        acc.extend(ea)
++        if mn in _RMW:
++            acc.extend(ea)  # write-back to the same bytes
++    elif mn in ('PHA', 'PHX', 'PHY'):
++        stack_push(2 if ((mn == 'PHA' and not m) or (mn != 'PHA' and not x)) else 1)
++    elif mn in ('PLA', 'PLX', 'PLY'):
++        stack_pull(2 if ((mn == 'PLA' and not m) or (mn != 'PLA' and not x)) else 1)
++    elif mn in ('PHB', 'PHK', 'PHP'):
++        stack_push(1)
++    elif mn in ('PLB', 'PLP'):
++        stack_pull(1)
++    elif mn == 'PHD':
++        stack_push(2)
++    elif mn == 'PLD':
++        stack_pull(2)
++    elif mn in ('PEA', 'PER'):
++        stack_push(2)
++    elif mn == 'PEI':
++        p = f"D + {_h(o & 0xFF)}"
++        acc.append(b0(p)); acc.append(b0(p + " + 1"))
++        stack_push(2)
++    elif mn == 'JSR' and mode == ABS:
++        stack_push(2)
++    elif mn == 'JSL':
++        stack_push(3)
++    elif mn == 'RTS':
++        stack_pull(2)
++    elif mn == 'RTL':
++        stack_pull(3)
++    elif mn == 'RTI':
++        stack_pull(4)
++    elif mn in ('BRK', 'COP'):
++        stack_push(4)
++        v = 0xFFE6 if mn == 'BRK' else 0xFFE4
++        acc.append(_h(v)); acc.append(_h(v + 1))
++    elif mode == JIND:
++        acc.append(_h(o & 0xFFFF)); acc.append(_h((o + 1) & 0xFFFF))
++    elif mode == JIAL:
++        for i in range(3):
++            acc.append(_h((o + i) & 0xFFFF))
++    elif mode == JIAX:
++        if mn == 'JSR':
++            stack_push(2)
++        acc.append(f"((PB << 16) | ((({_h(o & 0xFFFF)} + X) & 0xFFFF)))")
++        acc.append(f"((PB << 16) | ((({_h(o & 0xFFFF)} + X + 1) & 0xFFFF)))")
++    elif mode == BM:
++        dst, src = o & 0xFF, (o >> 8) & 0xFF
++        acc.append(f"(({_h(src)} << 16) | X)")
++        acc.append(f"(({_h(dst)} << 16) | Y)")
++    return cyc, dyn, acc
++
++
++# ── C rendering for the emitter ──────────────────────────────────────────
++import os as _os
++import re as _re
++
++ENABLED = _os.environ.get("SNESRECOMP_AOT_PACE", "1") != "0"
++
++_REG = _re.compile(r"\b(DB|PB|D|X|Y|S)\b")
++
++
++def _c(expr: str) -> str:
++    e = _REG.sub(lambda mo: f"cpu->{mo.group(1)}", expr)
++    e = e.replace("PEEK0(", "AOT_PEEK0(").replace("XCROSS(", "AOT_XCROSS(")
++    return _re.sub(r"\bDPL\b", "AOT_DPL", e)
++
++
++def insn_cost_c(op: int, m: int, x: int, operand: int, code_spd: str):
++    """C expressions (cycles, master clocks) for one executed instruction,
++    to be evaluated on the PRE-state. Returns (cyc_expr, mc_expr, static)
++    where static is True when both are compile-time constants."""
++    L = length(op, m, x)
++    c0, dyn, acc = model(op, m, x, operand)
++    internal = c0 - L - len(acc)
++    dyn_c = [_c(d) for d in dyn]
++    terms = []
++    try:
++        spd_const = int(code_spd)
++    except ValueError:
++        spd_const = None
++    const = 0
++    if spd_const is not None:
++        const += L * spd_const
++    else:
++        terms.append(f"{L}u * ({code_spd})")
++    for a in acc:
++        terms.append(f"aot_spd((uint32_t)({_c(a)}))")
++    if internal >= 0:
++        const += 6 * internal
++        terms += [f"6u * {d}" for d in dyn_c]
++        cyc = " + ".join([str(c0)] + dyn_c)
++    else:
++        cyc = " + ".join([str(c0)] + dyn_c)
++        terms.append(f"6u * (uint32_t)(((int)({cyc}) - {L + len(acc)}) > 0 ? "
++                     f"((int)({cyc}) - {L + len(acc)}) : 0)")
++    mc = " + ".join([f"{const}u"] + terms)
++    return cyc, mc, not terms and not dyn_c
+diff -ruN a/recompiler/v2/aot_pace_table.py b/recompiler/v2/aot_pace_table.py
+--- a/recompiler/v2/aot_pace_table.py
++++ b/recompiler/v2/aot_pace_table.py
+@@ -0,0 +1,1020 @@
++# (opcode, m, x) -> interp816 cycles with D.l=0, no index page cross,
++# branch not taken. Derived from the core by tests (aot_pace verify).
++BASE = {
++    (0x00, 0, 0): 7,
++    (0x00, 0, 1): 7,
++    (0x00, 1, 0): 7,
++    (0x00, 1, 1): 7,
++    (0x01, 0, 0): 7,
++    (0x01, 0, 1): 7,
++    (0x01, 1, 0): 6,
++    (0x01, 1, 1): 6,
++    (0x02, 0, 0): 8,
++    (0x02, 0, 1): 8,
++    (0x02, 1, 0): 8,
++    (0x02, 1, 1): 8,
++    (0x03, 0, 0): 5,
++    (0x03, 0, 1): 5,
++    (0x03, 1, 0): 4,
++    (0x03, 1, 1): 4,
++    (0x04, 0, 0): 7,
++    (0x04, 0, 1): 7,
++    (0x04, 1, 0): 5,
++    (0x04, 1, 1): 5,
++    (0x05, 0, 0): 4,
++    (0x05, 0, 1): 4,
++    (0x05, 1, 0): 3,
++    (0x05, 1, 1): 3,
++    (0x06, 0, 0): 7,
++    (0x06, 0, 1): 7,
++    (0x06, 1, 0): 5,
++    (0x06, 1, 1): 5,
++    (0x07, 0, 0): 7,
++    (0x07, 0, 1): 7,
++    (0x07, 1, 0): 6,
++    (0x07, 1, 1): 6,
++    (0x08, 0, 0): 3,
++    (0x08, 0, 1): 3,
++    (0x08, 1, 0): 3,
++    (0x08, 1, 1): 3,
++    (0x09, 0, 0): 3,
++    (0x09, 0, 1): 3,
++    (0x09, 1, 0): 2,
++    (0x09, 1, 1): 2,
++    (0x0A, 0, 0): 2,
++    (0x0A, 0, 1): 2,
++    (0x0A, 1, 0): 2,
++    (0x0A, 1, 1): 2,
++    (0x0B, 0, 0): 4,
++    (0x0B, 0, 1): 4,
++    (0x0B, 1, 0): 4,
++    (0x0B, 1, 1): 4,
++    (0x0C, 0, 0): 8,
++    (0x0C, 0, 1): 8,
++    (0x0C, 1, 0): 6,
++    (0x0C, 1, 1): 6,
++    (0x0D, 0, 0): 5,
++    (0x0D, 0, 1): 5,
++    (0x0D, 1, 0): 4,
++    (0x0D, 1, 1): 4,
++    (0x0E, 0, 0): 8,
++    (0x0E, 0, 1): 8,
++    (0x0E, 1, 0): 6,
++    (0x0E, 1, 1): 6,
++    (0x0F, 0, 0): 6,
++    (0x0F, 0, 1): 6,
++    (0x0F, 1, 0): 5,
++    (0x0F, 1, 1): 5,
++    (0x10, 0, 0): 2,
++    (0x10, 0, 1): 2,
++    (0x10, 1, 0): 2,
++    (0x10, 1, 1): 2,
++    (0x11, 0, 0): 7,
++    (0x11, 0, 1): 6,
++    (0x11, 1, 0): 6,
++    (0x11, 1, 1): 5,
++    (0x12, 0, 0): 6,
++    (0x12, 0, 1): 6,
++    (0x12, 1, 0): 5,
++    (0x12, 1, 1): 5,
++    (0x13, 0, 0): 8,
++    (0x13, 0, 1): 8,
++    (0x13, 1, 0): 7,
++    (0x13, 1, 1): 7,
++    (0x14, 0, 0): 7,
++    (0x14, 0, 1): 7,
++    (0x14, 1, 0): 5,
++    (0x14, 1, 1): 5,
++    (0x15, 0, 0): 5,
++    (0x15, 0, 1): 5,
++    (0x15, 1, 0): 4,
++    (0x15, 1, 1): 4,
++    (0x16, 0, 0): 8,
++    (0x16, 0, 1): 8,
++    (0x16, 1, 0): 6,
++    (0x16, 1, 1): 6,
++    (0x17, 0, 0): 7,
++    (0x17, 0, 1): 7,
++    (0x17, 1, 0): 6,
++    (0x17, 1, 1): 6,
++    (0x18, 0, 0): 2,
++    (0x18, 0, 1): 2,
++    (0x18, 1, 0): 2,
++    (0x18, 1, 1): 2,
++    (0x19, 0, 0): 6,
++    (0x19, 0, 1): 5,
++    (0x19, 1, 0): 5,
++    (0x19, 1, 1): 4,
++    (0x1A, 0, 0): 2,
++    (0x1A, 0, 1): 2,
++    (0x1A, 1, 0): 2,
++    (0x1A, 1, 1): 2,
++    (0x1B, 0, 0): 2,
++    (0x1B, 0, 1): 2,
++    (0x1B, 1, 0): 2,
++    (0x1B, 1, 1): 2,
++    (0x1C, 0, 0): 8,
++    (0x1C, 0, 1): 8,
++    (0x1C, 1, 0): 6,
++    (0x1C, 1, 1): 6,
++    (0x1D, 0, 0): 6,
++    (0x1D, 0, 1): 5,
++    (0x1D, 1, 0): 5,
++    (0x1D, 1, 1): 4,
++    (0x1E, 0, 0): 9,
++    (0x1E, 0, 1): 9,
++    (0x1E, 1, 0): 7,
++    (0x1E, 1, 1): 7,
++    (0x1F, 0, 0): 6,
++    (0x1F, 0, 1): 6,
++    (0x1F, 1, 0): 5,
++    (0x1F, 1, 1): 5,
++    (0x20, 0, 0): 6,
++    (0x20, 0, 1): 6,
++    (0x20, 1, 0): 6,
++    (0x20, 1, 1): 6,
++    (0x21, 0, 0): 7,
++    (0x21, 0, 1): 7,
++    (0x21, 1, 0): 6,
++    (0x21, 1, 1): 6,
++    (0x22, 0, 0): 8,
++    (0x22, 0, 1): 8,
++    (0x22, 1, 0): 8,
++    (0x22, 1, 1): 8,
++    (0x23, 0, 0): 5,
++    (0x23, 0, 1): 5,
++    (0x23, 1, 0): 4,
++    (0x23, 1, 1): 4,
++    (0x24, 0, 0): 4,
++    (0x24, 0, 1): 4,
++    (0x24, 1, 0): 3,
++    (0x24, 1, 1): 3,
++    (0x25, 0, 0): 4,
++    (0x25, 0, 1): 4,
++    (0x25, 1, 0): 3,
++    (0x25, 1, 1): 3,
++    (0x26, 0, 0): 7,
++    (0x26, 0, 1): 7,
++    (0x26, 1, 0): 5,
++    (0x26, 1, 1): 5,
++    (0x27, 0, 0): 7,
++    (0x27, 0, 1): 7,
++    (0x27, 1, 0): 6,
++    (0x27, 1, 1): 6,
++    (0x28, 0, 0): 4,
++    (0x28, 0, 1): 4,
++    (0x28, 1, 0): 4,
++    (0x28, 1, 1): 4,
++    (0x29, 0, 0): 3,
++    (0x29, 0, 1): 3,
++    (0x29, 1, 0): 2,
++    (0x29, 1, 1): 2,
++    (0x2A, 0, 0): 2,
++    (0x2A, 0, 1): 2,
++    (0x2A, 1, 0): 2,
++    (0x2A, 1, 1): 2,
++    (0x2B, 0, 0): 5,
++    (0x2B, 0, 1): 5,
++    (0x2B, 1, 0): 5,
++    (0x2B, 1, 1): 5,
++    (0x2C, 0, 0): 5,
++    (0x2C, 0, 1): 5,
++    (0x2C, 1, 0): 4,
++    (0x2C, 1, 1): 4,
++    (0x2D, 0, 0): 5,
++    (0x2D, 0, 1): 5,
++    (0x2D, 1, 0): 4,
++    (0x2D, 1, 1): 4,
++    (0x2E, 0, 0): 8,
++    (0x2E, 0, 1): 8,
++    (0x2E, 1, 0): 6,
++    (0x2E, 1, 1): 6,
++    (0x2F, 0, 0): 6,
++    (0x2F, 0, 1): 6,
++    (0x2F, 1, 0): 5,
++    (0x2F, 1, 1): 5,
++    (0x30, 0, 0): 2,
++    (0x30, 0, 1): 2,
++    (0x30, 1, 0): 2,
++    (0x30, 1, 1): 2,
++    (0x31, 0, 0): 7,
++    (0x31, 0, 1): 6,
++    (0x31, 1, 0): 6,
++    (0x31, 1, 1): 5,
++    (0x32, 0, 0): 6,
++    (0x32, 0, 1): 6,
++    (0x32, 1, 0): 5,
++    (0x32, 1, 1): 5,
++    (0x33, 0, 0): 8,
++    (0x33, 0, 1): 8,
++    (0x33, 1, 0): 7,
++    (0x33, 1, 1): 7,
++    (0x34, 0, 0): 5,
++    (0x34, 0, 1): 5,
++    (0x34, 1, 0): 4,
++    (0x34, 1, 1): 4,
++    (0x35, 0, 0): 5,
++    (0x35, 0, 1): 5,
++    (0x35, 1, 0): 4,
++    (0x35, 1, 1): 4,
++    (0x36, 0, 0): 8,
++    (0x36, 0, 1): 8,
++    (0x36, 1, 0): 6,
++    (0x36, 1, 1): 6,
++    (0x37, 0, 0): 7,
++    (0x37, 0, 1): 7,
++    (0x37, 1, 0): 6,
++    (0x37, 1, 1): 6,
++    (0x38, 0, 0): 2,
++    (0x38, 0, 1): 2,
++    (0x38, 1, 0): 2,
++    (0x38, 1, 1): 2,
++    (0x39, 0, 0): 6,
++    (0x39, 0, 1): 5,
++    (0x39, 1, 0): 5,
++    (0x39, 1, 1): 4,
++    (0x3A, 0, 0): 2,
++    (0x3A, 0, 1): 2,
++    (0x3A, 1, 0): 2,
++    (0x3A, 1, 1): 2,
++    (0x3B, 0, 0): 2,
++    (0x3B, 0, 1): 2,
++    (0x3B, 1, 0): 2,
++    (0x3B, 1, 1): 2,
++    (0x3C, 0, 0): 6,
++    (0x3C, 0, 1): 5,
++    (0x3C, 1, 0): 5,
++    (0x3C, 1, 1): 4,
++    (0x3D, 0, 0): 6,
++    (0x3D, 0, 1): 5,
++    (0x3D, 1, 0): 5,
++    (0x3D, 1, 1): 4,
++    (0x3E, 0, 0): 9,
++    (0x3E, 0, 1): 9,
++    (0x3E, 1, 0): 7,
++    (0x3E, 1, 1): 7,
++    (0x3F, 0, 0): 6,
++    (0x3F, 0, 1): 6,
++    (0x3F, 1, 0): 5,
++    (0x3F, 1, 1): 5,
++    (0x40, 0, 0): 7,
++    (0x40, 0, 1): 7,
++    (0x40, 1, 0): 7,
++    (0x40, 1, 1): 7,
++    (0x41, 0, 0): 7,
++    (0x41, 0, 1): 7,
++    (0x41, 1, 0): 6,
++    (0x41, 1, 1): 6,
++    (0x42, 0, 0): 2,
++    (0x42, 0, 1): 2,
++    (0x42, 1, 0): 2,
++    (0x42, 1, 1): 2,
++    (0x43, 0, 0): 5,
++    (0x43, 0, 1): 5,
++    (0x43, 1, 0): 4,
++    (0x43, 1, 1): 4,
++    (0x44, 0, 0): 7,
++    (0x44, 0, 1): 7,
++    (0x44, 1, 0): 7,
++    (0x44, 1, 1): 7,
++    (0x45, 0, 0): 4,
++    (0x45, 0, 1): 4,
++    (0x45, 1, 0): 3,
++    (0x45, 1, 1): 3,
++    (0x46, 0, 0): 7,
++    (0x46, 0, 1): 7,
++    (0x46, 1, 0): 5,
++    (0x46, 1, 1): 5,
++    (0x47, 0, 0): 7,
++    (0x47, 0, 1): 7,
++    (0x47, 1, 0): 6,
++    (0x47, 1, 1): 6,
++    (0x48, 0, 0): 4,
++    (0x48, 0, 1): 4,
++    (0x48, 1, 0): 3,
++    (0x48, 1, 1): 3,
++    (0x49, 0, 0): 3,
++    (0x49, 0, 1): 3,
++    (0x49, 1, 0): 2,
++    (0x49, 1, 1): 2,
++    (0x4A, 0, 0): 2,
++    (0x4A, 0, 1): 2,
++    (0x4A, 1, 0): 2,
++    (0x4A, 1, 1): 2,
++    (0x4B, 0, 0): 3,
++    (0x4B, 0, 1): 3,
++    (0x4B, 1, 0): 3,
++    (0x4B, 1, 1): 3,
++    (0x4C, 0, 0): 3,
++    (0x4C, 0, 1): 3,
++    (0x4C, 1, 0): 3,
++    (0x4C, 1, 1): 3,
++    (0x4D, 0, 0): 5,
++    (0x4D, 0, 1): 5,
++    (0x4D, 1, 0): 4,
++    (0x4D, 1, 1): 4,
++    (0x4E, 0, 0): 8,
++    (0x4E, 0, 1): 8,
++    (0x4E, 1, 0): 6,
++    (0x4E, 1, 1): 6,
++    (0x4F, 0, 0): 6,
++    (0x4F, 0, 1): 6,
++    (0x4F, 1, 0): 5,
++    (0x4F, 1, 1): 5,
++    (0x50, 0, 0): 2,
++    (0x50, 0, 1): 2,
++    (0x50, 1, 0): 2,
++    (0x50, 1, 1): 2,
++    (0x51, 0, 0): 7,
++    (0x51, 0, 1): 6,
++    (0x51, 1, 0): 6,
++    (0x51, 1, 1): 5,
++    (0x52, 0, 0): 6,
++    (0x52, 0, 1): 6,
++    (0x52, 1, 0): 5,
++    (0x52, 1, 1): 5,
++    (0x53, 0, 0): 8,
++    (0x53, 0, 1): 8,
++    (0x53, 1, 0): 7,
++    (0x53, 1, 1): 7,
++    (0x54, 0, 0): 7,
++    (0x54, 0, 1): 7,
++    (0x54, 1, 0): 7,
++    (0x54, 1, 1): 7,
++    (0x55, 0, 0): 5,
++    (0x55, 0, 1): 5,
++    (0x55, 1, 0): 4,
++    (0x55, 1, 1): 4,
++    (0x56, 0, 0): 8,
++    (0x56, 0, 1): 8,
++    (0x56, 1, 0): 6,
++    (0x56, 1, 1): 6,
++    (0x57, 0, 0): 7,
++    (0x57, 0, 1): 7,
++    (0x57, 1, 0): 6,
++    (0x57, 1, 1): 6,
++    (0x58, 0, 0): 2,
++    (0x58, 0, 1): 2,
++    (0x58, 1, 0): 2,
++    (0x58, 1, 1): 2,
++    (0x59, 0, 0): 6,
++    (0x59, 0, 1): 5,
++    (0x59, 1, 0): 5,
++    (0x59, 1, 1): 4,
++    (0x5A, 0, 0): 4,
++    (0x5A, 0, 1): 3,
++    (0x5A, 1, 0): 4,
++    (0x5A, 1, 1): 3,
++    (0x5B, 0, 0): 2,
++    (0x5B, 0, 1): 2,
++    (0x5B, 1, 0): 2,
++    (0x5B, 1, 1): 2,
++    (0x5C, 0, 0): 4,
++    (0x5C, 0, 1): 4,
++    (0x5C, 1, 0): 4,
++    (0x5C, 1, 1): 4,
++    (0x5D, 0, 0): 6,
++    (0x5D, 0, 1): 5,
++    (0x5D, 1, 0): 5,
++    (0x5D, 1, 1): 4,
++    (0x5E, 0, 0): 9,
++    (0x5E, 0, 1): 9,
++    (0x5E, 1, 0): 7,
++    (0x5E, 1, 1): 7,
++    (0x5F, 0, 0): 6,
++    (0x5F, 0, 1): 6,
++    (0x5F, 1, 0): 5,
++    (0x5F, 1, 1): 5,
++    (0x60, 0, 0): 6,
++    (0x60, 0, 1): 6,
++    (0x60, 1, 0): 6,
++    (0x60, 1, 1): 6,
++    (0x61, 0, 0): 7,
++    (0x61, 0, 1): 7,
++    (0x61, 1, 0): 6,
++    (0x61, 1, 1): 6,
++    (0x62, 0, 0): 6,
++    (0x62, 0, 1): 6,
++    (0x62, 1, 0): 6,
++    (0x62, 1, 1): 6,
++    (0x63, 0, 0): 5,
++    (0x63, 0, 1): 5,
++    (0x63, 1, 0): 4,
++    (0x63, 1, 1): 4,
++    (0x64, 0, 0): 4,
++    (0x64, 0, 1): 4,
++    (0x64, 1, 0): 3,
++    (0x64, 1, 1): 3,
++    (0x65, 0, 0): 4,
++    (0x65, 0, 1): 4,
++    (0x65, 1, 0): 3,
++    (0x65, 1, 1): 3,
++    (0x66, 0, 0): 7,
++    (0x66, 0, 1): 7,
++    (0x66, 1, 0): 5,
++    (0x66, 1, 1): 5,
++    (0x67, 0, 0): 7,
++    (0x67, 0, 1): 7,
++    (0x67, 1, 0): 6,
++    (0x67, 1, 1): 6,
++    (0x68, 0, 0): 5,
++    (0x68, 0, 1): 5,
++    (0x68, 1, 0): 4,
++    (0x68, 1, 1): 4,
++    (0x69, 0, 0): 3,
++    (0x69, 0, 1): 3,
++    (0x69, 1, 0): 2,
++    (0x69, 1, 1): 2,
++    (0x6A, 0, 0): 2,
++    (0x6A, 0, 1): 2,
++    (0x6A, 1, 0): 2,
++    (0x6A, 1, 1): 2,
++    (0x6B, 0, 0): 6,
++    (0x6B, 0, 1): 6,
++    (0x6B, 1, 0): 6,
++    (0x6B, 1, 1): 6,
++    (0x6C, 0, 0): 5,
++    (0x6C, 0, 1): 5,
++    (0x6C, 1, 0): 5,
++    (0x6C, 1, 1): 5,
++    (0x6D, 0, 0): 5,
++    (0x6D, 0, 1): 5,
++    (0x6D, 1, 0): 4,
++    (0x6D, 1, 1): 4,
++    (0x6E, 0, 0): 8,
++    (0x6E, 0, 1): 8,
++    (0x6E, 1, 0): 6,
++    (0x6E, 1, 1): 6,
++    (0x6F, 0, 0): 6,
++    (0x6F, 0, 1): 6,
++    (0x6F, 1, 0): 5,
++    (0x6F, 1, 1): 5,
++    (0x70, 0, 0): 2,
++    (0x70, 0, 1): 2,
++    (0x70, 1, 0): 2,
++    (0x70, 1, 1): 2,
++    (0x71, 0, 0): 7,
++    (0x71, 0, 1): 6,
++    (0x71, 1, 0): 6,
++    (0x71, 1, 1): 5,
++    (0x72, 0, 0): 6,
++    (0x72, 0, 1): 6,
++    (0x72, 1, 0): 5,
++    (0x72, 1, 1): 5,
++    (0x73, 0, 0): 8,
++    (0x73, 0, 1): 8,
++    (0x73, 1, 0): 7,
++    (0x73, 1, 1): 7,
++    (0x74, 0, 0): 5,
++    (0x74, 0, 1): 5,
++    (0x74, 1, 0): 4,
++    (0x74, 1, 1): 4,
++    (0x75, 0, 0): 5,
++    (0x75, 0, 1): 5,
++    (0x75, 1, 0): 4,
++    (0x75, 1, 1): 4,
++    (0x76, 0, 0): 8,
++    (0x76, 0, 1): 8,
++    (0x76, 1, 0): 6,
++    (0x76, 1, 1): 6,
++    (0x77, 0, 0): 7,
++    (0x77, 0, 1): 7,
++    (0x77, 1, 0): 6,
++    (0x77, 1, 1): 6,
++    (0x78, 0, 0): 2,
++    (0x78, 0, 1): 2,
++    (0x78, 1, 0): 2,
++    (0x78, 1, 1): 2,
++    (0x79, 0, 0): 6,
++    (0x79, 0, 1): 5,
++    (0x79, 1, 0): 5,
++    (0x79, 1, 1): 4,
++    (0x7A, 0, 0): 5,
++    (0x7A, 0, 1): 4,
++    (0x7A, 1, 0): 5,
++    (0x7A, 1, 1): 4,
++    (0x7B, 0, 0): 2,
++    (0x7B, 0, 1): 2,
++    (0x7B, 1, 0): 2,
++    (0x7B, 1, 1): 2,
++    (0x7C, 0, 0): 6,
++    (0x7C, 0, 1): 6,
++    (0x7C, 1, 0): 6,
++    (0x7C, 1, 1): 6,
++    (0x7D, 0, 0): 6,
++    (0x7D, 0, 1): 5,
++    (0x7D, 1, 0): 5,
++    (0x7D, 1, 1): 4,
++    (0x7E, 0, 0): 9,
++    (0x7E, 0, 1): 9,
++    (0x7E, 1, 0): 7,
++    (0x7E, 1, 1): 7,
++    (0x7F, 0, 0): 6,
++    (0x7F, 0, 1): 6,
++    (0x7F, 1, 0): 5,
++    (0x7F, 1, 1): 5,
++    (0x80, 0, 0): 3,
++    (0x80, 0, 1): 3,
++    (0x80, 1, 0): 3,
++    (0x80, 1, 1): 3,
++    (0x81, 0, 0): 7,
++    (0x81, 0, 1): 7,
++    (0x81, 1, 0): 6,
++    (0x81, 1, 1): 6,
++    (0x82, 0, 0): 4,
++    (0x82, 0, 1): 4,
++    (0x82, 1, 0): 4,
++    (0x82, 1, 1): 4,
++    (0x83, 0, 0): 5,
++    (0x83, 0, 1): 5,
++    (0x83, 1, 0): 4,
++    (0x83, 1, 1): 4,
++    (0x84, 0, 0): 4,
++    (0x84, 0, 1): 3,
++    (0x84, 1, 0): 4,
++    (0x84, 1, 1): 3,
++    (0x85, 0, 0): 4,
++    (0x85, 0, 1): 4,
++    (0x85, 1, 0): 3,
++    (0x85, 1, 1): 3,
++    (0x86, 0, 0): 4,
++    (0x86, 0, 1): 3,
++    (0x86, 1, 0): 4,
++    (0x86, 1, 1): 3,
++    (0x87, 0, 0): 7,
++    (0x87, 0, 1): 7,
++    (0x87, 1, 0): 6,
++    (0x87, 1, 1): 6,
++    (0x88, 0, 0): 2,
++    (0x88, 0, 1): 2,
++    (0x88, 1, 0): 2,
++    (0x88, 1, 1): 2,
++    (0x89, 0, 0): 3,
++    (0x89, 0, 1): 3,
++    (0x89, 1, 0): 2,
++    (0x89, 1, 1): 2,
++    (0x8A, 0, 0): 2,
++    (0x8A, 0, 1): 2,
++    (0x8A, 1, 0): 2,
++    (0x8A, 1, 1): 2,
++    (0x8B, 0, 0): 3,
++    (0x8B, 0, 1): 3,
++    (0x8B, 1, 0): 3,
++    (0x8B, 1, 1): 3,
++    (0x8C, 0, 0): 5,
++    (0x8C, 0, 1): 4,
++    (0x8C, 1, 0): 5,
++    (0x8C, 1, 1): 4,
++    (0x8D, 0, 0): 5,
++    (0x8D, 0, 1): 5,
++    (0x8D, 1, 0): 4,
++    (0x8D, 1, 1): 4,
++    (0x8E, 0, 0): 5,
++    (0x8E, 0, 1): 4,
++    (0x8E, 1, 0): 5,
++    (0x8E, 1, 1): 4,
++    (0x8F, 0, 0): 6,
++    (0x8F, 0, 1): 6,
++    (0x8F, 1, 0): 5,
++    (0x8F, 1, 1): 5,
++    (0x90, 0, 0): 2,
++    (0x90, 0, 1): 2,
++    (0x90, 1, 0): 2,
++    (0x90, 1, 1): 2,
++    (0x91, 0, 0): 7,
++    (0x91, 0, 1): 7,
++    (0x91, 1, 0): 6,
++    (0x91, 1, 1): 6,
++    (0x92, 0, 0): 6,
++    (0x92, 0, 1): 6,
++    (0x92, 1, 0): 5,
++    (0x92, 1, 1): 5,
++    (0x93, 0, 0): 8,
++    (0x93, 0, 1): 8,
++    (0x93, 1, 0): 7,
++    (0x93, 1, 1): 7,
++    (0x94, 0, 0): 5,
++    (0x94, 0, 1): 4,
++    (0x94, 1, 0): 5,
++    (0x94, 1, 1): 4,
++    (0x95, 0, 0): 5,
++    (0x95, 0, 1): 5,
++    (0x95, 1, 0): 4,
++    (0x95, 1, 1): 4,
++    (0x96, 0, 0): 5,
++    (0x96, 0, 1): 4,
++    (0x96, 1, 0): 5,
++    (0x96, 1, 1): 4,
++    (0x97, 0, 0): 7,
++    (0x97, 0, 1): 7,
++    (0x97, 1, 0): 6,
++    (0x97, 1, 1): 6,
++    (0x98, 0, 0): 2,
++    (0x98, 0, 1): 2,
++    (0x98, 1, 0): 2,
++    (0x98, 1, 1): 2,
++    (0x99, 0, 0): 6,
++    (0x99, 0, 1): 6,
++    (0x99, 1, 0): 5,
++    (0x99, 1, 1): 5,
++    (0x9A, 0, 0): 2,
++    (0x9A, 0, 1): 2,
++    (0x9A, 1, 0): 2,
++    (0x9A, 1, 1): 2,
++    (0x9B, 0, 0): 2,
++    (0x9B, 0, 1): 2,
++    (0x9B, 1, 0): 2,
++    (0x9B, 1, 1): 2,
++    (0x9C, 0, 0): 5,
++    (0x9C, 0, 1): 5,
++    (0x9C, 1, 0): 4,
++    (0x9C, 1, 1): 4,
++    (0x9D, 0, 0): 6,
++    (0x9D, 0, 1): 6,
++    (0x9D, 1, 0): 5,
++    (0x9D, 1, 1): 5,
++    (0x9E, 0, 0): 6,
++    (0x9E, 0, 1): 6,
++    (0x9E, 1, 0): 5,
++    (0x9E, 1, 1): 5,
++    (0x9F, 0, 0): 6,
++    (0x9F, 0, 1): 6,
++    (0x9F, 1, 0): 5,
++    (0x9F, 1, 1): 5,
++    (0xA0, 0, 0): 3,
++    (0xA0, 0, 1): 2,
++    (0xA0, 1, 0): 3,
++    (0xA0, 1, 1): 2,
++    (0xA1, 0, 0): 7,
++    (0xA1, 0, 1): 7,
++    (0xA1, 1, 0): 6,
++    (0xA1, 1, 1): 6,
++    (0xA2, 0, 0): 3,
++    (0xA2, 0, 1): 2,
++    (0xA2, 1, 0): 3,
++    (0xA2, 1, 1): 2,
++    (0xA3, 0, 0): 5,
++    (0xA3, 0, 1): 5,
++    (0xA3, 1, 0): 4,
++    (0xA3, 1, 1): 4,
++    (0xA4, 0, 0): 4,
++    (0xA4, 0, 1): 3,
++    (0xA4, 1, 0): 4,
++    (0xA4, 1, 1): 3,
++    (0xA5, 0, 0): 4,
++    (0xA5, 0, 1): 4,
++    (0xA5, 1, 0): 3,
++    (0xA5, 1, 1): 3,
++    (0xA6, 0, 0): 4,
++    (0xA6, 0, 1): 3,
++    (0xA6, 1, 0): 4,
++    (0xA6, 1, 1): 3,
++    (0xA7, 0, 0): 7,
++    (0xA7, 0, 1): 7,
++    (0xA7, 1, 0): 6,
++    (0xA7, 1, 1): 6,
++    (0xA8, 0, 0): 2,
++    (0xA8, 0, 1): 2,
++    (0xA8, 1, 0): 2,
++    (0xA8, 1, 1): 2,
++    (0xA9, 0, 0): 3,
++    (0xA9, 0, 1): 3,
++    (0xA9, 1, 0): 2,
++    (0xA9, 1, 1): 2,
++    (0xAA, 0, 0): 2,
++    (0xAA, 0, 1): 2,
++    (0xAA, 1, 0): 2,
++    (0xAA, 1, 1): 2,
++    (0xAB, 0, 0): 4,
++    (0xAB, 0, 1): 4,
++    (0xAB, 1, 0): 4,
++    (0xAB, 1, 1): 4,
++    (0xAC, 0, 0): 5,
++    (0xAC, 0, 1): 4,
++    (0xAC, 1, 0): 5,
++    (0xAC, 1, 1): 4,
++    (0xAD, 0, 0): 5,
++    (0xAD, 0, 1): 5,
++    (0xAD, 1, 0): 4,
++    (0xAD, 1, 1): 4,
++    (0xAE, 0, 0): 5,
++    (0xAE, 0, 1): 4,
++    (0xAE, 1, 0): 5,
++    (0xAE, 1, 1): 4,
++    (0xAF, 0, 0): 6,
++    (0xAF, 0, 1): 6,
++    (0xAF, 1, 0): 5,
++    (0xAF, 1, 1): 5,
++    (0xB0, 0, 0): 2,
++    (0xB0, 0, 1): 2,
++    (0xB0, 1, 0): 2,
++    (0xB0, 1, 1): 2,
++    (0xB1, 0, 0): 7,
++    (0xB1, 0, 1): 6,
++    (0xB1, 1, 0): 6,
++    (0xB1, 1, 1): 5,
++    (0xB2, 0, 0): 6,
++    (0xB2, 0, 1): 6,
++    (0xB2, 1, 0): 5,
++    (0xB2, 1, 1): 5,
++    (0xB3, 0, 0): 8,
++    (0xB3, 0, 1): 8,
++    (0xB3, 1, 0): 7,
++    (0xB3, 1, 1): 7,
++    (0xB4, 0, 0): 5,
++    (0xB4, 0, 1): 4,
++    (0xB4, 1, 0): 5,
++    (0xB4, 1, 1): 4,
++    (0xB5, 0, 0): 5,
++    (0xB5, 0, 1): 5,
++    (0xB5, 1, 0): 4,
++    (0xB5, 1, 1): 4,
++    (0xB6, 0, 0): 5,
++    (0xB6, 0, 1): 4,
++    (0xB6, 1, 0): 5,
++    (0xB6, 1, 1): 4,
++    (0xB7, 0, 0): 7,
++    (0xB7, 0, 1): 7,
++    (0xB7, 1, 0): 6,
++    (0xB7, 1, 1): 6,
++    (0xB8, 0, 0): 2,
++    (0xB8, 0, 1): 2,
++    (0xB8, 1, 0): 2,
++    (0xB8, 1, 1): 2,
++    (0xB9, 0, 0): 6,
++    (0xB9, 0, 1): 5,
++    (0xB9, 1, 0): 5,
++    (0xB9, 1, 1): 4,
++    (0xBA, 0, 0): 2,
++    (0xBA, 0, 1): 2,
++    (0xBA, 1, 0): 2,
++    (0xBA, 1, 1): 2,
++    (0xBB, 0, 0): 2,
++    (0xBB, 0, 1): 2,
++    (0xBB, 1, 0): 2,
++    (0xBB, 1, 1): 2,
++    (0xBC, 0, 0): 6,
++    (0xBC, 0, 1): 4,
++    (0xBC, 1, 0): 6,
++    (0xBC, 1, 1): 4,
++    (0xBD, 0, 0): 6,
++    (0xBD, 0, 1): 5,
++    (0xBD, 1, 0): 5,
++    (0xBD, 1, 1): 4,
++    (0xBE, 0, 0): 6,
++    (0xBE, 0, 1): 4,
++    (0xBE, 1, 0): 6,
++    (0xBE, 1, 1): 4,
++    (0xBF, 0, 0): 6,
++    (0xBF, 0, 1): 6,
++    (0xBF, 1, 0): 5,
++    (0xBF, 1, 1): 5,
++    (0xC0, 0, 0): 3,
++    (0xC0, 0, 1): 2,
++    (0xC0, 1, 0): 3,
++    (0xC0, 1, 1): 2,
++    (0xC1, 0, 0): 7,
++    (0xC1, 0, 1): 7,
++    (0xC1, 1, 0): 6,
++    (0xC1, 1, 1): 6,
++    (0xC2, 0, 0): 3,
++    (0xC2, 0, 1): 3,
++    (0xC2, 1, 0): 3,
++    (0xC2, 1, 1): 3,
++    (0xC3, 0, 0): 5,
++    (0xC3, 0, 1): 5,
++    (0xC3, 1, 0): 4,
++    (0xC3, 1, 1): 4,
++    (0xC4, 0, 0): 4,
++    (0xC4, 0, 1): 3,
++    (0xC4, 1, 0): 4,
++    (0xC4, 1, 1): 3,
++    (0xC5, 0, 0): 4,
++    (0xC5, 0, 1): 4,
++    (0xC5, 1, 0): 3,
++    (0xC5, 1, 1): 3,
++    (0xC6, 0, 0): 7,
++    (0xC6, 0, 1): 7,
++    (0xC6, 1, 0): 5,
++    (0xC6, 1, 1): 5,
++    (0xC7, 0, 0): 7,
++    (0xC7, 0, 1): 7,
++    (0xC7, 1, 0): 6,
++    (0xC7, 1, 1): 6,
++    (0xC8, 0, 0): 2,
++    (0xC8, 0, 1): 2,
++    (0xC8, 1, 0): 2,
++    (0xC8, 1, 1): 2,
++    (0xC9, 0, 0): 3,
++    (0xC9, 0, 1): 3,
++    (0xC9, 1, 0): 2,
++    (0xC9, 1, 1): 2,
++    (0xCA, 0, 0): 2,
++    (0xCA, 0, 1): 2,
++    (0xCA, 1, 0): 2,
++    (0xCA, 1, 1): 2,
++    (0xCC, 0, 0): 5,
++    (0xCC, 0, 1): 4,
++    (0xCC, 1, 0): 5,
++    (0xCC, 1, 1): 4,
++    (0xCD, 0, 0): 5,
++    (0xCD, 0, 1): 5,
++    (0xCD, 1, 0): 4,
++    (0xCD, 1, 1): 4,
++    (0xCE, 0, 0): 8,
++    (0xCE, 0, 1): 8,
++    (0xCE, 1, 0): 6,
++    (0xCE, 1, 1): 6,
++    (0xCF, 0, 0): 6,
++    (0xCF, 0, 1): 6,
++    (0xCF, 1, 0): 5,
++    (0xCF, 1, 1): 5,
++    (0xD0, 0, 0): 2,
++    (0xD0, 0, 1): 2,
++    (0xD0, 1, 0): 2,
++    (0xD0, 1, 1): 2,
++    (0xD1, 0, 0): 7,
++    (0xD1, 0, 1): 6,
++    (0xD1, 1, 0): 6,
++    (0xD1, 1, 1): 5,
++    (0xD2, 0, 0): 6,
++    (0xD2, 0, 1): 6,
++    (0xD2, 1, 0): 5,
++    (0xD2, 1, 1): 5,
++    (0xD3, 0, 0): 8,
++    (0xD3, 0, 1): 8,
++    (0xD3, 1, 0): 7,
++    (0xD3, 1, 1): 7,
++    (0xD4, 0, 0): 6,
++    (0xD4, 0, 1): 6,
++    (0xD4, 1, 0): 6,
++    (0xD4, 1, 1): 6,
++    (0xD5, 0, 0): 5,
++    (0xD5, 0, 1): 5,
++    (0xD5, 1, 0): 4,
++    (0xD5, 1, 1): 4,
++    (0xD6, 0, 0): 8,
++    (0xD6, 0, 1): 8,
++    (0xD6, 1, 0): 6,
++    (0xD6, 1, 1): 6,
++    (0xD7, 0, 0): 7,
++    (0xD7, 0, 1): 7,
++    (0xD7, 1, 0): 6,
++    (0xD7, 1, 1): 6,
++    (0xD8, 0, 0): 2,
++    (0xD8, 0, 1): 2,
++    (0xD8, 1, 0): 2,
++    (0xD8, 1, 1): 2,
++    (0xD9, 0, 0): 6,
++    (0xD9, 0, 1): 5,
++    (0xD9, 1, 0): 5,
++    (0xD9, 1, 1): 4,
++    (0xDA, 0, 0): 4,
++    (0xDA, 0, 1): 3,
++    (0xDA, 1, 0): 4,
++    (0xDA, 1, 1): 3,
++    (0xDC, 0, 0): 6,
++    (0xDC, 0, 1): 6,
++    (0xDC, 1, 0): 6,
++    (0xDC, 1, 1): 6,
++    (0xDD, 0, 0): 6,
++    (0xDD, 0, 1): 5,
++    (0xDD, 1, 0): 5,
++    (0xDD, 1, 1): 4,
++    (0xDE, 0, 0): 9,
++    (0xDE, 0, 1): 9,
++    (0xDE, 1, 0): 7,
++    (0xDE, 1, 1): 7,
++    (0xDF, 0, 0): 6,
++    (0xDF, 0, 1): 6,
++    (0xDF, 1, 0): 5,
++    (0xDF, 1, 1): 5,
++    (0xE0, 0, 0): 3,
++    (0xE0, 0, 1): 2,
++    (0xE0, 1, 0): 3,
++    (0xE0, 1, 1): 2,
++    (0xE1, 0, 0): 7,
++    (0xE1, 0, 1): 7,
++    (0xE1, 1, 0): 6,
++    (0xE1, 1, 1): 6,
++    (0xE2, 0, 0): 3,
++    (0xE2, 0, 1): 3,
++    (0xE2, 1, 0): 3,
++    (0xE2, 1, 1): 3,
++    (0xE3, 0, 0): 5,
++    (0xE3, 0, 1): 5,
++    (0xE3, 1, 0): 4,
++    (0xE3, 1, 1): 4,
++    (0xE4, 0, 0): 4,
++    (0xE4, 0, 1): 3,
++    (0xE4, 1, 0): 4,
++    (0xE4, 1, 1): 3,
++    (0xE5, 0, 0): 4,
++    (0xE5, 0, 1): 4,
++    (0xE5, 1, 0): 3,
++    (0xE5, 1, 1): 3,
++    (0xE6, 0, 0): 7,
++    (0xE6, 0, 1): 7,
++    (0xE6, 1, 0): 5,
++    (0xE6, 1, 1): 5,
++    (0xE7, 0, 0): 7,
++    (0xE7, 0, 1): 7,
++    (0xE7, 1, 0): 6,
++    (0xE7, 1, 1): 6,
++    (0xE8, 0, 0): 2,
++    (0xE8, 0, 1): 2,
++    (0xE8, 1, 0): 2,
++    (0xE8, 1, 1): 2,
++    (0xE9, 0, 0): 3,
++    (0xE9, 0, 1): 3,
++    (0xE9, 1, 0): 2,
++    (0xE9, 1, 1): 2,
++    (0xEA, 0, 0): 2,
++    (0xEA, 0, 1): 2,
++    (0xEA, 1, 0): 2,
++    (0xEA, 1, 1): 2,
++    (0xEB, 0, 0): 3,
++    (0xEB, 0, 1): 3,
++    (0xEB, 1, 0): 3,
++    (0xEB, 1, 1): 3,
++    (0xEC, 0, 0): 5,
++    (0xEC, 0, 1): 4,
++    (0xEC, 1, 0): 5,
++    (0xEC, 1, 1): 4,
++    (0xED, 0, 0): 5,
++    (0xED, 0, 1): 5,
++    (0xED, 1, 0): 4,
++    (0xED, 1, 1): 4,
++    (0xEE, 0, 0): 8,
++    (0xEE, 0, 1): 8,
++    (0xEE, 1, 0): 6,
++    (0xEE, 1, 1): 6,
++    (0xEF, 0, 0): 6,
++    (0xEF, 0, 1): 6,
++    (0xEF, 1, 0): 5,
++    (0xEF, 1, 1): 5,
++    (0xF0, 0, 0): 2,
++    (0xF0, 0, 1): 2,
++    (0xF0, 1, 0): 2,
++    (0xF0, 1, 1): 2,
++    (0xF1, 0, 0): 7,
++    (0xF1, 0, 1): 6,
++    (0xF1, 1, 0): 6,
++    (0xF1, 1, 1): 5,
++    (0xF2, 0, 0): 6,
++    (0xF2, 0, 1): 6,
++    (0xF2, 1, 0): 5,
++    (0xF2, 1, 1): 5,
++    (0xF3, 0, 0): 8,
++    (0xF3, 0, 1): 8,
++    (0xF3, 1, 0): 7,
++    (0xF3, 1, 1): 7,
++    (0xF4, 0, 0): 5,
++    (0xF4, 0, 1): 5,
++    (0xF4, 1, 0): 5,
++    (0xF4, 1, 1): 5,
++    (0xF5, 0, 0): 5,
++    (0xF5, 0, 1): 5,
++    (0xF5, 1, 0): 4,
++    (0xF5, 1, 1): 4,
++    (0xF6, 0, 0): 8,
++    (0xF6, 0, 1): 8,
++    (0xF6, 1, 0): 6,
++    (0xF6, 1, 1): 6,
++    (0xF7, 0, 0): 7,
++    (0xF7, 0, 1): 7,
++    (0xF7, 1, 0): 6,
++    (0xF7, 1, 1): 6,
++    (0xF8, 0, 0): 2,
++    (0xF8, 0, 1): 2,
++    (0xF8, 1, 0): 2,
++    (0xF8, 1, 1): 2,
++    (0xF9, 0, 0): 6,
++    (0xF9, 0, 1): 5,
++    (0xF9, 1, 0): 5,
++    (0xF9, 1, 1): 4,
++    (0xFA, 0, 0): 5,
++    (0xFA, 0, 1): 4,
++    (0xFA, 1, 0): 5,
++    (0xFA, 1, 1): 4,
++    (0xFB, 0, 0): 2,
++    (0xFB, 0, 1): 2,
++    (0xFB, 1, 0): 2,
++    (0xFB, 1, 1): 2,
++    (0xFC, 0, 0): 8,
++    (0xFC, 0, 1): 8,
++    (0xFC, 1, 0): 8,
++    (0xFC, 1, 1): 8,
++    (0xFD, 0, 0): 6,
++    (0xFD, 0, 1): 5,
++    (0xFD, 1, 0): 5,
++    (0xFD, 1, 1): 4,
++    (0xFE, 0, 0): 9,
++    (0xFE, 0, 1): 9,
++    (0xFE, 1, 0): 7,
++    (0xFE, 1, 1): 7,
++    (0xFF, 0, 0): 6,
++    (0xFF, 0, 1): 6,
++    (0xFF, 1, 0): 5,
++    (0xFF, 1, 1): 5,
++}
+diff -ruN a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+--- a/recompiler/v2/codegen.py
++++ b/recompiler/v2/codegen.py
+@@ -2672,6 +2672,35 @@
+     et = "CPU_TR_MVN" if op.direction == "mvn" else "CPU_TR_MVP"
+     trace_pc = _trace_pc_arg()
+     speed_expr, _ = emitter_helpers.runtime_code_speed(_CURRENT_SOURCE_PC24)
++    from v2 import aot_pace
++    if aot_pace.ENABLED:
++        # Exact pacing: the interpreter executes MVN/MVP one byte per step
++        # (same opcode re-fetched), charging and sampling deadline/IRQ after
++        # each byte; do the same, resuming at this opcode on a yield.
++        opc = 0x54 if op.direction == "mvn" else 0x44
++        _cy, _mc, _ = aot_pace.insn_cost_c(
++            opc, 1, 1, (op.dst_bank & 0xFF) | ((op.src_bank & 0xFF) << 8), speed_expr)
++        return [
++            "{",
++            f"  uint8 _src_b = {op.src_bank:#04x};",
++            f"  uint8 _dst_b = {op.dst_bank:#04x};",
++            "  uint8 _old_db = cpu->DB;",
++            f"  cpu_trace_event(cpu, 0, {et}, _src_b, _dst_b);",
++            "  cpu->DB = _dst_b;",
++            f"  cpu_trace_db_change(cpu, {trace_pc}, _old_db, _dst_b, {et});",
++            "  do {",
++            f"    uint32_t _bm_mc = {_mc};",
++            "    uint8 _b = cpu_read8(cpu, _src_b, cpu->X);",
++            "    cpu_write8(cpu, _dst_b, cpu->Y, _b);",
++            f"    cpu->X = (uint16)(cpu->X {delta});",
++            f"    cpu->Y = (uint16)(cpu->Y {delta});",
++            "    if (cpu->x_flag) { cpu->X &= 0x00FFu; cpu->Y &= 0x00FFu; }",
++            "    cpu->A = (uint16)(cpu->A - 1);",
++            f"    if (aot_pace_point(cpu, {_cy}u, _bm_mc, 0x{_CURRENT_SOURCE_PC24 & 0xFFFFFF:06X}u) && cpu->A != 0xFFFF) {{ RecompStackPopYield(); "
++            f"return interp_bridge_lle_yield_unwind(cpu, {_transfer_target_expr(_CURRENT_SOURCE_PC24, False)}); }}",
++            "  } while (cpu->A != 0xFFFF);",
++            "}",
++        ]
+     return [
+         "{",
+         f"  uint8 _src_b = {op.src_bank:#04x};",
+diff -ruN a/recompiler/v2/emit_bank.py b/recompiler/v2/emit_bank.py
+--- a/recompiler/v2/emit_bank.py
++++ b/recompiler/v2/emit_bank.py
+@@ -331,4 +331,6 @@
+ #include "cpu_trace.h"
+ #include "common_cpu_infra.h"
+ #include "funcs.h"
++#define AOT_PACE_GENERATED 1
++#include "aot_pace.h"
+ """
+diff -ruN a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -35,6 +35,7 @@
+ from v2.cfg import V2Block, V2CFG, build_cfg  # noqa: E402
+ from v2.lowering import lower  # noqa: E402
+ from v2.codegen import emit_op, _transfer_target_expr  # noqa: E402
++from v2 import aot_pace  # noqa: E402
+ from v2.naming import (  # noqa: E402
+     default_func_name as _default_func_name,
+     variant_suffix as _variant_suffix,
+@@ -82,6 +83,26 @@
+     return const
+ 
+ 
++def _aot_raw_operand(rom: bytes, insn) -> int:
++    """Raw little-endian operand bytes of an instruction (the decoder's
++    `operand` is a resolved target for branches and 0 for block moves)."""
++    from snes65816 import rom_offset as _ro
++    pc24 = getattr(insn, 'addr', 0)
++    n = getattr(insn, 'length', 1) - 1
++    try:
++        off = _ro((pc24 >> 16) & 0xFF, pc24 & 0xFFFF)
++        return int.from_bytes(rom[off + 1:off + 1 + n], 'little')
++    except Exception:
++        return getattr(insn, 'operand', 0) or 0
++
++
++def _aot_is_control(op, di_insn) -> bool:
++    if isinstance(op, (CondBranch, Goto, Return, IndirectGoto, Call)):
++        return True
++    return (isinstance(op, (PushReg, PushEffectiveAddress))
++            and bool(getattr(di_insn, 'dispatch_entries', None)))
++
++
+ def _block_speed(bank: int, pc: int):
+     """Code-region cycle weighting, using live PBR for mirrored bodies."""
+     from v2.emitter_helpers import runtime_code_speed
+@@ -1492,12 +1513,48 @@
+                         f"/* trampoline setup {di_insn.mnem} skipped — "
+                         f"inlined into synthesized dispatch below */"
+                     )
++                if aot_pace.ENABLED:
++                    _sc, _sm, _ = aot_pace.insn_cost_c(
++                        di_insn.opcode, di_insn.m_flag, di_insn.x_flag,
++                        _aot_raw_operand(rom, di_insn), _blk_spd_expr)
++                    lines.append(f"(void)aot_pace_point(cpu, {_sc}, {_sm}, "
++                                 f"0x{getattr(di_insn, 'addr', 0) & 0xFFFFFF:06X}u);")
+                 continue
+             # Axis-2 step C dynamics: charge runtime-only modifiers (D.l != 0,
+             # abs,X/Y read page-cross) for this instruction before its effect.
+-            for _ln in _dynamic_charge_lines(di_insn, _blk_spd_expr):
+-                lines.append(_ln)
++            if not aot_pace.ENABLED:
++                for _ln in _dynamic_charge_lines(di_insn, _blk_spd_expr):
++                    lines.append(_ln)
++            # Exact pacing (aot_pace.py): this instruction's interpreter cost,
++            # evaluated on its pre-state, charged after its effects (before a
++            # control transfer), with a yield point at the next boundary.
++            _aot_charge = None
++            if aot_pace.ENABLED and di_insn.opcode not in (0x44, 0x54):
++                _aot_cyc, _aot_mcx, _aot_static = aot_pace.insn_cost_c(
++                    di_insn.opcode, di_insn.m_flag, di_insn.x_flag,
++                    _aot_raw_operand(rom, di_insn), _blk_spd_expr)
++                _aot_pc = getattr(di_insn, 'addr', 0) & 0xFFFFFF
++                if _aot_static:
++                    _aot_charge = f"aot_pace_point(cpu, {_aot_cyc}u, {_aot_mcx}, 0x{_aot_pc:06X}u)"
++                else:
++                    lines.append(f"_aot_cy = {_aot_cyc}; _aot_mc = {_aot_mcx};")
++                    _aot_charge = f"aot_pace_point(cpu, _aot_cy, _aot_mc, 0x{_aot_pc:06X}u)"
++            _aot_refund_from = None
+             for op in ir_ops:
++                if _aot_charge is not None and _aot_is_control(op, di_insn):
++                    if isinstance(op, IndirectGoto):
++                        # An unresolved indirect jump hands THIS instruction
++                        # back to the interpreter, which executes (and
++                        # charges) it again: charge without the boundary
++                        # event (the target's entry check runs it) and
++                        # refund on the re-execute path.
++                        if "_aot_cy, _aot_mc" not in _aot_charge:
++                            lines.append(f"_aot_cy = {_aot_cyc}; _aot_mc = {_aot_mcx};")
++                        lines.append("aot_pace_charge(cpu, _aot_cy, _aot_mc);")
++                        _aot_refund_from = len(lines)
++                    else:
++                        lines.append(f"(void){_aot_charge};")
++                    _aot_charge = None
+                 if isinstance(op, CondBranch):
+                     # Cond branch: block has TWO successors: fall-through (0)
+                     # and taken-target (1) per _successors() ordering.
+@@ -1512,9 +1569,15 @@
+                         # block const charged the not-taken base). Native mode;
+                         # the emulation-only page-cross +1 is omitted (SNES game
+                         # code runs e=0).
+-                        lines.append(
+-                            f"if ({pred}) {{ cpu->cycles += 1; "
+-                            f"cpu->master_cycles += {_blk_spd_expr}; {target_stmt} }}")
++                        if aot_pace.ENABLED:
++                            # Taken: one internal cycle (6 master clocks),
++                            # also owed to the SPC catch-up like any other.
++                            lines.append(
++                                f"if ({pred}) {{ aot_pace_charge(cpu, 1u, 6u); {target_stmt} }}")
++                        else:
++                            lines.append(
++                                f"if ({pred}) {{ cpu->cycles += 1; "
++                                f"cpu->master_cycles += {_blk_spd_expr}; {target_stmt} }}")
+                     if fall is not None:
+                         lines.append(_goto_or_return(fall, source_pc24=blk_pc24)
+                                      + " /* fall-through */")
+@@ -1916,6 +1979,33 @@
+                     # ReadReg, ALU, Read/Write, etc. — non-terminating.
+                     for ln in emit_op(op, getattr(di_insn, 'addr', None)):
+                         lines.append(ln)
++            if _aot_refund_from is not None:
++                _site = f"| 0x{getattr(di_insn, 'addr', 0) & 0xFFFF:04x}u)"
++                for _ix in range(len(lines) - 1, _aot_refund_from - 1, -1):
++                    if "interp_tier_dispatch_balanced(" in lines[_ix] and _site in lines[_ix]:
++                        lines.insert(_ix, "aot_pace_refund(cpu, _aot_cy, _aot_mc);")
++            if _aot_charge is not None:
++                _aot_next = getattr(di_insn, 'addr', 0) + di_insn.length
++                _aot_push = ""
++                if (di_insn.opcode == 0x62 and ii + 1 < len(pairs)
++                        and pairs[ii + 1][0].opcode == 0x82):
++                    # PER+BRL local call (patch 0001): the PER's push is
++                    # emitted with the BRL's call. Yielding between the two
++                    # must leave the guest stack as PER left it.
++                    _rel = _aot_raw_operand(rom, di_insn)
++                    _val = (_aot_next + _rel) & 0xFFFF
++                    _aot_push = (f"cpu_write8(cpu, 0x00, cpu->S, 0x{_val >> 8:02x}); "
++                                 f"cpu->S = (uint16)(cpu->S - 1); "
++                                 f"cpu_write8(cpu, 0x00, cpu->S, 0x{_val & 0xFF:02x}); "
++                                 f"cpu->S = (uint16)(cpu->S - 1); ")
++                if (ii + 1 < len(pairs) and nlr_info is None and not skip_emit_idx
++                        and not block_terminated):
++                    lines.append(
++                        f"if ({_aot_charge}) {{ {_aot_push}RecompStackPopYield(); "
++                        f"return interp_bridge_lle_yield_unwind(cpu, "
++                        f"{_transfer_target_expr(_aot_next, False)}); }}")
++                else:
++                    lines.append(f"(void){_aot_charge};")
+         # NLR with no terminator IR (block IR was pure-PullReg, like
+         # $01:A3CB's [PLA, PLA, fall-through]). The SKIP setter wasn't
+         # injected during the per-insn loop because there was no
+@@ -2052,6 +2142,8 @@
+     # Preceded by a `(void)` cast so the C compiler doesn't warn when
+     # NLR detection didn't fire on this function (most functions).
+     src.append(f'  RecompReturn _pending_skip = RECOMP_RETURN_NORMAL;')
++    if aot_pace.ENABLED:
++        src.append('  uint32_t _aot_cy = 0, _aot_mc = 0; (void)_aot_cy; (void)_aot_mc;')
+     src.append(f'  (void)_pending_skip;  /* unused if no NLR site in this fn */')
+     # cpu->S balance marker for the PEI-trampoline detector (2026-05-24,
+     # narrow variant). Captured at function entry — codegen._emit_return
+@@ -2153,7 +2245,8 @@
+         # (D.l/page-cross/branch-taken) are charged dynamically in block_lines.
+         # Axis-5: also charge the region-weighted MASTER clocks (CPU cycles x
+         # code-region speed) into cpu->master_cycles, which paces the SPC700.
+-        _cyc_const = _block_cycle_const(block_per_insn_ir.get(key, []))
++        _cyc_const = (0 if aot_pace.ENABLED else
++                      _block_cycle_const(block_per_insn_ir.get(key, [])))
+         if _cyc_const:
+             src.append(f'    cpu->cycles += {_cyc_const};')
+             _spd_expr, _spd_const = _block_speed(bank, key.pc)

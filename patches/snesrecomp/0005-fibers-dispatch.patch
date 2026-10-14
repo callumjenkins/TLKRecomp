@@ -1,0 +1,189 @@
+diff -ruN a/recompiler/v2/aot_pace_table.py b/recompiler/v2/aot_pace_table.py
+--- a/recompiler/v2/aot_pace_table.py	2026-10-12 11:41:19.358511886 -0600
++++ b/recompiler/v2/aot_pace_table.py	2026-10-12 11:41:19.360853093 -0600
+@@ -1018,3 +1018,9 @@
+     (0xFF, 1, 0): 5,
+     (0xFF, 1, 1): 5,
+ }
++# TLK task Q: WAI / STP (interp816 cyclesPerOpcode: 3); first reached by the
++# script VM handlers once $C0AF22 compiled.
++for _op in (0xCB, 0xDB):
++    for _m in (0, 1):
++        for _x in (0, 1):
++            BASE[(_op, _m, _x)] = 3
+diff -ruN a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+--- a/recompiler/v2/codegen.py	2026-10-12 11:41:19.358538636 -0600
++++ b/recompiler/v2/codegen.py	2026-10-12 11:41:19.360946674 -0600
+@@ -607,8 +607,11 @@
+         eff24 = f"({base24} + (uint32){idx_reg})"
+         return (f"(uint8)(({eff24}) >> 16)", f"(uint16)({eff24})")
+     if k == SegKind.ABS_INDIRECT:
++        # TLK task Q: JMP (abs) reads its pointer from bank $00 (W65C816S;
++        # interp816 case 0x6c), not PB. Same bytes in LoROM system banks,
++        # but in a HiROM bank $C0+ cpu->PB:$00A4 is ROM.
+         return ("cpu->PB",
+-                f"cpu_read16(cpu, cpu->PB, (uint16){seg.offset:#06x})")
++                f"cpu_read16(cpu, 0x00, (uint16){seg.offset:#06x})")
+     if k == SegKind.ABS_INDIRECT_X:
+         return ("cpu->PB",
+                 f"cpu_read16(cpu, cpu->PB, (uint16)({seg.offset:#06x} + cpu->X))")
+@@ -1533,8 +1536,8 @@
+                 "  /* PEI(dp); RTS consumes target-1 as an internal goto */")
+         else:
+             lines.append(
+-                f"  uint16 _target = cpu_read16(cpu, cpu->PB, (uint16)0x{ptr:04x});"
+-                "  /* absolute indirect dispatch: switch on the loaded pointer */")
++                f"  uint16 _target = cpu_read16(cpu, 0x00, (uint16)0x{ptr:04x});"
++                "  /* absolute indirect dispatch: switch on the loaded pointer (JMP (abs) reads bank $00) */")
+         lines.append("  switch (_target) {")
+         seen_cases = set()
+         hle_tail_entries = frozenset(
+@@ -1631,8 +1634,8 @@
+                 "  /* switch on the loaded pointer */")
+         else:
+             lines.append(
+-                f"  uint16 _target = cpu_read16(cpu, cpu->PB, (uint16)0x{ptr:04x});"
+-                "  /* absolute indirect dispatch: switch on the loaded pointer */"
++                f"  uint16 _target = cpu_read16(cpu, 0x00, (uint16)0x{ptr:04x});"
++                "  /* absolute indirect dispatch: switch on the loaded pointer (JMP (abs) reads bank $00) */"
+             )
+         if is_rts_stack_dispatch:
+             lines.append("  {")
+@@ -1756,12 +1759,26 @@
+             # form pushed it above; the PEA+JMP form's PEA pushed it) so
+             # the fall-through resumes balanced — as if the unreached
+             # handler had returned immediately.
+-            lines.append("    default:")
++            # TLK task Q: an unlisted live pointer is still a real call on
++            # the pushed frame. Run it (compiled body if one exists for the
++            # live widths, else the interpreter) instead of discarding the
++            # frame and skipping the handler.
++            _t24 = ("_target" if kind == 'long'
++                    else "(((uint32)cpu->PB << 16) | (uint32)_target)")
++            lines.append("    default: {")
+             lines.append(
+                 f"      (void)cpu_trace_dispatch_oob(cpu, 0x{site_pc24:06x}, _target);")
++            lines.append("      uint8 _miss_pb = cpu->PB;")
++            lines.append(f"      cpu->PB = (uint8)(({_t24}) >> 16);")
+             lines.append(
+-                f"      cpu->S = (uint16)(cpu->S + {miss_cleanup_size});  /* unpop unconsumed call frame */")
++                f"      RecompReturn _r = cpu_dispatch_call_pc_pushed(cpu, {_t24}, "
++                f"0x{site_pc24:06x}u, {miss_cleanup_size}, NULL);")
++            lines.append("      cpu->PB = _miss_pb;")
++            lines.append("      if (_r != RECOMP_RETURN_NORMAL) {")
++            lines.append("        return (RecompReturn)((int)_r - 1);")
++            lines.append("      }")
+             lines.append("      break;")
++            lines.append("    }")
+         else:
+             lines.append("    default: break;")
+         lines.append("  }")
+@@ -2581,6 +2598,17 @@
+         # usual mid-caller dispatch miss prematurely returns with locals (and
+         # saved DB/P/Y state) still on the stack. The unsigned delta makes the
+         # comparison safe across 16-bit S wrap for realistic (<32 KiB) frames.
++        # TLK task Q: the synthetic frame is the routine's own, so the jump
++        # target runs ON BEHALF of this routine (a PHK/PEA-pushed return into
++        # the routine body is common: $C07624 `PHK / PEA $768E / ... / PHA /
++        # RTS` calls a handler that RTLs to $C0768F). With a paired caller,
++        # interpret until the routine itself returns past entry S instead of
++        # until the target's first return.
++        "  if (_ret_s != _entry_s &&",
++        "      (uint16)(_entry_s - _ret_s) < 0x8000u &&",
++        "      !cpu_dispatch_has_entry(cpu, _rpc24) && (_hrv == 2 || _hrv == 3)) {",
++        f"    return interp_tier_dispatch_balanced(cpu, _rpc24, 0x{src24:06x}u, _entry_s, _hrv, false);",
++        "  }",
+         "  if (_ret_s != _entry_s &&",
+         "      (uint16)(_entry_s - _ret_s) < 0x8000u &&",
+         "      !cpu_dispatch_has_entry(cpu, _rpc24)) {",
+@@ -2696,7 +2724,8 @@
+             f"    cpu->Y = (uint16)(cpu->Y {delta});",
+             "    if (cpu->x_flag) { cpu->X &= 0x00FFu; cpu->Y &= 0x00FFu; }",
+             "    cpu->A = (uint16)(cpu->A - 1);",
+-            f"    if (aot_pace_point(cpu, {_cy}u, _bm_mc, 0x{_CURRENT_SOURCE_PC24 & 0xFFFFFF:06X}u) && cpu->A != 0xFFFF) {{ RecompStackPopYield(); "
++            f"    if (aot_pace_point(cpu, {_cy}u, _bm_mc, 0x{_CURRENT_SOURCE_PC24 & 0xFFFFFF:06X}u) && cpu->A != 0xFFFF && "
++            f"tlk_fiber_yield(cpu, {_transfer_target_expr(_CURRENT_SOURCE_PC24, False)})) {{ RecompStackPopYield(); "
+             f"return interp_bridge_lle_yield_unwind(cpu, {_transfer_target_expr(_CURRENT_SOURCE_PC24, False)}); }}",
+             "  } while (cpu->A != 0xFFFF);",
+             "}",
+diff -ruN a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py	2026-10-12 11:41:19.358441715 -0600
++++ b/recompiler/v2/emit_function.py	2026-10-12 11:41:19.360753493 -0600
+@@ -45,6 +45,7 @@
+ )
+ from snes65816 import (  # noqa: E402
+     ABS_X as _MODE_ABS_X, ABS_Y as _MODE_ABS_Y, IMM as _MODE_IMM,
++    ABS as _MODE_ABS, LONG as _MODE_LONG,
+     get_rom_mapping, ROM_MAP_SA1, rom_offset,
+ )
+ from v2.ir import (  # noqa: E402
+@@ -664,6 +665,24 @@
+             continue
+         if all(insn.mnem in _poll_reads and insn.mode != _MODE_IMM
+                for insn in poll_body):
++            # TLK: a loop that only polls the APU ports ($2140-$217F, abs or
++            # long into a system bank) is never parked by the bridge's
++            # stable-poll detector (APU-port reads are continuous reads), so
++            # the interpreter just spins it; with exact AOT pacing the
++            # compiled loop spins identically. Keep such functions compiled.
++            def _apu_port_poll(insn):
++                if insn.mode == _MODE_ABS:
++                    a = insn.operand & 0xFFFF
++                elif insn.mode == _MODE_LONG:
++                    b = (insn.operand >> 16) & 0xFF
++                    if not (b < 0x40 or 0x80 <= b < 0xC0):
++                        return False
++                    a = insn.operand & 0xFFFF
++                else:
++                    return False
++                return 0x2140 <= a < 0x2180
++            if all(_apu_port_poll(insn) for insn in poll_body):
++                continue
+             has_lle_memory_poll = True
+             break
+ 
+@@ -2007,8 +2026,13 @@
+                                  f"cpu->S = (uint16)(cpu->S - 1); ")
+                 if (ii + 1 < len(pairs) and nlr_info is None and not skip_emit_idx
+                         and not block_terminated):
++                    # TLK task Q: a due yield first tries to suspend the
++                    # compiled chain on its fiber (runner/tlk_fiber.c); not
++                    # between a PER and its BRL (the push is pending).
++                    _aot_fib = ("" if _aot_push else
++                                f" && tlk_fiber_yield(cpu, {_transfer_target_expr(_aot_next, False)})")
+                     lines.append(
+-                        f"if ({_aot_charge}) {{ {_aot_push}RecompStackPopYield(); "
++                        f"if ({_aot_charge}{_aot_fib}) {{ {_aot_push}RecompStackPopYield(); "
+                         f"return interp_bridge_lle_yield_unwind(cpu, "
+                         f"{_transfer_target_expr(_aot_next, False)}); }}")
+                 else:
+@@ -2124,7 +2148,7 @@
+     # calls to cross an event-driven host's frame deadline. Yield before
+     # entering the next architectural callee so the owning interpreter can
+     # deliver NMI/IRQ without discarding the already-pushed guest return frame.
+-    src.append('  if (interp_bridge_lle_master_deadline_reached(cpu)) {')
++    src.append(f'  if (interp_bridge_lle_master_deadline_reached(cpu) && tlk_fiber_yield(cpu, {_transfer_target_expr(fn_entry_pc, False)})) {{')
+     src.append('    RecompStackPopYield();')
+     src.append(
+         f'    return interp_bridge_lle_yield_unwind(cpu, {_transfer_target_expr(fn_entry_pc, False)});'
+@@ -2132,6 +2156,10 @@
+     src.append('  }')
+     if has_lle_memory_poll:
+         src.append('  if (interp_bridge_in_lle_scheduler()) {')
++        # TLK task Q: on the fiber, interpret the poll routine in a nested
++        # frame instead of unwinding the compiled chain.
++        src.append(f'    int _tlk_pr = tlk_fiber_poll_entry(cpu, {_transfer_target_expr(fn_entry_pc, False)});')
++        src.append('    if (_tlk_pr >= 0) { RecompStackPop(); return (RecompReturn)_tlk_pr; }')
+         src.append('    RecompStackPopYield();')
+         src.append(
+             f'    return interp_bridge_lle_yield_unwind(cpu, {_transfer_target_expr(fn_entry_pc, False)});'
+@@ -2234,7 +2262,8 @@
+         # instruction boundary, so it is safe to unwind here and resume this
+         # exact PC through the owning interpreter after host events run.
+         src.append(
+-            f'    if (interp_bridge_lle_master_deadline_reached(cpu)) {{')
++            f'    if (interp_bridge_lle_master_deadline_reached(cpu) && '
++            f'tlk_fiber_yield(cpu, {_transfer_target_expr(block_pc24, False)})) {{')
+         src.append('      RecompStackPopYield();')
+         src.append(
+             f'      return interp_bridge_lle_yield_unwind('

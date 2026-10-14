@@ -1,0 +1,102 @@
+# SPC700 guest clock for the frame-anchored APU timeline (non-extended path,
+# which tlk_headless uses; the desktop host enables extended frame timing).
+#
+# The pinned runtime advances the SPC 17088 cycles per host frame and maps a
+# within-frame master offset by 17088/357368, i.e. a 1,025,280 Hz SPC against a
+# 21,442,080 Hz (1364*262*60) master clock. Real NTSC (and bsnes) runs the
+# master at 21,477,272 Hz (357,366 clocks per frame on average), so the
+# runtime's SPC ran 0.165% fast: ~2.9 frames of SPC time ahead of bsnes by
+# frame 1789. It also restarted the mapping at each host frame's first
+# master_cycles value, which sits a few to a few hundred clocks past the true
+# field boundary (the CPU finishes its instruction, or owes clocks), so the
+# SPC jittered against the CPU from frame to frame.
+#
+# That moved every CPU<->SPC handshake. TLK's command handshake
+# ($C22388-$C22396, CMP $2141 / BNE) waited 1104 and 570 extra loop iterations
+# on poll 1482 of TAS 6987M where bsnes waits none, the frame overran, and the
+# game got a lag frame bsnes does not have (tools/compare_opcode_traces.py on
+# the poll 1482 opcode traces; INTEGRATE.md).
+#
+# Fix: guest SPC time = (master clocks since host reset) * 1025280 / 21477272.
+# The beam frame driver keeps g_cpu.master_cycles on the beam (it parks the
+# clock at each field end), so this is the hardware clock in both tiers.
+file: runner/src/common_rtl.c
+
+@@ apu-guest-cycle-ntsc-ratio
+<<<<
+  uint64_t within = g_cpu.master_cycles - g_apu_frame_start_master;
+  if (within >= RTL_MASTER_CYCLES_PER_FRAME)
+    within = RTL_MASTER_CYCLES_PER_FRAME - 1;
+  return (uint64_t)snes_frame_counter * RTL_APU_CYCLES_PER_FRAME +
+         within * RTL_APU_CYCLES_PER_FRAME /
+             RTL_MASTER_CYCLES_PER_FRAME;
+}
+====
+  return tlk_apu_cycle_at(g_cpu.master_cycles);
+}
+>>>>
+
+@@ apu-ntsc-ratio-constants
+<<<<
+static uint64_t rtl_apu_guest_cycle(void) {
+====
+/* TLK: true NTSC master clock and bsnes SPC700 rate (32040 * 768 / 24). */
+#define TLK_NTSC_MASTER_HZ 21477272ull
+/* Task O: the SPC rate is the emulated core's. bsnes v115 (BizHawk BSNESv115+)
+ * runs it at 32040*768 Hz; bsnes v0.87 (BizHawk "BSNES", LibsnesCore, which
+ * replays TAS 2716M) at 32040.5*768 = 24607104 Hz, i.e. 1025296 SPC cycles/s.
+ * TLK_SPC_HZ overrides the default (1025280). */
+#define TLK_SPC_HZ tlk_spc_hz()
+static uint64_t tlk_spc_hz(void) {
+  static uint64_t hz;
+  if (!hz) { const char *e = getenv("TLK_SPC_HZ"); hz = e ? strtoull(e, NULL, 10) : 0; if (!hz) hz = 1025280ull; }
+  return hz;
+}
+static uint64_t s_tlk_apu_origin_master;  /* g_cpu.master_cycles at host reset */
+static uint64_t tlk_apu_cycle_at(uint64_t master) {
+  uint64_t since = master >= s_tlk_apu_origin_master ? master - s_tlk_apu_origin_master : 0;
+  return since * TLK_SPC_HZ / TLK_NTSC_MASTER_HZ;
+}
+/* Nearest SPC cycle: a CPU port write becomes visible to the SMP read that
+ * samples mid-cycle (see apu-port-write-half-cycle). */
+static uint64_t tlk_apu_write_cycle_at(uint64_t master) {
+  uint64_t since = master >= s_tlk_apu_origin_master ? master - s_tlk_apu_origin_master : 0;
+  return (since * TLK_SPC_HZ * 2 + TLK_NTSC_MASTER_HZ) / (2 * TLK_NTSC_MASTER_HZ);
+}
+static uint64_t rtl_apu_guest_cycle(void) {
+>>>>
+
+@@ apu-origin-at-reset
+<<<<
+  g_apu_frame_clock = (RtlApuFrameClock){0};
+  g_apu_frame_start_master = g_cpu.master_cycles;
+====
+  g_apu_frame_clock = (RtlApuFrameClock){0};
+  g_apu_frame_start_master = g_cpu.master_cycles;
+  s_tlk_apu_origin_master = g_cpu.master_cycles;
+>>>>
+
+@@ apu-frame-boundary-ntsc-ratio
+<<<<
+      : (uint64_t)snes_frame_counter * RTL_APU_CYCLES_PER_FRAME;
+====
+      : tlk_apu_cycle_at(g_cpu.master_cycles);
+>>>>
+
+# Task I: the SMP samples $F4-$F7 in the middle of its read cycle (bsnes
+# SMP::read: a half wait before and after the access, "bus hold delays on CPU
+# I/O reads"), not at its end. A CPU port write in the second half of an SPC
+# cycle is therefore seen one cycle later. Round the write's SPC timestamp to
+# the nearest cycle instead of down, so it lands on the cycle whose read can
+# see it. TLK's streaming upload (SPC $19CF / $19E4: CMP A,$F6 / BEQ) races the
+# CPU's STX $2142 against that read on every byte pair; with floor rounding
+# the SPC won the race ~45% of the time against ~8% in BizHawk.
+@@ apu-port-write-half-cycle
+<<<<
+    uint64_t guest_cycle = rtl_apu_guest_cycle();
+    while (!apu_schedulePortWrite(g_snes->apu, port, val, guest_cycle))
+====
+    uint64_t guest_cycle = g_extended_frame_timing
+        ? rtl_apu_guest_cycle() : tlk_apu_write_cycle_at(g_cpu.master_cycles);
+    while (!apu_schedulePortWrite(g_snes->apu, port, val, guest_cycle))
+>>>>

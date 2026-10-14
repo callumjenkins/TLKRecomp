@@ -1,0 +1,137 @@
+# Task M: exact AOT pacing. The interpreter walks the beam after every opcode,
+# so a hardware register access always sees the beam at the master clock of
+# the instruction start. Generated code walks it lazily (runner/aot_pace.c),
+# so every hardware register touch first syncs the beam to the current master
+# clock (a no-op on the interpreter path, already synced), and clears the AOT
+# next-event cache (the access may change NMITIMEN/HTIME/VTIME or start DMA).
+# APU-port touches also flush the interpreter's pending SPC catch-up first.
+file: runner/src/cpu_state.c
+
+@@ hw-touch-sync
+<<<<
+static inline void cpu_pace_cycles(uint16 addr) {
+    g_main_cpu_cycles_estimate += 256;
+====
+static inline void cpu_pace_cycles(uint16 addr) {
+    {
+        extern uint64_t g_aot_pace_next;
+        g_aot_pace_next = 0;
+        if (g_snes) snes_sync_master_clock(g_snes, g_cpu.master_cycles);
+        /* The interpreter flushes its pending APU master clocks before every
+         * APU-port access; do it here for generated code (a no-op after the
+         * interpreter's own flush). */
+        if (addr >= 0x2140 && addr <= 0x217F) {
+            extern void tlk_bridge_apu_flush(CpuState *cpu);
+            tlk_bridge_apu_flush(&g_cpu);
+        }
+        extern void (*g_aot_pace_hw_log)(uint16 addr);
+        if (g_aot_pace_hw_log) g_aot_pace_hw_log(addr);
+    }
+    g_main_cpu_cycles_estimate += 256;
+>>>>
+
+# Task N: task I times an interpreted APU-port access at its own bus cycle
+# (interp_bridge.hunks apu-port-bus-time-*): a read 4 clocks before the end of
+# its cycle, a write at the end, a 16-bit access by its low byte. Compiled
+# code charges an instruction after its effects, so its port accesses ran at
+# instruction start. Apply the same offset from g_aot_bus_mc (the bus clocks
+# of the current compiled instruction, codegen patch 0004) unless the access
+# comes from the interpreter, which has already applied it.
+@@ aot-apu-port-bus-time-helpers
+<<<<
+static inline void cpu_pace_cycles(uint16 addr) {
+====
+static inline uint64_t tlk_aot_apu_enter(uint16 addr, uint32 lead) {
+    extern int tlk_interp_bus_timing_active(void);
+    extern uint32_t g_aot_bus_mc;
+    if (addr < 0x2140 || addr > 0x217F || tlk_interp_bus_timing_active() ||
+        g_aot_bus_mc < lead)
+        return 0;
+    uint64_t add = g_aot_bus_mc - lead;
+    g_cpu.master_cycles += add;
+    return add;
+}
+static inline void tlk_aot_apu_leave(uint64_t add) { g_cpu.master_cycles -= add; }
+static inline void cpu_pace_cycles(uint16 addr) {
+>>>>
+
+@@ aot-apu-port-bus-time-read8
+<<<<
+    if (is_hw_reg(bank, addr)) {
+        cpu_pace_cycles(addr);
+        cpu_hw_log(addr, 1, 0);
+        return cpu_latch_read8(cpu, ReadRegOpenBus(addr, cpu->open_bus));
+    }
+====
+    if (is_hw_reg(bank, addr)) {
+        uint64_t apu_t0 = tlk_aot_apu_enter(addr, 4);
+        cpu_pace_cycles(addr);
+        cpu_hw_log(addr, 1, 0);
+        uint8 rv = cpu_latch_read8(cpu, ReadRegOpenBus(addr, cpu->open_bus));
+        tlk_aot_apu_leave(apu_t0);
+        return rv;
+    }
+>>>>
+
+@@ aot-apu-port-bus-time-read16
+<<<<
+        cpu_pace_cycles_word(addr);
+        cpu_hw_log(addr, 1, 0);
+        if (addr >= 0x2140 && addr <= 0x217F)
+            return cpu_latch_read16(cpu, ReadRegWord(addr));
+====
+        uint64_t apu_t0 = tlk_aot_apu_enter(addr, 10);
+        cpu_pace_cycles_word(addr);
+        cpu_hw_log(addr, 1, 0);
+        if (addr >= 0x2140 && addr <= 0x217F) {
+            uint16 rv = cpu_latch_read16(cpu, ReadRegWord(addr));
+            tlk_aot_apu_leave(apu_t0);
+            return rv;
+        }
+>>>>
+
+@@ aot-apu-port-bus-time-write8
+<<<<
+    if (is_hw_reg(bank, addr)) { cpu_pace_cycles(addr); cpu_hw_log(addr, 0, v); WriteReg(addr, v); return; }
+====
+    if (is_hw_reg(bank, addr)) {
+        uint64_t apu_t0 = tlk_aot_apu_enter(addr, 0);
+        cpu_pace_cycles(addr); cpu_hw_log(addr, 0, v); WriteReg(addr, v);
+        tlk_aot_apu_leave(apu_t0);
+        return;
+    }
+>>>>
+
+@@ aot-apu-port-bus-time-write16
+<<<<
+        cpu_pace_cycles_word(addr);
+        cpu_hw_log(addr, 0, v);
+        WriteRegWord(addr, v);
+====
+        uint64_t apu_t0 = tlk_aot_apu_enter(addr, 6);
+        cpu_pace_cycles_word(addr);
+        cpu_hw_log(addr, 0, v);
+        WriteRegWord(addr, v);
+        tlk_aot_apu_leave(apu_t0);
+>>>>
+
+# Task CC: --input-polled / --ram-log feed one tape word per pad read through an
+# interpreter pre-opcode hook at the game's only pad read (`LDA $4218` at
+# $C0A07C). Generated code never runs interpreter hooks, so once that read is
+# compiled (the joypad routine $C0A05D, task CC) the tape stalled. A compiled
+# read of $4218 now calls g_tlk_aot_pad_read_hook first (the interpreter's own
+# read, inside its bus-timing window, is left to the pre-opcode hook).
+@@ aot-pad-read-hook
+<<<<
+        uint64_t apu_t0 = tlk_aot_apu_enter(addr, 4);
+        cpu_pace_cycles(addr);
+====
+        if (addr == 0x4218) {
+            extern void (*g_tlk_aot_pad_read_hook)(void);
+            extern int tlk_interp_bus_timing_active(void);
+            if (g_tlk_aot_pad_read_hook && !tlk_interp_bus_timing_active())
+                g_tlk_aot_pad_read_hook();
+        }
+        uint64_t apu_t0 = tlk_aot_apu_enter(addr, 4);
+        cpu_pace_cycles(addr);
+>>>>
