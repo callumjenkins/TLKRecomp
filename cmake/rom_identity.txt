@@ -1,0 +1,9 @@
+# ROM identity for The Lion King (SNES, USA). Headerless HiROM dump.
+display_name    = The Lion King
+rom_file        = Lion King, The (USA).sfc
+expected_crc32  = c8fbfaa8
+expected_sha256 = 457abe634e0a8be03e29513a3dca8f3e9d0ddc6bf97d8931f2316094260f3712
+rom_size        = 3145728
+mapping         = HiROM
+region          = USA
+game_id         = tlk-snes-usa

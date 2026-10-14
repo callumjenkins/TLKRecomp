@@ -1,0 +1,42 @@
+# Build output
+/build/
+/build-*/
+/dist/
+/.cache/
+/.vscode/
+/.idea/
+
+# Generated recompilation sources and artifacts
+/generated/
+tier2_coverage.json
+tier2_*.json
+tier2_*.jsonl
+
+# ROMs and cartridge dumps (NEVER commit ROMs)
+*.sfc
+*.smc
+*.fig
+*.rom
+*.sav
+*.srm
+
+# Python
+__pycache__/
+*.py[cod]
+
+# C / C++ build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.dll
+*.pdb
+
+# OS files
+.DS_Store
+Thumbs.db
+/last_session.rec
+/tlk_sdl.ini
+/tlk_slot*.state
+.pytest_cache/
