@@ -1,0 +1,61 @@
+The Lion King (SNES) - native PC build (TLKRecomp)
+==================================================
+
+This is a static recompilation of The Lion King for the Super Nintendo,
+built on snesrecomp. It does NOT include the game: you need your own
+copy of the cartridge ROM.
+
+Required ROM
+------------
+  Lion King, The (USA).sfc
+  CRC32  C8FBFAA8
+  SHA-256 457abe634e0a8be03e29513a3dca8f3e9d0ddc6bf97d8931f2316094260f3712
+  (3 MiB; a copy with a 512-byte copier header is also accepted)
+Any other region or revision is rejected.
+
+Running
+-------
+  ./tlk_sdl --rom "/path/to/Lion King, The (USA).sfc"
+
+or put the .sfc file next to tlk_sdl (or in the current directory) and run
+./tlk_sdl with no arguments: it checks every .sfc/.smc there and uses the
+first one that matches. You can also put "rom = /path/to/file.sfc" in
+tlk_sdl.ini.
+
+Linux x86_64 (glibc). SDL3 is built into tlk_sdl: nothing needs to be
+installed. It uses the desktop's own libraries when present: Wayland or
+X11 for the window, PipeWire, PulseAudio or ALSA for sound, udev/hidapi
+for gamepads. To force one: SDL_VIDEO_DRIVER=x11 (or wayland),
+SDL_AUDIO_DRIVER=pulseaudio (or pipewire, alsa). ./tlk_sdl --list-drivers
+prints what is compiled in.
+
+Options: --scale N, --fullscreen, --no-audio, --config file.ini, --help.
+
+Keys (defaults)
+---------------
+  D-pad           arrow keys
+  B / A           Z / X
+  Y / X           A / S
+  L / R           Q / W
+  Start / Select  Enter / Right Shift
+  F11, Alt+Enter  fullscreen
+  F1-F4           save state, slot 1-4
+  F5-F8           load state, slot 1-4 (also Shift+F1-F4)
+  Tab or Esc      settings menu (the game pauses); in the menu Esc quits
+
+Gamepad: any controller SDL knows. Buttons by position: bottom = B,
+right = A, left = Y, top = X, shoulders/triggers = L/R, d-pad or left
+stick to move, Start/Back = Start/Select. Guide (or Back+Start) opens the
+menu; d-pad moves, A selects, B goes back, Start closes. Pads can be
+plugged in while playing.
+
+Settings menu: window scale, fullscreen, vsync, audio, volume and
+"Controls...". On the Controls page pick a SNES button and press Enter
+(or pad A), then press the new key or the new gamepad button. Esc / Guide
+cancels. "Reset defaults" restores the table above. "Save settings"
+writes tlk_sdl.ini in the current directory (or $TLK_SDL_INI).
+
+Save states are tlk_slot1.state .. tlk_slot4.state next to the ini. They
+only load in the same build that wrote them.
+
+See LICENSE-NOTES.txt before sharing this build.

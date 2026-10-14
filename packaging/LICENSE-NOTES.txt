@@ -1,0 +1,19 @@
+License notes
+=============
+
+snesrecomp (the recompiler runtime compiled into tlk_sdl) is licensed
+under the PolyForm Noncommercial License 1.0.0 (full text in
+LICENSE-snesrecomp.txt). This build is therefore for noncommercial use
+only: it may not be sold, bundled with something that is sold, or used
+for any other commercial purpose.
+
+The Lion King is (c) Disney / Virgin Interactive. This package contains
+no ROM, no graphics, music or other game data, and no game source code.
+The tlk_sdl binary does contain the game's program code translated to
+native machine code; it does nothing without the original ROM, which it
+reads at startup for all game data. You must supply your own ROM dump of
+a cartridge you own.
+
+SDL3 3.4.10 (window, audio, input) is statically linked into tlk_sdl.
+It is (c) Sam Lantinga and contributors under the zlib license (full
+text in LICENSE-SDL3.txt; https://libsdl.org/license.php).
