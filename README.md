@@ -94,6 +94,23 @@ Packaging: `scripts/package.sh` builds `dist/TLKRecomp-linux-x86_64.tar.gz` (bin
 and no game data). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` the same way from the MinGW
 cross build (`build-win/`). `cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
 
+## Watching a speedrun
+
+`tapes/` holds four tool-assisted runs as input tapes, replayed in sync to the end:
+
+    build/tlk_sdl --rom "/path/to/Lion King, The (USA).sfc" --input-polled tapes/allbugsF.read.tape
+
+| Tape | Run |
+|---|---|
+| `6987M.read.tape` | TASVideos #6987, any% (EZGames69, SBDWolf, Akiteru, Shgofc) |
+| `6781M.read.tape` | TASVideos #6781, any% (EZGames69, SBDWolf, Akiteru) |
+| `4735M.read.tape` | TASVideos #4735, any% (EZGames69, SBDWolf) |
+| `allbugsF.read.tape` | ShgofcTAS's All Bugs run, whole game with bonus stages |
+
+Use `--input-polled`, not `--input`: these tapes hold one pad value per game pad read, not one per frame, and
+played with `--input` they desync at once. `--no-pace` fast-forwards. They were made from the BizHawk movies
+(`tools/bk2_to_tape.py`, `docs/VERIFYING.md`).
+
 ## Repository layout
 
 | Path | What |
@@ -103,6 +120,7 @@ cross build (`build-win/`). `cmake --install build --prefix DIR` installs `bin/t
 | `patches/snesrecomp/` | code generator patches, applied to a copy of the submodule at generate time |
 | `cmake/runtime-patches/` | runtime patches, applied the same way |
 | `scripts/` | generate, build, package, and the verification gates |
+| `tapes/` | speedrun input tapes (see above) |
 | `tools/` | tape conversion, BizHawk Lua loggers, coverage and accounting |
 | `docs/` | `HOW_IT_WORKS.md`, `VERIFYING.md`, `devlog.md` (engineering diary), function count, ROM accounting |
 
