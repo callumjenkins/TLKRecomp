@@ -96,20 +96,22 @@ cross build (`build-win/`). `cmake --install build --prefix DIR` installs `bin/t
 
 ## Watching a speedrun
 
-`tapes/` holds four tool-assisted runs as input tapes, replayed in sync to the end:
+`tapes/` holds four tool-assisted speedruns (TAS) as input tapes, replayed in sync to the end:
 
     build/tlk_sdl --rom "/path/to/Lion King, The (USA).sfc" --input-polled tapes/allbugsF.read.tape
 
 | Tape | Run |
 |---|---|
-| `6987M.read.tape` | TASVideos #6987, any% (EZGames69, SBDWolf, Akiteru, Shgofc) |
-| `6781M.read.tape` | TASVideos #6781, any% (EZGames69, SBDWolf, Akiteru) |
-| `4735M.read.tape` | TASVideos #4735, any% (EZGames69, SBDWolf) |
-| `allbugsF.read.tape` | ShgofcTAS's All Bugs run, whole game with bonus stages |
+| `6987M.read.tape` | [TASVideos #6987](https://tasvideos.org/6987M), any% in 10:50.396 by EZGames69, SBDWolf, Akiteru & ShgofcTAS |
+| `6781M.read.tape` | [TASVideos #6781](https://tasvideos.org/6781M), any% in 10:53.424 by EZGames69, SBDWolf & Akiteru |
+| `4735M.read.tape` | [TASVideos #4735](https://tasvideos.org/4735M), any% in 11:22.99 by EZGames69 & SBDWolf |
+| `allbugsF.read.tape` | [Lion King All Bugs Final WIP](https://tasvideos.org/UserFiles/Info/639031773616833383) by ShgofcTAS, whole game with bonus stages |
 
 Use `--input-polled`, not `--input`: these tapes hold one pad value per game pad read, not one per frame, and
-played with `--input` they desync at once. `--no-pace` fast-forwards. They were made from the BizHawk movies
-(`tools/bk2_to_tape.py`, `docs/VERIFYING.md`).
+played with `--input` they desync at once. `--no-pace` fast-forwards. They were converted from the authors' BizHawk movies
+(`tools/bk2_to_tape.py`, `docs/VERIFYING.md`): the button presses, re-timed to the game's pad reads. The movies
+are published on TASVideos under [CC BY 2.0](https://creativecommons.org/licenses/by/2.0/), and so are these
+tapes; credit the authors above when you reuse them.
 
 ## Repository layout
 
@@ -136,13 +138,13 @@ The `snesrecomp` submodule is never edited in place.
 
 - [snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp) (RetroPortingToolKit); project layout follows
   [DKC3Recomp](https://github.com/elliotttate/DKC3Recomp).
-- Reference runs: TASVideos movies #6987 (EZGames69, SBDWolf, Akiteru, Shgofc), #6781 (EZGames69, SBDWolf, Akiteru),
+- Reference runs: TASVideos movies #6987 (EZGames69, SBDWolf, Akiteru, ShgofcTAS), #6781 (EZGames69, SBDWolf, Akiteru),
   #4735 (EZGames69, SBDWolf), #2716 (Tompa), and ShgofcTAS's All Bugs run.
 - Prototype and unused-content research: The Cutting Room Floor, Hidden Palace.
 
 ## Legal
 
 The Lion King is (c) Disney / Virgin Interactive. This project is not affiliated with or endorsed by them.
-This repository's own code is MIT (`LICENSE`). snesrecomp is under the PolyForm Noncommercial License 1.0.0, so builds of this project may not be sold or used
+This repository's own code is MIT (`LICENSE`); the speedrun tapes in `tapes/` are CC BY 2.0 (see above). snesrecomp is under the PolyForm Noncommercial License 1.0.0, so builds of this project may not be sold or used
 commercially. Release binaries contain the game's program code translated to native code and do nothing without
 your own ROM.

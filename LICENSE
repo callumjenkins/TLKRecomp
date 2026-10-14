@@ -24,5 +24,7 @@ This license covers the files in this repository. It does not cover the
 snesrecomp submodule (PolyForm Noncommercial 1.0.0, see snesrecomp/LICENSE),
 the game The Lion King (c) Disney / Virgin Interactive, or anything generated
 from a ROM. Patches to snesrecomp (patches/snesrecomp/, cmake/runtime-patches/)
-contain snesrecomp code and are under its license. Binaries built from this
+contain snesrecomp code and are under its license. The input tapes in tapes/
+are converted from TASVideos movies and are under CC BY 2.0, credited to their
+authors in README.md. Binaries built from this
 project include snesrecomp and are therefore noncommercial only.
