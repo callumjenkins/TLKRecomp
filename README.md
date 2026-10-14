@@ -124,7 +124,7 @@ tapes; credit the authors above when you reuse them.
 | `scripts/` | generate, build, package, and the verification gates |
 | `tapes/` | speedrun input tapes (see above) |
 | `tools/` | tape conversion, BizHawk Lua loggers, coverage and accounting |
-| `docs/` | `HOW_IT_WORKS.md`, `VERIFYING.md`, `devlog.md` (engineering diary), function count, ROM accounting |
+| `docs/` | `HOW_IT_WORKS.md`, `VERIFYING.md`, `devlog.md` (engineering diary), function count |
 
 The `snesrecomp` submodule is never edited in place.
 
