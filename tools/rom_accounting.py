@@ -9,8 +9,8 @@ Inputs:
             library $C21924-$C223FF.
   --manifest generated/snesrecomp/program_manifest.json: [min_pc24, max_pc24] of every analysed body
             (static code; spans can include inline data, so data flags win over it).
-  level records ($C00357, tlk-map/NOTES.md): every compressed field of the 16 records is decompressed
-            with tlk-map/decompress.py to get its exact compressed extent (counted even if never loaded).
+  level records ($C00357, tools/re/NOTES.md): every compressed field of the 16 records is decompressed
+            with tools/re/decompress.py to get its exact compressed extent (counted even if never loaded).
 
 Class of a byte = first match in this order:
   code_exec (01|02), audio (40), level (level-record blob extent), compressed (20, other streams:
@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent.parent / "tlk-map"))
+sys.path.insert(0, str(HERE / "re"))
 import decompress as dz  # noqa: E402
 
 CLASSES = ["code_exec", "audio", "level", "compressed", "gfx_dma", "dma_other", "cpu_data",

@@ -24,7 +24,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-sys.path.insert(0, str(ROOT.parent / "tlk-map"))
+sys.path.insert(0, str(HERE / "re"))
 import dis65816 as d  # noqa: E402
 
 CODE_BANKS = range(0xC0, 0xC7)
