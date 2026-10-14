@@ -44,7 +44,9 @@
  *                         compiled into this binary, exit
  *
  * Without --rom (or rom= in the ini), the .sfc/.smc files next to the binary
- * and in the current directory are verified and the first match is used.
+ * and in the current directory are verified and the first match is used. If
+ * none matches (or the ini's rom is gone), an interactive run asks with the
+ * system file dialog and saves the choice as rom= in the ini.
  *
  * Keys (default): arrows, Z=B X=A A=Y S=X Q=L W=R Enter=Start RShift=Select,
  * F11 or Alt+Enter fullscreen. F1-F4 save state slot 1-4, F5-F8 (or
@@ -846,6 +848,55 @@ static uint8_t *FindRom(size_t *size, char *found, size_t found_n) {
     return NULL;
 }
 
+/* No ROM found: ask with the system file dialog (portal/zenity on Linux,
+ * native on Windows and macOS), verify it, and remember it as rom= in the
+ * ini. A wrong file offers another try. Returns NULL on cancel or when no
+ * dialog is available (headless, no portal). */
+typedef struct { SDL_AtomicInt done; char path[2048]; } PickState;
+
+static void SDLCALL PickDone(void *ud, const char *const *files, int filter) {
+    PickState *st = ud;
+    (void)filter;
+    st->path[0] = 0;
+    if (!files) fprintf(stderr, "file dialog: %s\n", SDL_GetError());
+    else if (files[0]) snprintf(st->path, sizeof st->path, "%s", files[0]);
+    SDL_SetAtomicInt(&st->done, 1);
+}
+
+static uint8_t *PickRom(size_t *size, char *found, size_t found_n) {
+    static const SDL_DialogFileFilter kFilters[] = {
+        { "SNES ROM (*.sfc, *.smc)", "sfc;smc" }, { "All files", "*" } };
+    const char *msg =
+        "The game data is not included. Choose your own copy of\n"
+        "The Lion King (USA) ROM (.sfc or .smc).";
+    for (;;) {
+        const SDL_MessageBoxButtonData pick[] = {
+            { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Choose ROM..." },
+            { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit" } };
+        const SDL_MessageBoxData box = { SDL_MESSAGEBOX_INFORMATION, NULL, "The Lion King",
+                                         msg, 2, pick, NULL };
+        int button = 1;
+        if (SDL_ShowMessageBox(&box, &button) && button != 1) return NULL;
+        PickState st;
+        SDL_SetAtomicInt(&st.done, 0);
+        SDL_ShowOpenFileDialog(PickDone, &st, NULL, kFilters, 2, NULL, false);
+        while (!SDL_GetAtomicInt(&st.done)) {
+            SDL_PumpEvents();
+            SDL_Delay(10);
+        }
+        if (!st.path[0]) return NULL;
+        char err[256];
+        uint8_t *rom = TlkReadVerifiedRom(st.path, size, err, sizeof err);
+        if (rom) {
+            snprintf(found, found_n, "%s", st.path);
+            return rom;
+        }
+        fprintf(stderr, "%s: %s\n", err, st.path);
+        msg = "That file is not The Lion King (USA) ROM (CRC32 C8FBFAA8).\n"
+              "Other regions, revisions and hacks are not supported.";
+    }
+}
+
 static void PrintHash(const uint8_t *data, size_t n) {
     uint8_t h[32];
     sha256_compute(data, n, h);
@@ -917,29 +968,40 @@ int main(int argc, char **argv) {
     if (s_volume < 0) s_volume = 0;
     if (s_volume > 100) s_volume = 100;
 
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | (s_audio ? SDL_INIT_AUDIO : 0))) {
+        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        return 3;
+    }
+
     size_t rom_size = 0;
     char err[256], found[2048];
     CrcInit();
-    uint8_t *rom;
+    uint8_t *rom = NULL;
+    /* The picker is for players: a scripted run (--frames, a tape, the self
+     * test) or an explicit --rom fails with a message instead. */
+    int interactive = !frames && !input_path && !selftest;
     if (rom_path) {
         rom = TlkReadVerifiedRom(rom_path, &rom_size, err, sizeof err);
         if (!rom) {
             fprintf(stderr, "%s: %s\nNeeds The Lion King (USA), CRC32 C8FBFAA8.\n", err, rom_path);
-            return 2;
+            if (rom_path != s_rom_cfg || !interactive) return 2;
         }
-    } else {
+    }
+    if (!rom) {
         rom = FindRom(&rom_size, found, sizeof found);
+        if (!rom && interactive) {
+            rom = PickRom(&rom_size, found, sizeof found);
+            if (rom) {
+                snprintf(s_rom_cfg, sizeof s_rom_cfg, "%s", found);
+                if (SaveConfig()) fprintf(stderr, "rom saved to %s\n", s_cfg_path);
+            }
+        }
         if (!rom) return 2;
         fprintf(stderr, "rom: %s\n", found);
     }
     if (input_path) {
         if (!LoadTape(input_path)) { fprintf(stderr, "cannot load tape %s\n", input_path); return 2; }
         fprintf(stderr, "input: %zu %s from %s\n", s_tape_frames, s_polled ? "polls" : "frames", input_path);
-    }
-
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | (s_audio ? SDL_INIT_AUDIO : 0))) {
-        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
-        return 3;
     }
     win = SDL_CreateWindow("The Lion King", kWidth * s_scale, kHeight * s_scale,
                                        SDL_WINDOW_RESIZABLE | (s_fullscreen ? SDL_WINDOW_FULLSCREEN : 0));

@@ -57,7 +57,8 @@ d-pad moves). Guide, or Back+Start, opens the menu from the pad; in it the d-pad
 closes.
 
 Without `--rom` (and no `rom =` in the ini), `tlk_sdl` checks the `.sfc`/`.smc` files next to the binary and in the
-current directory and uses the first one that is the right ROM.
+current directory and uses the first one that is the right ROM. If none is found, it opens a file dialog to pick
+the ROM, checks it, and saves the path as `rom =` in `tlk_sdl.ini` so it is not asked again.
 
 Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_INI`):
 

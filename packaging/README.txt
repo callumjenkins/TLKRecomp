@@ -19,8 +19,9 @@ Running
 
 or put the .sfc file next to tlk_sdl (or in the current directory) and run
 ./tlk_sdl with no arguments: it checks every .sfc/.smc there and uses the
-first one that matches. You can also put "rom = /path/to/file.sfc" in
-tlk_sdl.ini.
+first one that matches. If none matches, it asks for the ROM with a file
+dialog and remembers the choice in tlk_sdl.ini. You can also put
+"rom = /path/to/file.sfc" in tlk_sdl.ini yourself.
 
 Linux x86_64 (glibc). SDL3 is built into tlk_sdl: nothing needs to be
 installed. It uses the desktop's own libraries when present: Wayland or
