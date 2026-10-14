@@ -78,6 +78,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "tlk_compat.h"
 
 enum { kWidth = 256, kHeight = 224, kBpp = 4 };
 static uint8_t s_pixels[kWidth * kHeight * kBpp];
@@ -291,9 +292,19 @@ static int SaveConfig(void) {
     return fclose(f) == 0;
 }
 
+/* Last directory separator in a path ('\\' too on Windows), or NULL. */
+static const char *LastSep(const char *p) {
+    const char *sl = strrchr(p, '/');
+#ifdef _WIN32
+    const char *bs = strrchr(p, '\\');
+    if (bs && (!sl || bs > sl)) sl = bs;
+#endif
+    return sl;
+}
+
 /* Savestate slot path: tlk_slotN.state in the ini's directory. */
 static void SlotPath(int slot, char *out, size_t n) {
-    const char *sl = strrchr(s_cfg_path, '/');
+    const char *sl = LastSep(s_cfg_path);
     if (sl) snprintf(out, n, "%.*s/tlk_slot%d.state", (int)(sl - s_cfg_path), s_cfg_path, slot);
     else snprintf(out, n, "tlk_slot%d.state", slot);
 }
@@ -672,6 +683,9 @@ static int RemapSelfTest(void) {
     /* Save/reload goes to a scratch ini so the player's settings are never touched. */
     static char st_ini[512];
     const char *tmp = getenv("TMPDIR");
+#ifdef _WIN32
+    if (!tmp || !*tmp) tmp = getenv("TEMP");   /* no /tmp on Windows */
+#endif
     snprintf(st_ini, sizeof st_ini, "%s/tlk_sdl_selftest.ini", tmp && *tmp ? tmp : "/tmp");
     s_cfg_path = st_ini;
     StCheck(!s_menu_open, "menu starts closed");
@@ -805,7 +819,7 @@ static uint8_t *FindRom(size_t *size, char *found, size_t found_n) {
     const char *base = SDL_GetBasePath();
     char *cwd = SDL_GetCurrentDirectory();
     const char *dirs[2] = { base ? base : "./", "./" };
-    int same = base && cwd && !strcmp(base, cwd);   /* both end in '/' */
+    int same = base && cwd && !strcmp(base, cwd);   /* both end in a separator */
     SDL_free(cwd);
     int tried = 0;
     for (int d = 0; d < 2; d++) {
@@ -816,7 +830,7 @@ static uint8_t *FindRom(size_t *size, char *found, size_t found_n) {
             for (int i = 0; names && i < n; i++) {
                 char path[2048], err[256];
                 snprintf(path, sizeof path, "%s%s%s", dirs[d],
-                         dirs[d][strlen(dirs[d]) - 1] == '/' ? "" : "/", names[i]);
+                         LastSep(dirs[d]) == dirs[d] + strlen(dirs[d]) - 1 ? "" : "/", names[i]);
                 tried++;
                 uint8_t *rom = TlkReadVerifiedRom(path, size, err, sizeof err);
                 if (rom) {
@@ -1056,7 +1070,7 @@ int main(int argc, char **argv) {
     /* --frames runs are scripted proof runs: they must not clobber a player's recording. */
     if (record_path || (!input_path && !load_path && !no_record && frames == 0)) {
         char rec[1100];
-        const char *sl = strrchr(s_cfg_path, '/');
+        const char *sl = LastSep(s_cfg_path);
         if (record_path) snprintf(rec, sizeof rec, "%s", record_path);
         else if (sl) snprintf(rec, sizeof rec, "%.*s/last_session.rec", (int)(sl - s_cfg_path), s_cfg_path);
         else snprintf(rec, sizeof rec, "last_session.rec");
