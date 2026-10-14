@@ -120,9 +120,6 @@ RAM spot-check, verified with `--ram-log` in `tlk_headless --lle` (`out/levelsel
 - `$7E1E00` RNG: changes as play goes on (`A35757` → `8C5E40` → `60F4A8` ...).
 - `$7E005A` filtered pad: reads `$0080` on the A-press frames in the debug menu.
 
-The 6987M tape does not stay in sync under `--lle`: Simba stays at X=`$04D5` for f2800-7000 and
-dies at about f8000, still in level 0. Task D's area; not looked into here.
-
 ## TCRF (fetched through archive.org: tcrf.net is behind Cloudflare too)
 
 - Debug menu: in Options press B A R R Y. It shows CPU/PPU1/PPU2 versions, INVUL, LEVEL and VERSION .99. R A A B inside it turns on upside-down mode. ROM side is in `level_select.md`.
