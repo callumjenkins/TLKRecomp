@@ -1,0 +1,23 @@
+# Key-on clears the voice's ENDX bit.
+#
+# On hardware (bsnes/blargg SPC_DSP::voice_V5: `if (v->kon_delay == 5)
+# endx_buf &= ~v->vbit`) starting a voice clears its bit in ENDX ($7C).
+# LakeSnes only sets ENDX bits (BRR end block) and clears them all on a
+# write to $7C, so a voice keeps the stale bit from its previous sample.
+# TLK's sound driver frees any active voice whose ENDX bit is set (SPC
+# $09DC-$09E5), so long notes keyed onto a voice whose last sample had ended
+# were freed at once and stolen by the next drum hit: the held ~233 Hz
+# choir note (SRCN $11) in the intro dropped out at ~5.9, 8.9 and 11.9 s.
+# With this hunk the intro WAV matches a BizHawk bsnes v115 dump within
+# ~1.5 dB in every 0.5 s window where it was 8-12 dB short.
+file: runner/src/snes/dsp.c
+
+@@ dsp-kon-clears-endx
+<<<<
+    } else if(dsp->channel[ch].keyOn) {
+      dsp->channel[ch].keyOn = false;
+====
+    } else if(dsp->channel[ch].keyOn) {
+      dsp->channel[ch].keyOn = false;
+      dsp->ram[0x7c] &= ~(1 << ch); // KON clears this voice's ENDX bit
+>>>>
