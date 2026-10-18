@@ -1916,3 +1916,51 @@ exe); allbugsF 60,648 frames `--ram-log` byte-identical (sha256 `7b6094ab...`). 
 
 Not verified: real Windows, audio, gamepads, the file dialog (the "Choose ROM" message box renders under Wine/Xvfb),
 pre-Windows-10 systems (UCRT).
+
+## Task VIDEO: shaders, aspect and integer scaling in tlk_sdl
+
+`tlk_sdl` now presents through snesrecomp's desktop OpenGL 3.3 presenter (`desktop/opengl.c`, `glsl_shader.c`,
+CMake `snesrecomp_target_opengl` + `snesrecomp_target_shader_presets`) instead of a plain SDL texture. The
+emulation path is unchanged: still the headless host contract and frame driver, not the framework desktop host.
+
+- Settings menu and ini: Shader (off, CRT, LCD grid, Sharpen, Composite: snesrecomp's CC0 presets, or any
+  `.glslp`/`.glsl` path in the ini), Aspect (8:7 square pixels, the default and the old picture; 4:3 TV; 1:1),
+  Smooth (bilinear), Int. scale. Window width follows the aspect (`SnesDisplayAspect_ComputeWindowWidth`).
+- The menu and toasts are drawn in software into a separate `s_screen` buffer, so both presenters show them and a
+  shader treats them like the picture. `s_pixels` (hashes, `--dump-png`, the gates) is never drawn on.
+- No OpenGL 3.3 (or `opengl = 0`): a probe context fails, the window is recreated with the SDL renderer, and the
+  Shader row reads "no OpenGL". The dummy video driver (`--selftest-remap`) takes this path.
+- `runner/tlk_video.c` owns `g_config`: `config.h` pulls in `sdl_compat.h`, which needs SDL3's old-name aliases
+  and does not compile inside `sdl_main.c`.
+- Install/packages: `assets/shaders/` goes next to the binary (`install(DIRECTORY ...)`, both package scripts);
+  `opengl32.dll` added to the Windows import allow-list.
+
+Evidence (2026-10-17):
+
+```
+SDL_VIDEO_DRIVER=dummy tlk_sdl --selftest-remap                 remap_selftest: PASS (0 failed)
+f3000 no input: tlk_headless / new tlk_sdl (dummy) / old tlk_sdl  frame 89a48d6c... wram 0043be7f... (all three)
+Xvfb + llvmpipe, title screen at ~24 s: off 8:7 768x672, CRT/LCD/Sharpen/Composite 4:3 896x672, menu: looked at
+scripts/package.sh       8:07, rc=0, tarball has assets/shaders
+scripts/package_win.sh   8:29, rc=0, zip has assets/shaders, imports pass
+unpacked tarball (x11, Xvfb) and zip (Wine, Xvfb), run from /tmp, CRT 4:3: shader applied in both;
+  Linux package --frames 1700: fps=60.13
+```
+
+Owner report: "theres a shader that makes it all black". Reproduced on Xvfb with an XTest key injector cycling
+the menu from CRT: every preset fine, then "off" fully black (capture mean 0). `GlslShader_Render` points its vertex
+attributes at its own buffer on the bound VAO and then disables them; that VAO is `g_VAO`, whose attributes 0/1 the
+no-shader program draws with. Fix: `cmake/runtime-patches/opengl.hunks` gives the shader path its own VAO and
+rebinds `g_VAO` after it. `opengl.c` is added by `snesrecomp_target_opengl`, not the runner source list, so
+`tlk_use_patched_target_sources(tlk_sdl)` swaps desktop copies on the target (fails if the original is missing).
+
+```
+menu cycle from CRT, capture mean   before: CRT .247 LCD .221 Sharpen .281 Composite .277 off 0
+                                    after:  CRT .247 LCD .221 Sharpen .281 Composite .277 off .279, CRT .225, off .279
+SDL_VIDEO_DRIVER=dummy tlk_sdl --selftest-remap                 remap_selftest: PASS (0 failed)
+```
+
+Not verified: real GPU
+drivers and a real Windows machine, fullscreen. `lcd-grid-pass.glsl` (snesrecomp) mostly darkens the picture: its
+`edge` term uses `smoothstep(0.84, 0.96, cell)` where `1 - smoothstep` looks intended, so the grid barely shows.
+Not patched here (submodule). A full build of both hosts takes ~7 min; each package ~8 min.

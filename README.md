@@ -59,8 +59,8 @@ F11 or Alt+Enter toggles fullscreen.
 | Tab or Esc | settings menu (game pauses); in the menu Esc quits, Tab resumes |
 
 Save states are `tlk_slot1.state` .. `tlk_slot4.state` in the same folder as the ini. They only load in the build that
-wrote them. The settings menu (arrows + Enter, Left/Right change a value) has window scale, fullscreen, vsync, audio
-on/off, volume and controls ("Controls...": pick a SNES button, press Enter or pad A, then press the new key *or*
+wrote them. The settings menu (arrows + Enter, Left/Right change a value) has window scale, fullscreen, vsync, the
+video options below, audio on/off, volume and controls ("Controls...": pick a SNES button, press Enter or pad A, then press the new key *or*
 gamepad button; Esc or Guide cancels; "Reset defaults" restores the table above). "Save settings" writes `tlk_sdl.ini`
 (it rewrites the file, so comments are dropped). An SDL gamepad works out of the box and can be plugged in while the
 game runs (buttons by position: bottom = B, right = A, left = Y, top = X; shoulders and triggers = L/R; left stick or
@@ -71,6 +71,12 @@ Without `--rom` (and no `rom =` in the ini), `tlk_sdl` checks the `.sfc`/`.smc` 
 current directory and uses the first one that is the right ROM. If none is found, it opens a file dialog to pick
 the ROM, checks it, and saves the path as `rom =` in `tlk_sdl.ini` so it is not asked again.
 
+Video goes through snesrecomp's OpenGL 3.3 presenter. The menu's Shader row cycles the bundled presets (CRT,
+LCD grid, Sharpen, Composite; CC0, from snesrecomp's `runner/assets/shaders`), which the build copies to
+`build/assets/shaders` and the release packages ship next to the binary. Aspect, Smooth and Int. scale work with or
+without a shader. Without OpenGL 3.3 (or with `opengl = 0`) the game runs on the plain SDL renderer and the Shader row
+says "no OpenGL". None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU frame.
+
 Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_INI`):
 
     rom = /path/to/Lion King, The (USA).sfc
@@ -80,6 +86,11 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     audio = 1
     audio_rate = 48000
     volume = 100       ; percent
+    shader =           ; empty, assets/shaders/crt-soft.glslp (or lcd-grid, sharp, warm-composite), or your own
+    aspect = 8:7       ; 8:7 square pixels, 4:3 as a TV showed it, 1:1
+    smooth = 0         ; 1 = bilinear scaling (with no shader)
+    integer_scale = 0  ; 1 = whole-number scaling only (black borders, even pixels)
+    opengl = 1         ; 0 = plain SDL renderer, no shaders
     ; keys use SDL key names
     b = Z
     a = X
