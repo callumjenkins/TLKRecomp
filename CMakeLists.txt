@@ -117,10 +117,14 @@ if(TLK_BUILD_HOSTS)
     # on extended frame timing, which bypasses TLK's NTSC SPC ratio.
     add_executable(tlk_sdl ${TLK_COMMON_SOURCES}
         ${TLK_RUNNER_DIR}/sdl_main.c
+        ${TLK_RUNNER_DIR}/tlk_video.c
         ${TLK_RUNNER_DIR}/headless_host.c
         ${TLK_RUNNER_DIR}/verified_rom.c)
     tlk_configure_target(tlk_sdl)
     snesrecomp_target_sdl(tlk_sdl)
+    # OpenGL presenter + GLSL presets (CC0), staged to build/assets/shaders.
+    snesrecomp_target_opengl(tlk_sdl)
+    snesrecomp_target_shader_presets(tlk_sdl)
 endif()
 
 # ── Install / packaging ───────────────────────────────────────────────────

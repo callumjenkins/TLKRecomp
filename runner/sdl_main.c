@@ -55,7 +55,14 @@
  * Gamepads default to by position (south=B, east=A, west=Y, north=X); Guide or
  * Back+Start opens the overlay. The Controls page rebinds a key or a gamepad
  * button per SNES button (whichever is pressed next), with Reset defaults;
- * bindings go to the ini (b = Z ..., pad_b = a ...). Pads are hotplugged. */
+ * bindings go to the ini (b = Z ..., pad_b = a ...). Pads are hotplugged.
+ *
+ * Video goes through snesrecomp's OpenGL 3.3 presenter (desktop/opengl.c):
+ * the overlay's Shader row cycles the bundled presets in assets/shaders next
+ * to the binary; Aspect, Smooth and Int. scale apply with or without one.
+ * Without OpenGL 3.3 (or with opengl = 0) the plain SDL renderer is used and
+ * shaders are unavailable. None of this touches s_pixels, which the hashes,
+ * --dump-png and the gates read. */
 #include "tlk_game.h"
 #include "verified_rom.h"
 #include "tlk_font8x8.h"
@@ -73,6 +80,12 @@
 #define SDL_MAIN_HANDLED 1
 #include <SDL3/SDL.h>
 
+/* snesrecomp's desktop OpenGL presenter (GLSL shader presets, aspect). */
+#include "opengl.h"
+#include "util.h"
+void OpenGLRenderer_Create(struct RendererFuncs *funcs);
+void TlkVideoConfig(const char *shader, int aspect, int smooth);   /* tlk_video.c */
+
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
@@ -82,6 +95,9 @@
 
 enum { kWidth = 256, kHeight = 224, kBpp = 4 };
 static uint8_t s_pixels[kWidth * kHeight * kBpp];
+/* What is shown: the PPU frame plus the menu/toast overlay. Hashes and PNG
+ * dumps read s_pixels, never this. */
+static uint32_t s_screen[kWidth * kHeight];
 
 #define NTSC_FPS (21477272.0 / 357366.0) /* 60.0988 */
 
@@ -223,6 +239,18 @@ static void ResetBindings(void) {
     memcpy(s_pad_btn, kDefaultPad, sizeof s_pad_btn);
 }
 static int s_scale = 3, s_fullscreen, s_vsync, s_audio = 1, s_audio_rate = 48000, s_volume = 100;
+/* Video: aspect is a SnesDisplayAspect (default 8:7 = square pixels, the
+ * picture as it always was here); shader "" = none, else a .glslp/.glsl path.
+ * Shaders need OpenGL 3.3 (opengl = 0 forces the plain SDL renderer). */
+static int s_aspect = kSnesDisplayAspect_SquarePixels8x7, s_smooth, s_integer, s_opengl = 1;
+static char s_shader[1024];
+static const char *const kShaders[][2] = {
+    { "", "off" },
+    { "assets/shaders/crt-soft.glslp", "CRT" },
+    { "assets/shaders/lcd-grid.glslp", "LCD grid" },
+    { "assets/shaders/sharp.glslp", "Sharpen" },
+    { "assets/shaders/warm-composite.glslp", "Composite" } };
+enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
 static char s_rom_cfg[1024];
 static const char *s_cfg_path;
 
@@ -234,7 +262,8 @@ static char *Trim(char *s) {
 }
 
 /* Plain "key = value" lines; [sections] and ; or # comments are ignored.
- * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, and one per button
+ * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, volume, shader,
+ * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, and one per button
  * (b y select start up down left right a x l r) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
 static void LoadConfig(const char *path) {
@@ -256,6 +285,15 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "audio")) s_audio = atoi(v);
         else if (!strcmp(k, "audio_rate")) s_audio_rate = atoi(v);
         else if (!strcmp(k, "volume")) s_volume = atoi(v);
+        else if (!strcmp(k, "shader")) snprintf(s_shader, sizeof s_shader, "%s", v);
+        else if (!strcmp(k, "aspect")) {
+            uint8_t a;
+            if (SnesDisplayAspect_Parse(v, &a)) s_aspect = a;
+            else fprintf(stderr, "config: unknown aspect '%s' (4:3, 8:7 or 1:1)\n", v);
+        }
+        else if (!strcmp(k, "smooth")) s_smooth = atoi(v);
+        else if (!strcmp(k, "integer_scale")) s_integer = atoi(v);
+        else if (!strcmp(k, "opengl")) s_opengl = atoi(v);
         else if (!strncmp(k, "pad_", 4)) {
             for (int i = 0; i < 12; i++)
                 if (!strcmp(k + 4, kButtonNames[i])) {
@@ -283,6 +321,9 @@ static int SaveConfig(void) {
     if (s_rom_cfg[0]) fprintf(f, "rom = %s\n", s_rom_cfg);
     fprintf(f, "scale = %d\nfullscreen = %d\nvsync = %d\naudio = %d\naudio_rate = %d\nvolume = %d\n",
             s_scale, s_fullscreen, s_vsync, s_audio, s_audio_rate, s_volume);
+    fprintf(f, "; shader: empty, a bundled assets/shaders/*.glslp or your own .glslp/.glsl path\n");
+    fprintf(f, "shader = %s\naspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
+            s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
     fprintf(f, "; keys use SDL key names\n");
     for (int i = 0; i < 12; i++) fprintf(f, "%s = %s\n", kButtonNames[i], SDL_GetKeyName(s_keys[i]));
     fprintf(f, "; gamepad buttons use SDL names (a = south, b = east, x = west, y = north,\n"
@@ -319,38 +360,48 @@ static void Toast(const char *msg) {
     fprintf(stderr, "%s\n", msg);
 }
 
-static void DrawText(SDL_Renderer *ren, int x, int y, const char *t) {
-    SDL_FRect px[64 * 8];
+/* The overlay is drawn in software into s_screen, so a shader treats it like
+ * the game picture and both presenters show the same thing. */
+static uint32_t s_ink;
+static void Ink(int r, int g, int b) { s_ink = (uint32_t)(r << 16 | g << 8 | b); }
+
+static void DrawText(int x, int y, const char *t) {
     for (; *t; t++, x += 8) {
         int c = (unsigned char)*t;
         if (c < 32 || c > 126) c = '?';
-        int n = 0;
         for (int r = 0; r < 8; r++) {
             uint8_t bits = kTlkFont8x8[c - 32][r];
             for (int b = 0; b < 8; b++)
-                if (bits & (1u << b)) px[n++] = (SDL_FRect){ (float)(x + b), (float)(y + r), 1, 1 };
+                if ((bits & (1u << b)) && x + b >= 0 && x + b < kWidth && y + r >= 0 && y + r < kHeight)
+                    s_screen[(y + r) * kWidth + x + b] = s_ink;
         }
-        SDL_RenderFillRects(ren, px, n);
     }
 }
 
-static void Panel(SDL_Renderer *ren, int x, int y, int w, int h) {
-    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(ren, 0, 0, 0, 230);
-    SDL_FRect r = { (float)x, (float)y, (float)w, (float)h };
-    SDL_RenderFillRect(ren, &r);
+/* Black at alpha 230/255 over the picture. */
+static void Panel(int x, int y, int w, int h) {
+    for (int j = y; j < y + h && j < kHeight; j++)
+        for (int i = x; i < x + w && i < kWidth; i++) {
+            uint32_t p = s_screen[j * kWidth + i];
+            uint32_t r = (p >> 16 & 255) * 25 / 255, g = (p >> 8 & 255) * 25 / 255, b = (p & 255) * 25 / 255;
+            s_screen[j * kWidth + i] = r << 16 | g << 8 | b;
+        }
 }
 
 /* Host state shared by main() and the event handler. */
 static SDL_Window *win;
-static SDL_Renderer *ren;
+static SDL_Renderer *ren;      /* plain SDL presenter, when OpenGL is off or unavailable */
+static SDL_Texture *tex;
+static struct RendererFuncs s_gl;
+static int s_gl_on;            /* the OpenGL presenter owns the window */
 static SDL_AudioStream *astream;
 static int pace = 1, running = 1;
 static long frame;
 static const char *input_path;
 static double audio_acc;
 
-enum { M_RESUME, M_SCALE, M_FULLSCREEN, M_VSYNC, M_AUDIO, M_VOLUME, M_KEYS, M_SAVE, M_QUIT, M_COUNT };
+enum { M_RESUME, M_SCALE, M_FULLSCREEN, M_VSYNC, M_SHADER, M_ASPECT, M_SMOOTH, M_INTEGER,
+       M_AUDIO, M_VOLUME, M_KEYS, M_SAVE, M_QUIT, M_COUNT };
 /* Bindings page rows: 12 buttons, then "Reset defaults", then "Back". */
 enum { K_RESET = 12, K_BACK = 13, K_COUNT = 14 };
 static int s_menu_open, s_menu_sel, s_menu_keys, s_key_sel, s_key_wait;
@@ -380,34 +431,48 @@ static const char *PadName(SDL_GamepadButton b) {
     }
 }
 
-static void DrawMenu(SDL_Renderer *r) {
+/* Index of s_shader in kShaders, or -1 for a custom path from the ini. */
+static int ShaderIndex(void) {
+    for (int i = 0; i < kShaderCount; i++)
+        if (!strcmp(s_shader, kShaders[i][0])) return i;
+    return -1;
+}
+
+static void DrawMenu(void) {
     char line[64];
-    Panel(r, 16, 16, 232, 196);
-    SDL_SetRenderDrawColor(r, 255, 210, 80, 255);
-    DrawText(r, 32, 22, s_menu_keys ? "CONTROLS  key / gamepad" : "SETTINGS");
+    Panel(16, 8, 232, 208);
+    Ink(255, 210, 80);
+    DrawText(32, 14, s_menu_keys ? "CONTROLS  key / gamepad" : "SETTINGS");
     if (!s_menu_keys) {
+        static const char *const kAspectNames[] = { "4:3 TV", "8:7 pixel", "1:1" };
+        int sh = ShaderIndex();
         for (int i = 0; i < M_COUNT; i++) {
             switch (i) {
             case M_RESUME: snprintf(line, sizeof line, "Resume"); break;
-            case M_SCALE: snprintf(line, sizeof line, "Window scale   < %d >", s_scale); break;
-            case M_FULLSCREEN: snprintf(line, sizeof line, "Fullscreen     < %s >", s_fullscreen ? "on" : "off"); break;
-            case M_VSYNC: snprintf(line, sizeof line, "Vsync          < %s >", s_vsync ? "on" : "off"); break;
-            case M_AUDIO: snprintf(line, sizeof line, "Audio          < %s >", s_audio ? "on" : "off"); break;
-            case M_VOLUME: snprintf(line, sizeof line, "Volume         < %d%% >", s_volume); break;
+            case M_SCALE: snprintf(line, sizeof line, "Window     < %dx >", s_scale); break;
+            case M_FULLSCREEN: snprintf(line, sizeof line, "Fullscreen < %s >", s_fullscreen ? "on" : "off"); break;
+            case M_VSYNC: snprintf(line, sizeof line, "Vsync      < %s >", s_vsync ? "on" : "off"); break;
+            case M_SHADER:
+                snprintf(line, sizeof line, "Shader     < %s >", !s_gl_on ? "no OpenGL" : sh < 0 ? "custom" : kShaders[sh][1]);
+                break;
+            case M_ASPECT: snprintf(line, sizeof line, "Aspect     < %s >", kAspectNames[SnesDisplayAspect_Clamp(s_aspect)]); break;
+            case M_SMOOTH: snprintf(line, sizeof line, "Smooth     < %s >", s_smooth ? "on" : "off"); break;
+            case M_INTEGER: snprintf(line, sizeof line, "Int. scale < %s >", s_integer ? "on" : "off"); break;
+            case M_AUDIO: snprintf(line, sizeof line, "Audio      < %s >", s_audio ? "on" : "off"); break;
+            case M_VOLUME: snprintf(line, sizeof line, "Volume     < %d%% >", s_volume); break;
             case M_KEYS: snprintf(line, sizeof line, "Controls..."); break;
             case M_SAVE: snprintf(line, sizeof line, "Save settings"); break;
             case M_QUIT: snprintf(line, sizeof line, "Quit"); break;
             }
-            if (i == s_menu_sel) SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-            else SDL_SetRenderDrawColor(r, 150, 150, 150, 255);
-            DrawText(r, 24, 44 + i * 12, i == s_menu_sel ? ">" : " ");
-            DrawText(r, 36, 44 + i * 12, line);
+            if (i == s_menu_sel) Ink(255, 255, 255);
+            else Ink(150, 150, 150);
+            DrawText(24, 28 + i * 11, i == s_menu_sel ? ">" : " ");
+            DrawText(36, 28 + i * 11, line);
         }
-        SDL_SetRenderDrawColor(r, 150, 150, 150, 255);
-        DrawText(r, 24, 160, "F1-F4 save state");
-        DrawText(r, 24, 172, "F5-F8 load state");
-        DrawText(r, 24, 188, "Esc quits  Tab resumes");
-        DrawText(r, 24, 198, "Pad: Guide or Back+Start");
+        Ink(150, 150, 150);
+        DrawText(24, 176, "F1-F4 save, F5-F8 load");
+        DrawText(24, 186, "Esc quits  Tab resumes");
+        DrawText(24, 196, "Pad: Guide or Back+Start");
     } else {
         for (int i = 0; i < K_COUNT; i++) {
             if (i < 12) {
@@ -421,22 +486,108 @@ static void DrawMenu(SDL_Renderer *r) {
                 snprintf(line, sizeof line, "%-6s %-10.10s %.8s", kButtonNames[i],
                          w ? "press key" : kshort, w ? "/button" : PadName(s_pad_btn[i]));
             } else snprintf(line, sizeof line, i == K_RESET ? "Reset defaults" : "Back");
-            if (i == s_key_sel) SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-            else SDL_SetRenderDrawColor(r, 150, 150, 150, 255);
-            DrawText(r, 24, 36 + i * 11, i == s_key_sel ? ">" : " ");
-            DrawText(r, 36, 36 + i * 11, line);
+            if (i == s_key_sel) Ink(255, 255, 255);
+            else Ink(150, 150, 150);
+            DrawText(24, 36 + i * 11, i == s_key_sel ? ">" : " ");
+            DrawText(36, 36 + i * 11, line);
         }
-        SDL_SetRenderDrawColor(r, 150, 150, 150, 255);
-        DrawText(r, 24, 196, s_key_wait ? "Esc/Guide cancels" : "Enter/A: bind  Bksp: back");
+        Ink(150, 150, 150);
+        DrawText(24, 196, s_key_wait ? "Esc/Guide cancels" : "Enter/A: bind  Bksp: back");
     }
 }
 
-static void DrawToast(SDL_Renderer *r) {
+static void DrawToast(void) {
     if (!s_toast[0] || SDL_GetTicksNS() > s_toast_until) return;
     int w = (int)strlen(s_toast) * 8 + 8;
-    Panel(r, 4, 4, w, 16);
-    SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-    DrawText(r, 8, 8, s_toast);
+    Panel(4, 4, w, 16);
+    Ink(255, 255, 255);
+    DrawText(8, 8, s_toast);
+}
+
+/* ── Presenting ─────────────────────────────────────────────────────────── */
+static void ApplyVideoConfig(void) { TlkVideoConfig(s_shader, s_aspect, s_smooth); }
+
+static void ComputeViewport(int sw, int sh, int dw, int dh, SnesDisplayViewport *vp) {
+    SnesDisplayAspect_ComputeViewport(sw, sh, dw, dh, SnesDisplayAspect_Clamp(s_aspect), false,
+                                      s_integer != 0, vp);
+}
+
+/* Window size for the scale and aspect: height = 224 * scale. */
+static int WindowWidth(void) {
+    return SnesDisplayAspect_ComputeWindowWidth(kWidth, kHeight, kHeight * s_scale, SnesDisplayAspect_Clamp(s_aspect));
+}
+static void SizeWindow(void) {
+    if (!s_fullscreen) SDL_SetWindowSize(win, WindowWidth(), kHeight * s_scale);
+}
+
+/* Shows s_pixels plus the overlay (menu when open, toast). */
+static void Present(void) {
+    memcpy(s_screen, s_pixels, sizeof s_screen);
+    if (s_menu_open) DrawMenu();
+    DrawToast();
+    if (s_gl_on) {
+        uint8 *px;
+        int pitch;
+        s_gl.BeginDraw(kWidth, kHeight, &px, &pitch);
+        for (int y = 0; y < kHeight; y++) memcpy(px + (size_t)y * pitch, s_screen + y * kWidth, kWidth * 4);
+        s_gl.EndDraw();
+        return;
+    }
+    int dw = 0, dh = 0;
+    SDL_GetCurrentRenderOutputSize(ren, &dw, &dh);
+    SnesDisplayViewport vp;
+    ComputeViewport(kWidth, kHeight, dw, dh, &vp);
+    SDL_FRect dst = { (float)vp.x, (float)vp.y, (float)vp.width, (float)vp.height };
+    SDL_SetTextureScaleMode(tex, s_smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+    SDL_UpdateTexture(tex, NULL, s_screen, kWidth * kBpp);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+    SDL_RenderClear(ren);
+    SDL_RenderTexture(ren, tex, NULL, &dst);
+    SDL_RenderPresent(ren);
+}
+
+static void SetVsync(void) {
+    int on = (s_vsync && pace) ? 1 : 0;
+    if (s_gl_on) {
+        snesrecomp_opengl_set_vsync(on);
+        if (s_gl.Reconfigure) s_gl.Reconfigure();
+    } else SDL_SetRenderVSync(ren, on);
+}
+
+/* OpenGL 3.3 presenter when allowed and available, else the SDL renderer
+ * (also what the dummy video driver gets, e.g. --selftest-remap). */
+static int OpenVideo(void) {
+    Uint32 flags = SDL_WINDOW_RESIZABLE | (s_fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
+    int w = WindowWidth(), h = kHeight * s_scale;
+    ApplyVideoConfig();
+    if (s_opengl) {
+        OpenGLRenderer_Create(&s_gl);   /* sets the GL 3.3 core attributes */
+        win = SDL_CreateWindow("The Lion King", w, h, flags | SDL_WINDOW_OPENGL);
+        /* Probe for a 3.3 context first: the presenter exits if it gets none. */
+        SDL_GLContext probe = win ? SDL_GL_CreateContext(win) : NULL;
+        if (probe) {
+            SDL_GL_DestroyContext(probe);
+            snesrecomp_opengl_set_vsync((s_vsync && pace) ? 1 : 0);
+            snesrecomp_opengl_set_viewport(ComputeViewport);
+            s_gl_on = s_gl.Initialize(win);
+        }
+        if (!s_gl_on) {
+            fprintf(stderr, "OpenGL 3.3 unavailable (%s): plain SDL renderer, no shaders\n", SDL_GetError());
+            if (win) SDL_DestroyWindow(win);
+            win = NULL;
+        }
+    }
+    if (!s_gl_on) {
+        SDL_GL_ResetAttributes();
+        win = SDL_CreateWindow("The Lion King", w, h, flags);
+        ren = win ? SDL_CreateRenderer(win, NULL) : NULL;
+        if (!ren) { fprintf(stderr, "SDL window: %s\n", SDL_GetError()); return 0; }
+        SDL_SetRenderVSync(ren, (s_vsync && pace) ? 1 : 0);
+        /* The PPU leaves the top byte 0: an alpha format would draw every pixel transparent. */
+        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth, kHeight);
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+    }
+    return 1;
 }
 
 /* ── Live input ─────────────────────────────────────────────────────────── */
@@ -517,10 +668,26 @@ static void MenuAction(int act) {
             s_scale += dir ? dir : 1;
             if (s_scale < 1) s_scale = 8;
             if (s_scale > 8) s_scale = 1;
-            if (!s_fullscreen) SDL_SetWindowSize(win, kWidth * s_scale, kHeight * s_scale);
+            SizeWindow();
             break;
         case M_FULLSCREEN: s_fullscreen = !s_fullscreen; SDL_SetWindowFullscreen(win, s_fullscreen); break;
-        case M_VSYNC: s_vsync = !s_vsync; SDL_SetRenderVSync(ren, (s_vsync && pace) ? 1 : 0); break;
+        case M_VSYNC: s_vsync = !s_vsync; SetVsync(); break;
+        case M_SHADER: {
+            if (!s_gl_on) { Toast("Shaders need OpenGL 3.3"); break; }
+            int sh = ShaderIndex();
+            sh = sh < 0 ? 0 : (sh + (dir ? dir : 1) + kShaderCount) % kShaderCount;
+            snprintf(s_shader, sizeof s_shader, "%s", kShaders[sh][0]);
+            ApplyVideoConfig();
+            if (s_gl.Reconfigure) s_gl.Reconfigure();
+            break;
+        }
+        case M_ASPECT:
+            s_aspect = (s_aspect + (dir ? dir : 1) + kSnesDisplayAspect_Count) % kSnesDisplayAspect_Count;
+            ApplyVideoConfig();
+            SizeWindow();
+            break;
+        case M_SMOOTH: s_smooth = !s_smooth; ApplyVideoConfig(); break;
+        case M_INTEGER: s_integer = !s_integer; break;
         case M_AUDIO:
             s_audio = !s_audio;
             if (s_audio && !astream) {
@@ -1017,16 +1184,7 @@ int main(int argc, char **argv) {
         if (!LoadTape(input_path)) { fprintf(stderr, "cannot load tape %s\n", input_path); return 2; }
         fprintf(stderr, "input: %zu %s from %s\n", s_tape_frames, s_polled ? "polls" : "frames", input_path);
     }
-    win = SDL_CreateWindow("The Lion King", kWidth * s_scale, kHeight * s_scale,
-                                       SDL_WINDOW_RESIZABLE | (s_fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
-    ren = win ? SDL_CreateRenderer(win, NULL) : NULL;
-    if (!ren) { fprintf(stderr, "SDL window: %s\n", SDL_GetError()); return 3; }
-    SDL_SetRenderVSync(ren, (s_vsync && pace) ? 1 : 0);
-    SDL_SetRenderLogicalPresentation(ren, kWidth, kHeight, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-    /* The PPU leaves the top byte 0: an alpha format would draw every pixel transparent. */
-    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth, kHeight);
-    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
-    SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_NEAREST);
+    if (!OpenVideo()) return 3;
 
     astream = NULL;
     /* The output rate is fixed for the session so turning audio on/off in the
@@ -1094,13 +1252,7 @@ int main(int argc, char **argv) {
         if (!running) break;
 
         if (s_menu_open) {   /* paused: keep presenting the last frame plus the overlay */
-            SDL_UpdateTexture(tex, NULL, s_pixels, kWidth * kBpp);
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-            SDL_RenderClear(ren);
-            SDL_RenderTexture(ren, tex, NULL, NULL);
-            DrawMenu(ren);
-            DrawToast(ren);
-            SDL_RenderPresent(ren);
+            Present();
             SDL_Delay(16);
             deadline = SDL_GetTicksNS();
             continue;
@@ -1182,12 +1334,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        SDL_UpdateTexture(tex, NULL, s_pixels, kWidth * kBpp);
-        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-        SDL_RenderClear(ren);
-        SDL_RenderTexture(ren, tex, NULL, NULL);
-        DrawToast(ren);
-        SDL_RenderPresent(ren);
+        Present();
 
         if (frames > 0 && frame >= frames) break;
 
@@ -1218,8 +1365,8 @@ int main(int argc, char **argv) {
     }
     if (astream) SDL_DestroyAudioStream(astream);
     if (s_pad) SDL_CloseGamepad(s_pad);
-    SDL_DestroyTexture(tex);
-    SDL_DestroyRenderer(ren);
+    if (tex) SDL_DestroyTexture(tex);
+    if (ren) SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
     free(rom);
