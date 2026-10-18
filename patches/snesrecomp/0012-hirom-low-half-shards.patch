@@ -1,0 +1,47 @@
+--- a/recompiler/v2/translation_units.py	2026-10-18 17:02:13.181608736 -0600
++++ b/recompiler/v2/translation_units.py	2026-10-18 17:02:13.191471482 -0600
+@@ -45,6 +45,26 @@
+     return source[:line_end + 1] + declarations + source[line_end + 1:]
+ 
+ 
++def _upper_shards(pc_span: int) -> int:
++    return (0x8000 + pc_span - 1) // pc_span
++
++
++def _shard_part(pc16: int, pc_span: int) -> int:
++    """Shard index for an entry PC. $8000-$FFFF keeps the LoROM numbering
++    (part 00 starts at $8000); HiROM code below $8000 gets the parts after
++    those, instead of all landing in part 00."""
++    if pc16 >= 0x8000:
++        return (pc16 - 0x8000) // pc_span
++    return _upper_shards(pc_span) + pc16 // pc_span
++
++
++def _shard_start(part: int, pc_span: int) -> int:
++    upper = _upper_shards(pc_span)
++    if part < upper:
++        return 0x8000 + part * pc_span
++    return (part - upper) * pc_span
++
++
+ def split_bank_translation_units(
+         source: str, bank: int, symbol_pcs: Mapping[str, int], *,
+         threshold_bytes: int, pc_span: int) -> dict[str, str]:
+@@ -91,7 +111,7 @@
+                 f"bank ${bank:02X}: cannot assign generated function "
+                 f"{symbol!r} to a stable PC shard")
+         pc16 = int(pc) & 0xFFFF
+-        part = max(0, (pc16 - 0x8000) // pc_span)
++        part = _shard_part(pc16, pc_span)
+         chunks.setdefault(part, []).append(body)
+ 
+     outputs: dict[str, str] = {}
+@@ -101,7 +121,7 @@
+         declarations = "".join(
+             f"RecompReturn {name}(CpuState *cpu);\n"
+             for name in references)
+-        start = 0x8000 + part * pc_span
++        start = _shard_start(part, pc_span)
+         end = min(0xFFFF, start + pc_span - 1)
+         part_header = (
+             f"/* Split translation unit: bank ${bank:02X}, part {part:02X}; "
