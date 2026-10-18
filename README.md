@@ -83,6 +83,11 @@ LCD grid, Sharpen, Composite; CC0, from snesrecomp's `runner/assets/shaders`), w
 without a shader. Without OpenGL 3.3 (or with `opengl = 0`) the game runs on the plain SDL renderer and the Shader row
 is greyed out. None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU frame.
 
+The Graphics section also has HD Mode 7 (off, 2x, 3x, 4x): snesrecomp's opt-in renderer (`docs/HD_MODE7.md` in
+the submodule) draws Mode 7 lines at that multiple of the native resolution and copies every other line pixel for
+pixel. The Lion King never switches to Mode 7 (no Mode 7 line on any speedrun or play tape), so in this game the
+picture is the same with it on; it costs CPU time and hands a shader a 2-4x larger picture.
+
 Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_INI`):
 
     rom = /path/to/Lion King, The (USA).sfc
@@ -97,6 +102,7 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     smooth = 0         ; 1 = bilinear scaling (with no shader)
     integer_scale = 0  ; 1 = whole-number scaling only (black borders, even pixels)
     opengl = 1         ; 0 = plain SDL renderer, no shaders
+    hd_mode7 = 0       ; 2, 3 or 4 = Mode 7 drawn at that multiple (0 = off)
     turbo_speed = 4    ; 2-16, how much faster the game runs while turbo is held
     speedrun = off     ; or practice
     ; keys use SDL key names
