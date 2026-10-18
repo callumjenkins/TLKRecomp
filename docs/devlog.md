@@ -2070,3 +2070,45 @@ wine tlk_sdl.exe --menu-page controls --dump-window    looked at
 Full clean build: 22.5 min (Linux), 20.0 min (MinGW, niced, in parallel with the gates). Not verified: the owner's
 desktop with real keys and a real pad, the release tarball/zip (`package.sh`/`package_win.sh` not run), HiDPI, TAS
 sync vs BizHawk (game side untouched), Windows hash gates under Wine.
+
+## Task HD7: HD Mode 7 option in tlk_sdl
+
+The owner asked for snesrecomp's opt-in HD Mode 7 (`snesrecomp/docs/HD_MODE7.md`, already in the pinned submodule)
+as a video option. Graphics > HD Mode 7 (off, 2x, 3x, 4x; `hd_mode7 = 0|2|3|4` in the ini) binds a host surface with
+`PpuBindMode7HdSurface`; the PPU then draws Mode 7 lines into it at that scale and copies every other line pixel for
+pixel. `Present` shows that surface instead of the 256x224 frame, on both presenters (OpenGL: `BeginDraw` at the HD
+size; plain SDL: a texture of the HD size). The toast, practice display, turbo tag and in-picture menu are drawn in
+256x224 as before and scaled up over it (pixels where `s_screen` differs from `s_pixels`). The viewport maths runs on
+the native size, so Aspect and Integer scaling count game pixels. Off is the default and binds nothing.
+`s_pixels` (hashes, `--dump-png`, the gates) is not touched; the binding is not in savestates.
+
+**The Lion King never uses Mode 7.** A temporary probe in `ppu_runLine` (reverted, not committed) counted visible,
+non-blanked lines with BG mode 7: 0 on all four speedrun tapes to the end (6987M, 6781M, 4735M, All Bugs Final) and
+0 on the 45 local play tapes (every level, attract, game over). 6987M uses BG modes 0 and 1 only, Stampede included.
+So the option changes nothing in this game; it costs CPU time per frame and gives a shader a 2-4x larger input
+(CRT scanlines get denser). Landed on request; it is there for other content (the DK mod) and is off by default.
+The HD resampling itself was never seen on a Mode 7 scene here.
+
+Evidence (2026-10-18, worktree `hdm7`, generated/ from main):
+
+```
+compare_modes.sh 600 3000 / -t 6987M.tape 1200 6000    MATCH x4, WRAM same (57ccb8d5, 89a48d6c, dd861e16, 946033bd)
+check_all_tapes.sh -s                                  71 MATCH, 0 MISMATCH
+check_idle_lle.sh                                      IDLE MATCH frames=12000 every=5
+check_native_decomp.sh 3000                            IDENTICAL
+save f3000 / load / f6000                              946033bd10683657
+tlk_sdl 6987M.tape f6000 (dummy video)                 946033bd... / wram 87fa6746...
+tlk_sdl --selftest-remap                               PASS (0 failed)
+check_exit_mx.py                                       282 ok, 11 UNPROVEN, 0 WRONG
+pytest tools/tests                                     23 passed, 4 skipped
+check_allbugs.sh                                       ALLBUGS PASS (110 differing <= 150, 26 level starts, 0 mismatch)
+Xvfb, OpenGL, title f1500, --dump-window               off / 2x / 4x pixel-identical, looked at
+Xvfb + XTest keys: Graphics > HD Mode 7 2x -> 3x       "Saved", game shown at 4x after closing, back to off: ini 0
+Xvfb, opengl = 0, menu in picture at f700              off / 2x pixel-identical, looked at
+MinGW build (17:53, niced, beside the gates)           exit 0, tlk_sdl.exe + tlk_headless.exe
+wine tlk_sdl.exe --selftest-remap, hd_mode7 = 2        PASS (0 failed)
+wine tlk_sdl.exe, Xvfb, f1500 --dump-window            off / 2x pixel-identical, looked at
+```
+
+Not verified: a Mode 7 scene (none exists in this game), the owner's desktop, the release packages, TAS sync vs
+BizHawk (game side untouched).
