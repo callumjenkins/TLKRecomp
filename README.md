@@ -57,11 +57,12 @@ F11 or Alt+Enter toggles fullscreen.
 | F1-F4 | save state to slot 1-4 |
 | F5-F8 (or Shift+F1-F4) | load slot 1-4 |
 | ` (hold) | turbo: the game runs `turbo_speed` times faster (4 by default), sound muted; works on a tape too. Pad: right stick click. Rebind on the Controls page |
+| F9 | practice mode: restart the current level |
 | Tab or Esc | settings menu (game pauses); in the menu Esc quits, Tab resumes |
 
 Save states are `tlk_slot1.state` .. `tlk_slot4.state` in the same folder as the ini. They only load in the build that
 wrote them. The settings menu (arrows + Enter, Left/Right change a value) has window scale, fullscreen, vsync, the
-video options below, audio on/off, volume and controls ("Controls...": pick a SNES button, press Enter or pad A, then press the new key *or*
+video options below, audio on/off, volume, practice mode (below) and controls ("Controls...": pick a SNES button, press Enter or pad A, then press the new key *or*
 gamepad button; Esc or Guide cancels; "Reset defaults" restores the table above). "Save settings" writes `tlk_sdl.ini`
 (it rewrites the file, so comments are dropped). An SDL gamepad works out of the box and can be plugged in while the
 game runs (buttons by position: bottom = B, right = A, left = Y, top = X; shoulders and triggers = L/R; left stick or
@@ -93,6 +94,7 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     integer_scale = 0  ; 1 = whole-number scaling only (black borders, even pixels)
     opengl = 1         ; 0 = plain SDL renderer, no shaders
     turbo_speed = 4    ; 2-16, how much faster the game runs while turbo is held
+    speedrun = off     ; or practice
     ; keys use SDL key names
     turbo = `
     b = Z
@@ -108,6 +110,28 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
 Packaging: `scripts/package.sh` builds `dist/TLKRecomp-linux-x86_64.tar.gz` (binary + README + license notes, no ROM
 and no game data). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` the same way from the MinGW
 cross build (`build-win/`). `cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
+
+### Practice mode
+
+"Practice" in the settings menu (or `speedrun = practice` in the ini) is for learning a route, like SBDWolf's
+practice hack. It only reads the game's memory, so the game plays exactly the same with it on or off.
+
+- **Level timer** at the top: starts when the level fades in, stops at the level's end (green) or on a death (red,
+  with an `x`). It pauses during fades and the pause screen, like the practice hack's timer.
+- **TAS** next to it: the same level's time in the 6987M tool-assisted speedrun, as a target.
+- **RUN** under it: everything since leaving the title screen, fades, loads and pauses included; stops at the last
+  hit on Scar. A `*` means it is not a clean run (started past level 1, or a save state was loaded).
+- **Lag counter**: frames in this attempt where the game did not read the pad.
+- **Checkpoint splits**: reaching a checkpoint shows the level time so far and the difference to your best at that
+  checkpoint (or to the TAS the first time).
+- **Input display** at the bottom right: the buttons sent to the game this frame.
+- **Best times** per level and difficulty, in `tlk_practice_times.txt` next to the ini. Only a run that entered the
+  level from its start counts (not after a death or a loaded save state). A level end shows the time and the
+  difference to your best.
+- **F9** restarts the level: it loads a save state taken automatically when the level finished loading
+  (`tlk_practice_restart.state`).
+- **Level** row in the menu: pick a level with Left/Right, Enter starts it. It goes back to power-on and plays the
+  game's debug-menu code (Options, B A R R Y) in about two seconds, so difficulty and options are the defaults.
 
 ## Watching a speedrun
 
