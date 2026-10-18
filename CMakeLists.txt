@@ -4,6 +4,22 @@ project(TLKRecomp C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# Cache repeated compiles, including regenerated sources whose contents did
+# not change. Respect an explicitly configured launcher (including an empty
+# one), and keep ccache optional for machines that do not have it.
+option(TLK_USE_CCACHE "Use ccache when available" ON)
+if(TLK_USE_CCACHE)
+    find_program(TLK_CCACHE_PROGRAM ccache)
+    if(TLK_CCACHE_PROGRAM)
+        foreach(lang C CXX)
+            if(NOT DEFINED CMAKE_${lang}_COMPILER_LAUNCHER AND
+               NOT DEFINED ENV{CMAKE_${lang}_COMPILER_LAUNCHER})
+                set(CMAKE_${lang}_COMPILER_LAUNCHER "${TLK_CCACHE_PROGRAM}")
+            endif()
+        endforeach()
+    endif()
+endif()
+
 # Linux builds require _GNU_SOURCE for popen / readlink in strict C mode.
 add_compile_definitions(_GNU_SOURCE)
 
@@ -21,8 +37,10 @@ if(NOT GENERATED_SOURCES)
         "Run `python3 scripts/generate_snesrecomp.py` to generate them.")
 endif()
 
-# Static library containing recompiled game functions
-add_library(snesrecomp_game STATIC ${GENERATED_SOURCES})
+# Compile the game once for both hosts. An OBJECT library also retains the
+# generated module-registration constructor, which a static archive linker
+# could otherwise discard because no host references that object directly.
+add_library(snesrecomp_game OBJECT)
 target_include_directories(snesrecomp_game PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/recomp"
     "${CMAKE_CURRENT_SOURCE_DIR}/runner"
@@ -38,7 +56,7 @@ endif()
 # tlk_headless: windowless validation host (runner/headless_main.c).
 # tlk_sdl:      playable SDL3 host (runner/sdl_main.c) on the headless
 #               emulation path: window, audio, pacing, input.
-# Both compile the runner, the generated C and the TLK adapter themselves;
+# Both compile the runner and TLK adapter, and share the generated objects;
 # SNESRECOMP_ENABLE_MODS must precede the include (runner.cmake reads it).
 option(TLK_BUILD_HOSTS "Build tlk_headless and tlk_sdl" ON)
 # TLK_STATIC_SDL: ignore any installed SDL3 and link the pinned SDL3 release
@@ -71,6 +89,12 @@ if(TLK_BUILD_HOSTS)
     set(SNESRECOMP_ENABLE_MODS ON CACHE BOOL
         "Mod package loader + trusted plugins (required by the desktop host)" FORCE)
     include("${SNESRECOMP_ROOT}/runner/runner.cmake")
+    snesrecomp_target_generated_code(snesrecomp_game "${TLK_SNESRECOMP_GEN_DIR}")
+    if(GENERATED_SOURCES)
+        target_compile_definitions(snesrecomp_game INTERFACE SNESRECOMP_HAS_GENERATED_CODE=1)
+    else()
+        target_compile_definitions(snesrecomp_game INTERFACE SNESRECOMP_SETUP_HOST=1)
+    endif()
     # Runtime adaptations: patched build-dir copies of pinned snesrecomp
     # sources (cmake/runtime-patches/*.hunks); the submodule stays untouched.
     include(cmake/TlkRuntimePatches.cmake)
@@ -87,13 +111,12 @@ if(TLK_BUILD_HOSTS)
         ${TLK_RUNNER_DIR}/host_contract.c)
 
     function(tlk_configure_target target)
-        snesrecomp_target_generated_code(${target} "${TLK_SNESRECOMP_GEN_DIR}")
         target_include_directories(${target} PRIVATE
             ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
             ${SNESRECOMP_ROOT}/runner/src/desktop
             ${TLK_RUNNER_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/recomp)
-        target_link_libraries(${target} PRIVATE ${SNESRECOMP_RUNNER_LIBRARIES})
+        target_link_libraries(${target} PRIVATE snesrecomp_game ${SNESRECOMP_RUNNER_LIBRARIES})
         target_compile_definitions(${target} PRIVATE
             SNES_GAME_VERSION="dev"
             SNES_GAME_TITLE="The Lion King")
@@ -136,6 +159,8 @@ if(TLK_BUILD_HOSTS)
     include("${RECOMP_UI_ROOT}/recomp_ui.cmake")
     target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_menu_imgui.cpp)
     recomp_target_launcher_ui(tlk_sdl CONSOLE snes)
+else()
+    target_sources(snesrecomp_game PRIVATE ${GENERATED_SOURCES})
 endif()
 
 # ── Install / packaging ───────────────────────────────────────────────────

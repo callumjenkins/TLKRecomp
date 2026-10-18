@@ -23,6 +23,9 @@ Build (Linux: cmake, ninja, gcc/clang, Python 3, SDL3):
 
     ./build.sh
 
+The build uses `ccache` when it is installed (`-DTLK_USE_CCACHE=OFF` turns that off; an explicit
+`CMAKE_C_COMPILER_LAUNCHER` wins). `cmake --build build --target tlk_sdl` builds only the player.
+
 Windows x86_64, cross-built on Linux with MinGW-w64 (`x86_64-w64-mingw32-gcc`); SDL3 (pinned, fetched) and the MinGW
 runtime are linked statically, so the `.exe` files need only system DLLs:
 
