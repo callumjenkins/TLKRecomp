@@ -76,6 +76,8 @@
  * Video goes through snesrecomp's OpenGL 3.3 presenter (desktop/opengl.c):
  * the menu's Shader row cycles the bundled presets in assets/shaders next
  * to the binary; Aspect, Smooth and Int. scale apply with or without one.
+ * HD Mode 7 (Graphics) binds snesrecomp's 2-4x Mode 7 surface and shows it in
+ * place of the native picture, on either presenter.
  * Without OpenGL 3.3 (or with opengl = 0) the plain SDL renderer is used and
  * shaders are unavailable. None of this touches s_pixels, which the hashes,
  * --dump-png and the gates read. */
@@ -279,6 +281,13 @@ static const char *const kShaders[][2] = {
     { "assets/shaders/sharp.glslp", "Sharpen" },
     { "assets/shaders/warm-composite.glslp", "Composite" } };
 enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
+/* HD Mode 7 (snesrecomp's PpuBindMode7HdSurface): 0 = off, else 2..4. The PPU
+ * also draws each line into s_hd at that scale, resampling Mode 7 lines at the
+ * finer grid and copying every other line pixel for pixel. Only what is shown
+ * changes: s_pixels, the hashes and --dump-png stay native. */
+static int s_hd_mode7;
+static uint32_t *s_hd;
+static const char *const kHdMode7Choices[] = { "off", "2x", "3x", "4x" };
 static int s_practice;   /* speedrun = practice: level timer, lag, inputs, best times, restart */
 /* How the open menu covers the game, in percent: dimming of the picture
  * behind it, and how solid its panel is (see recomp_runtime_ui_set_backdrop). */
@@ -295,7 +304,7 @@ static char *Trim(char *s) {
 
 /* Plain "key = value" lines; [sections] and ; or # comments are ignored.
  * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, volume, shader,
- * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, turbo_speed (2-16),
+ * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, hd_mode7 (0 or 2-4), turbo_speed (2-16),
  * speedrun (off or practice), menu_dim and menu_opacity (0-100), and one per binding
  * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
@@ -327,6 +336,7 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "smooth")) s_smooth = atoi(v);
         else if (!strcmp(k, "integer_scale")) s_integer = atoi(v);
         else if (!strcmp(k, "opengl")) s_opengl = atoi(v);
+        else if (!strcmp(k, "hd_mode7")) s_hd_mode7 = atoi(v) >= 2 ? SDL_min(atoi(v), 4) : 0;
         else if (!strcmp(k, "turbo_speed")) s_turbo_speed = SDL_clamp(atoi(v), 2, 16);
         else if (!strcmp(k, "speedrun")) s_practice = !strcmp(v, "practice");
         else if (!strcmp(k, "menu_dim")) s_menu_dim = SDL_clamp(atoi(v), 0, 100);
@@ -361,6 +371,7 @@ static int SaveConfig(void) {
     fprintf(f, "; shader: empty, a bundled assets/shaders/*.glslp or your own .glslp/.glsl path\n");
     fprintf(f, "shader = %s\naspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
             s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
+    fprintf(f, "; Mode 7 drawn at 2-4x the native resolution (0 = off)\nhd_mode7 = %d\n", s_hd_mode7);
     fprintf(f, "; hold turbo to run turbo_speed times faster\nturbo_speed = %d\n", s_turbo_speed);
     fprintf(f, "speedrun = %s\n", s_practice ? "practice" : "off");
     fprintf(f, "; settings menu: game dimming and panel opacity, percent\nmenu_dim = %d\nmenu_opacity = %d\n",
@@ -810,7 +821,10 @@ static void PrEnable(void) {
 /* ── Presenting ─────────────────────────────────────────────────────────── */
 static void ApplyVideoConfig(void) { TlkVideoConfig(s_shader, s_aspect, s_smooth); }
 
+/* sw x sh is the presented picture, native or HD; the maths runs on the
+ * native size so integer scaling still counts game pixels. */
 static void ComputeViewport(int sw, int sh, int dw, int dh, SnesDisplayViewport *vp) {
+    if (sw > kWidth) { sh = sh * kWidth / sw; sw = kWidth; }
     SnesDisplayAspect_ComputeViewport(sw, sh, dw, dh, SnesDisplayAspect_Clamp(s_aspect), false,
                                       s_integer != 0, vp);
 }
@@ -854,6 +868,41 @@ static void DrawOverlay(int w, int h) {
     if (s_dump_req) ReadBackWindow(w, h);
 }
 
+/* (Re)binds the PPU's HD Mode 7 surface for s_hd_mode7. Takes effect from
+ * the next frame drawn. */
+static void ApplyHdMode7(void) {
+    PpuBindMode7HdSurface(g_ppu, NULL, 0, 0, 0, 0, 0);
+    free(s_hd);
+    s_hd = NULL;
+    int sc = s_hd_mode7;
+    if (sc < 2) return;
+    size_t pitch = (size_t)kWidth * sc * 4, cap = pitch * kHeight * sc;
+    s_hd = (uint32_t *)calloc(1, cap);
+    if (!s_hd || !PpuBindMode7HdSurface(g_ppu, s_hd, cap, pitch, kWidth, kHeight, (unsigned)sc)) {
+        fprintf(stderr, "HD Mode 7: cannot bind a %dx surface\n", sc);
+        free(s_hd);
+        s_hd = NULL;
+        s_hd_mode7 = 0;
+    }
+}
+
+/* The HD picture into dst (pitch in bytes), with every overlay pixel (those
+ * where s_screen differs from s_pixels) scaled up over it. */
+static void ComposeHd(uint8_t *dst, int pitch) {
+    const int sc = s_hd_mode7, w = kWidth * sc;
+    for (int y = 0; y < kHeight * sc; y++) memcpy(dst + (size_t)y * pitch, s_hd + (size_t)y * w, (size_t)w * 4);
+    for (int y = 0; y < kHeight; y++)
+        for (int x = 0; x < kWidth; x++) {
+            uint32_t p, o = s_screen[y * kWidth + x];
+            memcpy(&p, s_pixels + (y * kWidth + x) * 4, 4);
+            if (o == p) continue;
+            for (int j = 0; j < sc; j++) {
+                uint32_t *row = (uint32_t *)(dst + (size_t)(y * sc + j) * pitch) + x * sc;
+                for (int i = 0; i < sc; i++) row[i] = o;
+            }
+        }
+}
+
 /* Shows s_pixels plus the overlay (menu when open, toast, turbo tag). */
 static void Present(void) {
     memcpy(s_screen, s_pixels, sizeof s_screen);
@@ -868,11 +917,13 @@ static void Present(void) {
     }
     /* Without ImGui the same menu is drawn into the 256x224 picture. */
     if (s_menu_open && !s_menu_gl) recomp_runtime_ui_render_argb8888(s_ui, s_screen, kWidth, kHeight, kWidth * 4);
+    const int sc = s_hd ? s_hd_mode7 : 1;
     if (s_gl_on) {
         uint8 *px;
         int pitch;
-        s_gl.BeginDraw(kWidth, kHeight, &px, &pitch);
-        for (int y = 0; y < kHeight; y++) memcpy(px + (size_t)y * pitch, s_screen + y * kWidth, kWidth * 4);
+        s_gl.BeginDraw(kWidth * sc, kHeight * sc, &px, &pitch);
+        if (sc > 1) ComposeHd(px, pitch);
+        else for (int y = 0; y < kHeight; y++) memcpy(px + (size_t)y * pitch, s_screen + y * kWidth, kWidth * 4);
         s_gl.EndDraw();
         return;
     }
@@ -881,8 +932,23 @@ static void Present(void) {
     SnesDisplayViewport vp;
     ComputeViewport(kWidth, kHeight, dw, dh, &vp);
     SDL_FRect dst = { (float)vp.x, (float)vp.y, (float)vp.width, (float)vp.height };
+    if (tex && tex->w != kWidth * sc) {   /* HD Mode 7 changed: a texture of the new size */
+        SDL_DestroyTexture(tex);
+        tex = NULL;
+    }
+    if (!tex) {
+        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth * sc, kHeight * sc);
+        if (!tex) return;
+        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+    }
     SDL_SetTextureScaleMode(tex, s_smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
-    SDL_UpdateTexture(tex, NULL, s_screen, kWidth * kBpp);
+    if (sc > 1) {
+        void *px;
+        int pitch;
+        if (!SDL_LockTexture(tex, NULL, &px, &pitch)) return;
+        ComposeHd((uint8_t *)px, pitch);
+        SDL_UnlockTexture(tex);
+    } else SDL_UpdateTexture(tex, NULL, s_screen, kWidth * kBpp);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
     SDL_RenderTexture(ren, tex, NULL, &dst);
@@ -993,7 +1059,7 @@ static int TurboHeld(void) {
  * applied at once and saved to the ini (the menu calls MenuSave after it). */
 enum {
     R_SCALE, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
-    R_SHADER, R_SMOOTH, R_INTEGER,
+    R_SHADER, R_HD_MODE7, R_SMOOTH, R_INTEGER,
     R_AUDIO, R_VOLUME,
     R_PRACTICE, R_LEVEL, R_START,
     R_BIND0, R_RESET = R_BIND0 + kBindings,
@@ -1028,6 +1094,9 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_SHADER] = MENU_ROW("tlk.shader", "Graphics", "Shader",
                           "Presets in assets/shaders.", CHOICE, 0, kShaderCount - 1, 1,
                           s_shader_names, kShaderCount),
+    [R_HD_MODE7] = MENU_ROW("tlk.hd_mode7", "Graphics", "HD Mode 7",
+                            "Mode 7 scenes drawn at a finer resolution.", CHOICE, 0, 3, 1,
+                            kHdMode7Choices, 4),
     [R_SMOOTH] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER, "Graphics", "Smooth",
                           "Bilinear filtering.", BOOL, 0, 1, 1, NULL, 0),
     [R_INTEGER] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_INTEGER_SCALE, "Graphics", "Integer scaling",
@@ -1091,6 +1160,7 @@ static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
     case R_DIM: *v = s_menu_dim; break;
     case R_OPACITY: *v = s_menu_opacity; break;
     case R_SHADER: { int sh = ShaderIndex(); *v = sh >= 0 ? sh : kShaderCount; break; }
+    case R_HD_MODE7: *v = s_hd_mode7 ? s_hd_mode7 - 1 : 0; break;
     case R_SMOOTH: *v = s_smooth; break;
     case R_INTEGER: *v = s_integer; break;
     case R_AUDIO: *v = s_audio; break;
@@ -1116,6 +1186,7 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
         ApplyVideoConfig();
         if (s_gl.Reconfigure) s_gl.Reconfigure();
         break;
+    case R_HD_MODE7: s_hd_mode7 = v ? v + 1 : 0; ApplyHdMode7(); break;
     case R_SMOOTH: s_smooth = v; ApplyVideoConfig(); break;
     case R_INTEGER: s_integer = v; break;
     case R_AUDIO: SetAudio(v); return s_audio == v;
@@ -1850,6 +1921,7 @@ int main(int argc, char **argv) {
 
     RtlRegisterGame(&kTlkGameInfo);
     if (!SnesInit(rom, (int)rom_size)) { fprintf(stderr, "snesrecomp rejected the ROM\n"); return 4; }
+    ApplyHdMode7();
     if (s_polled) {
         interp_bridge_add_pre_opcode_hook(0xC0A07C, PollHook);
         interp_bridge_add_pre_opcode_hook(0x00A07C, PollHook);
