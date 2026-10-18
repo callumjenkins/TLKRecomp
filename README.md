@@ -63,8 +63,8 @@ F11 or Alt+Enter toggles fullscreen.
 Save states are `tlk_slot1.state` .. `tlk_slot4.state` in the same folder as the ini. They only load in the build that
 wrote them. The settings menu is [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui)'s in-game menu (the
 same one other recomps use), drawn with Dear ImGui over the game. Up/Down pick a section (Display, Graphics, Audio,
-Practice, Controls, System), Enter opens it, Left/Right change a value, Esc goes back. It has window scale,
-fullscreen, vsync, the video options below, how much the menu dims the game, audio on/off, volume, practice mode
+Level select, Practice, Controls, System), Enter opens it, Left/Right change a value, Esc goes back. It has window scale,
+fullscreen, vsync, the video options below, how much the menu dims the game, audio on/off, volume, level select and practice mode
 (below) and Controls (pick a SNES button, press Enter or pad A, then press the new key *or* gamepad button; Esc or
 Guide cancels; "Reset defaults" restores the table above). System has Resume and Quit (press twice). Every change
 applies at once and is saved to `tlk_sdl.ini` (the file is rewritten, so comments are dropped). Without OpenGL 3.3
@@ -140,8 +140,14 @@ practice hack. It only reads the game's memory, so the game plays exactly the sa
   difference to your best.
 - **F9** restarts the level: it loads a save state taken automatically when the level finished loading
   (`tlk_practice_restart.state`).
-- **Level** and **Start level** in the menu's Practice section: pick a level with Left/Right, then Start level. It goes back to power-on and plays the
-  game's debug-menu code (Options, B A R R Y) in about two seconds, so difficulty and options are the defaults.
+
+### Level select
+
+The menu's Level select section works with practice mode on or off. Pick a **Level** and **Invulnerable** (Off,
+Infinite health, Infinite lives) with Left/Right; nothing happens until you press Enter (or pad A) on the third row,
+**Start <level>**. It goes back to power-on and plays the game's own debug menu (Options, B A R R Y) in about two
+seconds, so difficulty and options are the defaults. Invulnerable is that debug menu's INVUL option: infinite health
+refills health every frame, infinite lives puts the count back to 3 before each death.
 
 ## Watching a speedrun
 
