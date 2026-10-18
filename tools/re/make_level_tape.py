@@ -53,7 +53,8 @@ def preset(level, invul=0):
     if not 0 <= level < 14:
         raise SystemExit("level must be 0..13")
     steps = BOOT_TO_OPTIONS + BARRY
-    steps += ["A", "wait 20"] * invul          # INVUL: 0 off, 1, 2 (cycles mod 3)
+    if invul:                                  # INVUL: 0 off, 1 health, 2 lives; the cursor starts on LEVEL
+        steps += ["Up", "wait 20"] + ["A", "wait 20"] * invul
     steps += ["Down", "wait 20"] + ["A", "wait 20"] * level
     steps += ["wait 20", "Start", "wait 60", "Up", "wait 20", "Start"]
     return steps

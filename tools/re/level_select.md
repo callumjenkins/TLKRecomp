@@ -28,8 +28,9 @@ timer runs, so presses spaced only 6 frames apart miss (tried).
 1. wait 700 (title shows START/OPTIONS at about 600)
 2. Down, wait 10, Start, wait 80 (Options screen)
 3. B, wait 20, A, wait 20, R, wait 20, R, wait 20, Y, wait 60 (debug menu)
-4. optional: A x k on INVUL (k = 1 or 2)
-5. Down (cursor to LEVEL), wait 20, then **A x N**, each followed by wait 20 (`$7FFF9E = N`)
+4. optional: Up (cursor to INVUL), wait 20, then A x k on INVUL (k = 1 or 2), each followed by wait 20
+5. Down (cursor to LEVEL; already there without step 4), wait 20, then **A x N**, each followed by wait 20
+   (`$7FFF9E = N`)
 6. wait 20, Start (back to title), wait 60, Up, wait 20, Start (game starts at level N)
 
 ```sh
@@ -67,8 +68,11 @@ Not verified: Bug Toss started this way might also be broken on real hardware or
 levels normally follow a regular level and use `$7FFFA0`, which a fresh boot has not set),
 or the LLE interpreter might be at fault. Check in BizHawk with the same input.
 
-The `INVUL` option (`$7FFF9C`) is in the tape generator (`preset(level, invul=k)`) but was
-not run here.
+`INVUL` (`$7FFF9C`, measured 2026-10-18 with `tlk_sdl --practice-level 3 --invul k`): the menu's cursor starts
+on LEVEL, so A presses before any Up raise the level (the first recipe had them on INVUL and got levels 4 and 5).
+With Up first, `$7FFF9C = k`. 1 refills health every frame while it is non-zero (`$C00201`); 2 sets lives to 3
+before each death decrements them (`$C08AD9`). Idle in Stampede from f2600 to f10000: off loses lives 8 -> 2,
+1 keeps health 4 and lives 8 (and reaches the next level), 2 holds lives at 2.
 
 ## RAM-poke alternative (not run, no poke support in tlk_headless)
 
