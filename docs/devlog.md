@@ -2022,3 +2022,51 @@ tlk_sdl --practice-level 3 --frames 2600               frame 61f6953b... = l03_i
 
 Full build of `snesrecomp_game tlk_headless tlk_sdl` from clean: 22.6 min. Not verified: a real window, real key
 presses (F9 restart was not exercised), a real gamepad, best times across sessions.
+
+## Task UI: recomp-ui's in-game menu in tlk_sdl
+
+The owner asked for [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui) (MIT) instead of our own settings
+menu; only the in-game menu, not its pre-boot launcher. recomp-ui is a submodule pinned at `0546fbc`. TLK supplies
+the rows and callbacks (`runner/sdl_main.c`: Display, Graphics, Audio, Practice, Controls, System) and the Dear ImGui
+glue (`runner/tlk_menu_imgui.cpp`). The OpenGL presenter swaps inside `EndDraw`, so a runtime hunk
+(`opengl.hunks`, overlay-decl / overlay-draw) lets a host draw between the game quad and the swap; the menu goes
+there, over the shader. Without OpenGL the menu draws its compact form into the 256x224 picture.
+
+Behaviour changes: every change is applied and saved at once ("Save settings" is gone); Esc goes back and closes
+instead of quitting, Quit is System > Quit pressed twice; Level + Start level replace the Level row; new Game dimming
+and Menu opacity rows (`menu_dim`, `menu_opacity` in the ini) so a shader can be seen through the menu. Action rows
+show recomp-ui's fixed "OPEN". `--dump-window` with OpenGL now reads back the composited window at window size.
+
+Host-side fixes after the owner found it cramped: recomp-ui selects the row under the mouse every frame, so a
+resting pointer undid every key press (Down x4 + Right changed Aspect, not Game dimming); the mouse now counts only
+after it moves (`ImGuiConfigFlags_NoMouse` until motion/click, back on any key or pad button). Font 18 px (the theme's
+size, was 20), rasterized at the window's pixel density. Shorter descriptions. Below 768x672 recomp-ui's footer runs
+into Resume; the menu is laid out at 768x672 and shrunk to fit (scale 2 clean, scale 1 still too small to use).
+FreeType lookup disabled (chat emoji only; the tarball must not need libfreetype). Packages add
+`assets/fonts/LatoLatin-Regular.ttf` and LICENSE-recomp-ui/-imgui/-Lato; the Windows allowlist adds d2d1, dwrite,
+windowscodecs (recomp-ui's Win32 emoji code).
+
+Evidence (2026-10-18, worktree `rui`, generated/ from main):
+
+```
+compare_modes.sh 600 3000 / -t 6987M.tape 1200 6000    MATCH x4, WRAM same (57ccb8d5, 89a48d6c, dd861e16, 946033bd)
+check_all_tapes.sh -s                                  71 MATCH, 0 MISMATCH
+check_idle_lle.sh                                      IDLE MATCH frames=12000 every=5
+check_native_decomp.sh 3000                            IDENTICAL
+save f3000 / load / f6000                              946033bd10683657
+tlk_sdl 6987M.tape f6000 (dummy video)                 946033bd... / wram 87fa6746...
+check_exit_mx.py                                       0 WRONG
+check_allbugs.sh                                       ALLBUGS PASS
+pytest tools/tests                                     23 passed, 4 skipped (no ../tas in the worktree)
+tlk_sdl --selftest-remap                               PASS (0 failed), rewritten for the new menu (incl. Esc, Quit x2)
+Xvfb + XTest key presses, scale 3 and 2                Display, Practice, Audio, Controls (waiting), "Saved": looked at
+menu over crt-soft, dim 20 / opacity 40                looked at
+cmake --install: binary + font from the install dir    same pixels as the build tree
+MinGW build: imports                                   system DLLs only (adds d2d1, DWrite)
+wine tlk_sdl.exe --selftest-remap                      PASS (0 failed)
+wine tlk_sdl.exe --menu-page controls --dump-window    looked at
+```
+
+Full clean build: 22.5 min (Linux), 20.0 min (MinGW, niced, in parallel with the gates). Not verified: the owner's
+desktop with real keys and a real pad, the release tarball/zip (`package.sh`/`package_win.sh` not run), HiDPI, TAS
+sync vs BizHawk (game side untouched), Windows hash gates under Wine.
