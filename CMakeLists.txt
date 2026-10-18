@@ -126,6 +126,16 @@ if(TLK_BUILD_HOSTS)
     snesrecomp_target_opengl(tlk_sdl)
     snesrecomp_target_shader_presets(tlk_sdl)
     tlk_use_patched_target_sources(tlk_sdl)
+    # In-game settings menu: recomp-ui's runtime menu (MIT, submodule), drawn
+    # with Dear ImGui over the OpenGL presenter (runner/tlk_menu_imgui.cpp).
+    # Its fonts and images are staged to build/assets/fonts and assets/img.
+    # FreeType/HarfBuzz would only colour netplay-chat emoji, and the release
+    # binary must not need either installed: keep recomp-ui from finding them.
+    set(CMAKE_DISABLE_FIND_PACKAGE_Freetype ON)
+    set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH "" FORCE)
+    include("${RECOMP_UI_ROOT}/recomp_ui.cmake")
+    target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_menu_imgui.cpp)
+    recomp_target_launcher_ui(tlk_sdl CONSOLE snes)
 endif()
 
 # ── Install / packaging ───────────────────────────────────────────────────

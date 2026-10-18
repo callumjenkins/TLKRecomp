@@ -36,11 +36,12 @@
  *   --save-at N state     write a savestate after frame N (proof runs)
  *   --load state          start from a savestate (frame count continues)
  *   --load-at N state     load a savestate after frame N, in process (proof runs)
- *   --menu-at N           open the settings overlay after frame N (screenshots)
- *   --menu-page controls  with --menu-at: open the controls (remap) page
+ *   --menu-at N           open the settings menu after frame N (screenshots)
+ *   --menu-page controls  with --menu-at: open the Controls (remap) section
  *   --speedrun off|practice  practice mode on or off (overrides the ini)
  *   --practice-level N    with practice: level select N (0-13) after frame 1 (proof runs)
- *   --dump-window path    write the last presented window (game + overlays) as PNG
+ *   --dump-window path    write the last presented window as PNG (with OpenGL: the
+ *                         whole window at its size, shader and menu included)
  *   --selftest-remap      drive the menu/remap/hotplug code with synthetic SDL
  *                         events and a virtual gamepad, print PASS/FAIL, exit
  *   --list-drivers        print the SDL version and the video/audio drivers
@@ -58,14 +59,22 @@
  * muted; rebindable on the Controls page. Practice mode (menu, speedrun =
  * practice) adds a level timer, lag counter, input display and best times; F9
  * restarts the level. Tab or Esc
- * opens the settings overlay (emulation pauses); Esc in the overlay quits.
- * Gamepads default to by position (south=B, east=A, west=Y, north=X); Guide or
- * Back+Start opens the overlay. The Controls page rebinds a key or a gamepad
- * button per SNES button (whichever is pressed next), with Reset defaults;
- * bindings go to the ini (b = Z ..., pad_b = a ...). Pads are hotplugged.
+ * opens the settings menu (emulation pauses): arrows move and change values,
+ * Enter selects, Esc or Backspace goes back and closes, Tab closes; System >
+ * Quit (pressed twice) quits. Every change applies at once and is saved to the
+ * ini. Gamepads default to by position (south=B, east=A, west=Y, north=X);
+ * Guide or Back+Start opens the menu. The Controls section rebinds a key or a
+ * gamepad button per SNES button (whichever is pressed next), with Reset
+ * defaults; bindings go to the ini (b = Z ..., pad_b = a ...). Pads are
+ * hotplugged.
+ *
+ * The menu is recomp-ui's runtime menu (recomp-ui/, MIT): this file gives it
+ * rows and callbacks, tlk_menu_imgui.cpp draws it with Dear ImGui over the
+ * OpenGL presenter (fonts from assets/fonts next to the binary). Without
+ * OpenGL it draws its compact form into the 256x224 picture.
  *
  * Video goes through snesrecomp's OpenGL 3.3 presenter (desktop/opengl.c):
- * the overlay's Shader row cycles the bundled presets in assets/shaders next
+ * the menu's Shader row cycles the bundled presets in assets/shaders next
  * to the binary; Aspect, Smooth and Int. scale apply with or without one.
  * Without OpenGL 3.3 (or with opengl = 0) the plain SDL renderer is used and
  * shaders are unavailable. None of this touches s_pixels, which the hashes,
@@ -90,6 +99,8 @@
 /* snesrecomp's desktop OpenGL presenter (GLSL shader presets, aspect). */
 #include "opengl.h"
 #include "util.h"
+#include "gl_core_3_1.h"
+void snesrecomp_opengl_set_overlay(void (*draw)(int, int));   /* cmake/runtime-patches/opengl.hunks */
 void OpenGLRenderer_Create(struct RendererFuncs *funcs);
 void TlkVideoConfig(const char *shader, int aspect, int smooth);   /* tlk_video.c */
 
@@ -99,6 +110,7 @@ void TlkVideoConfig(const char *shader, int aspect, int smooth);   /* tlk_video.
 #include <stdlib.h>
 #include <string.h>
 #include "tlk_compat.h"
+#include "tlk_menu_imgui.h"
 
 enum { kWidth = 256, kHeight = 224, kBpp = 4 };
 static uint8_t s_pixels[kWidth * kHeight * kBpp];
@@ -268,6 +280,9 @@ static const char *const kShaders[][2] = {
     { "assets/shaders/warm-composite.glslp", "Composite" } };
 enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
 static int s_practice;   /* speedrun = practice: level timer, lag, inputs, best times, restart */
+/* How the open menu covers the game, in percent: dimming of the picture
+ * behind it, and how solid its panel is (see recomp_runtime_ui_set_backdrop). */
+static int s_menu_dim = RECOMP_RUNTIME_UI_DEFAULT_DIM_PERCENT, s_menu_opacity = 100;
 static char s_rom_cfg[1024];
 static const char *s_cfg_path;
 
@@ -281,7 +296,7 @@ static char *Trim(char *s) {
 /* Plain "key = value" lines; [sections] and ; or # comments are ignored.
  * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, volume, shader,
  * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, turbo_speed (2-16),
- * speedrun (off or practice), and one per binding
+ * speedrun (off or practice), menu_dim and menu_opacity (0-100), and one per binding
  * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
 static void LoadConfig(const char *path) {
@@ -314,6 +329,8 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "opengl")) s_opengl = atoi(v);
         else if (!strcmp(k, "turbo_speed")) s_turbo_speed = SDL_clamp(atoi(v), 2, 16);
         else if (!strcmp(k, "speedrun")) s_practice = !strcmp(v, "practice");
+        else if (!strcmp(k, "menu_dim")) s_menu_dim = SDL_clamp(atoi(v), 0, 100);
+        else if (!strcmp(k, "menu_opacity")) s_menu_opacity = SDL_clamp(atoi(v), 0, 100);
         else if (!strncmp(k, "pad_", 4)) {
             for (int i = 0; i < kBindings; i++)
                 if (!strcmp(k + 4, kButtonNames[i])) {
@@ -346,6 +363,8 @@ static int SaveConfig(void) {
             s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
     fprintf(f, "; hold turbo to run turbo_speed times faster\nturbo_speed = %d\n", s_turbo_speed);
     fprintf(f, "speedrun = %s\n", s_practice ? "practice" : "off");
+    fprintf(f, "; settings menu: game dimming and panel opacity, percent\nmenu_dim = %d\nmenu_opacity = %d\n",
+            s_menu_dim, s_menu_opacity);
     fprintf(f, "; keys use SDL key names\n");
     for (int i = 0; i < kBindings; i++) fprintf(f, "%s = %s\n", kButtonNames[i], SDL_GetKeyName(s_keys[i]));
     fprintf(f, "; gamepad buttons use SDL names (a = south, b = east, x = west, y = north,\n"
@@ -434,11 +453,11 @@ static const char *const kSelectNames[14] = {
     "Pridelands", "Monkeys", "Graveyard", "Stampede", "Exile", "Hakuna", "Destiny",
     "Be Prepared", "Return", "Pride Rock", "Bug Toss", "Bug Hunt 1", "Bug Hunt 2", "Bug Hunt 3" };
 static int s_sel_level;
-enum { M_RESUME, M_SCALE, M_FULLSCREEN, M_VSYNC, M_SHADER, M_ASPECT, M_SMOOTH, M_INTEGER,
-       M_AUDIO, M_VOLUME, M_PRACTICE, M_LEVEL, M_KEYS, M_SAVE, M_QUIT, M_COUNT };
-/* Bindings page rows: 12 buttons and turbo, then "Reset defaults", then "Back". */
-enum { K_RESET = kBindings, K_BACK = kBindings + 1, K_COUNT = kBindings + 2 };
-static int s_menu_open, s_menu_sel, s_menu_keys, s_key_sel, s_key_wait;
+/* Menu state the rest of the host reads. The menu itself (rows, cursor,
+ * drawing) is recomp-ui's runtime menu, built by MenuCreate. s_menu_gl: it
+ * is drawn with Dear ImGui over the OpenGL presenter, else into s_screen. */
+static RecompRuntimeUi *s_ui;
+static int s_menu_open, s_menu_gl, s_key_sel, s_key_wait;
 
 /* Short on-screen names by position; the ini keeps SDL's names. */
 static const char *PadName(SDL_GamepadButton b) {
@@ -470,69 +489,6 @@ static int ShaderIndex(void) {
     for (int i = 0; i < kShaderCount; i++)
         if (!strcmp(s_shader, kShaders[i][0])) return i;
     return -1;
-}
-
-static void DrawMenu(void) {
-    char line[64];
-    Panel(16, 8, 232, 208);
-    Ink(255, 210, 80);
-    DrawText(32, 14, s_menu_keys ? "CONTROLS  key / gamepad" : "SETTINGS");
-    if (!s_menu_keys) {
-        static const char *const kAspectNames[] = { "4:3 TV", "8:7 pixel", "1:1" };
-        int sh = ShaderIndex();
-        for (int i = 0; i < M_COUNT; i++) {
-            switch (i) {
-            case M_RESUME: snprintf(line, sizeof line, "Resume"); break;
-            case M_SCALE: snprintf(line, sizeof line, "Window     < %dx >", s_scale); break;
-            case M_FULLSCREEN: snprintf(line, sizeof line, "Fullscreen < %s >", s_fullscreen ? "on" : "off"); break;
-            case M_VSYNC: snprintf(line, sizeof line, "Vsync      < %s >", s_vsync ? "on" : "off"); break;
-            case M_SHADER:
-                snprintf(line, sizeof line, "Shader     < %s >", !s_gl_on ? "no OpenGL" : sh < 0 ? "custom" : kShaders[sh][1]);
-                break;
-            case M_ASPECT: snprintf(line, sizeof line, "Aspect     < %s >", kAspectNames[SnesDisplayAspect_Clamp(s_aspect)]); break;
-            case M_SMOOTH: snprintf(line, sizeof line, "Smooth     < %s >", s_smooth ? "on" : "off"); break;
-            case M_INTEGER: snprintf(line, sizeof line, "Int. scale < %s >", s_integer ? "on" : "off"); break;
-            case M_AUDIO: snprintf(line, sizeof line, "Audio      < %s >", s_audio ? "on" : "off"); break;
-            case M_VOLUME: snprintf(line, sizeof line, "Volume     < %d%% >", s_volume); break;
-            case M_PRACTICE: snprintf(line, sizeof line, "Practice   < %s >", s_practice ? "on" : "off"); break;
-            case M_LEVEL:
-                if (s_practice) snprintf(line, sizeof line, "Level      < %s >", kSelectNames[s_sel_level]);
-                else snprintf(line, sizeof line, "Level      (practice)");
-                break;
-            case M_KEYS: snprintf(line, sizeof line, "Controls..."); break;
-            case M_SAVE: snprintf(line, sizeof line, "Save settings"); break;
-            case M_QUIT: snprintf(line, sizeof line, "Quit"); break;
-            }
-            if (i == s_menu_sel) Ink(255, 255, 255);
-            else Ink(150, 150, 150);
-            DrawText(24, 28 + i * 10, i == s_menu_sel ? ">" : " ");
-            DrawText(36, 28 + i * 10, line);
-        }
-        Ink(150, 150, 150);
-        DrawText(24, 182, "F1-F4 save  F5-F8 load");
-        DrawText(24, 192, "F9 restart  Esc quits");
-        DrawText(24, 202, "Pad: Guide or Back+Start");
-    } else {
-        for (int i = 0; i < K_COUNT; i++) {
-            if (i < kBindings) {
-                int w = s_key_wait && i == s_key_sel;
-                const char *kn = SDL_GetKeyName(s_keys[i]);
-                char kshort[16];
-                /* "Right Shift" -> "R Shift" so the name fits the column */
-                if (!strncmp(kn, "Right ", 6) || !strncmp(kn, "Left ", 5))
-                    snprintf(kshort, sizeof kshort, "%c %s", kn[0], strchr(kn, ' ') + 1);
-                else snprintf(kshort, sizeof kshort, "%s", kn);
-                snprintf(line, sizeof line, "%-6s %-10.10s %.8s", kButtonNames[i],
-                         w ? "press key" : kshort, w ? "/button" : PadName(s_pad_btn[i]));
-            } else snprintf(line, sizeof line, i == K_RESET ? "Reset defaults" : "Back");
-            if (i == s_key_sel) Ink(255, 255, 255);
-            else Ink(150, 150, 150);
-            DrawText(24, 28 + i * 11, i == s_key_sel ? ">" : " ");
-            DrawText(36, 28 + i * 11, line);
-        }
-        Ink(150, 150, 150);
-        DrawText(24, 196, s_key_wait ? "Esc/Guide cancels" : "Enter/A: bind  Bksp: back");
-    }
 }
 
 static void DrawToast(void) {
@@ -869,11 +825,39 @@ static void SizeWindow(void) {
 
 static int TurboHeld(void);
 
+/* --dump-window with the OpenGL presenter: read the next composited window
+ * (shader and ImGui menu included) back before it is swapped. */
+static const char *s_dump_req;
+static int s_dump_ok;
+
+static void ReadBackWindow(int w, int h) {
+    uint8_t *px = (uint8_t *)malloc((size_t)w * h * 4), *row = (uint8_t *)malloc((size_t)w * 4);
+    s_dump_ok = 0;
+    if (px && row) {
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+        for (int y = 0; y < h / 2; y++) {   /* GL rows run bottom-up */
+            memcpy(row, px + (size_t)y * w * 4, (size_t)w * 4);
+            memcpy(px + (size_t)y * w * 4, px + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
+            memcpy(px + (size_t)(h - 1 - y) * w * 4, row, (size_t)w * 4);
+        }
+        s_dump_ok = WritePng(s_dump_req, px, w, h, w * 4);
+    }
+    free(px);
+    free(row);
+}
+
+/* The presenter's overlay hook: the menu, drawn after the game picture (and
+ * its shader) over the whole window, just before the swap. */
+static void DrawOverlay(int w, int h) {
+    if (s_menu_open && s_menu_gl) TlkMenuImguiDraw(s_ui);
+    if (s_dump_req) ReadBackWindow(w, h);
+}
+
 /* Shows s_pixels plus the overlay (menu when open, toast, turbo tag). */
 static void Present(void) {
     memcpy(s_screen, s_pixels, sizeof s_screen);
     if (s_practice && !s_menu_open) DrawPractice();
-    if (s_menu_open) DrawMenu();
     DrawToast();
     if (TurboHeld() && !s_menu_open) {
         char t[8];
@@ -882,6 +866,8 @@ static void Present(void) {
         Ink(255, 255, 255);
         DrawText(kWidth - 44, 8, t);
     }
+    /* Without ImGui the same menu is drawn into the 256x224 picture. */
+    if (s_menu_open && !s_menu_gl) recomp_runtime_ui_render_argb8888(s_ui, s_screen, kWidth, kHeight, kWidth * 4);
     if (s_gl_on) {
         uint8 *px;
         int pitch;
@@ -927,6 +913,14 @@ static int OpenVideo(void) {
             snesrecomp_opengl_set_vsync((s_vsync && pace) ? 1 : 0);
             snesrecomp_opengl_set_viewport(ComputeViewport);
             s_gl_on = s_gl.Initialize(win);
+        }
+        if (s_gl_on) {   /* the presenter's context is current here */
+            char font[1100];
+            const char *base = SDL_GetBasePath();
+            snprintf(font, sizeof font, "%sassets/fonts/LatoLatin-Regular.ttf", base ? base : "");
+            s_menu_gl = TlkMenuImguiInit(win, font, 18.0f);   /* recomp-ui's theme size */
+            if (!s_menu_gl) fprintf(stderr, "menu: Dear ImGui did not start; drawing it in the game picture\n");
+            snesrecomp_opengl_set_overlay(DrawOverlay);
         }
         if (!s_gl_on) {
             fprintf(stderr, "OpenGL 3.3 unavailable (%s): plain SDL renderer, no shaders\n", SDL_GetError());
@@ -994,92 +988,247 @@ static int TurboHeld(void) {
     return s_turbo_held || (s_pad && !s_pad_hold && SDL_GetGamepadButton(s_pad, s_pad_btn[kTurbo]));
 }
 
-/* ── Menu actions (keyboard and gamepad share them) ─────────────────────── */
-enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_CLOSE, A_QUIT };
+/* ── Settings menu: recomp-ui's runtime menu ───────────────────────────── */
+/* The rows, in order; sections appear in first-use order. Every change is
+ * applied at once and saved to the ini (the menu calls MenuSave after it). */
+enum {
+    R_SCALE, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
+    R_SHADER, R_SMOOTH, R_INTEGER,
+    R_AUDIO, R_VOLUME,
+    R_PRACTICE, R_LEVEL, R_START,
+    R_BIND0, R_RESET = R_BIND0 + kBindings,
+    R_RESUME, R_QUIT, R_COUNT };
 
-static void OpenMenu(void) {
-    s_menu_open = 1; s_menu_keys = 0; s_key_wait = 0; s_kbd_pad = 0; s_turbo_held = 0;
-}
-static void CloseMenu(void) {
-    s_menu_open = 0; s_key_wait = 0; s_pad_hold = 1;
-}
+static const char *const kAspectChoices[] = { "4:3 TV", "8:7 pixel", "1:1" };
+static const char *const kBindNames[kBindings] = {
+    "B", "Y", "Select", "Start", "Up", "Down", "Left", "Right", "A", "X", "L", "R", "Turbo" };
+/* Shader names, plus "custom" when the ini names a shader that is not a bundled preset. */
+static const char *s_shader_names[kShaderCount + 1];
+static char s_shader_custom[1024];
+/* Binding rows show their binding in the label ("B:  Z  /  Bottom"). */
+static char s_bind_label[kBindings][64];
 
-static void MenuAction(int act) {
-    if (act == A_QUIT) { running = 0; return; }
-    if (act == A_CLOSE) { CloseMenu(); return; }
-    if (s_menu_keys) {
-        if (act == A_UP) s_key_sel = (s_key_sel + K_COUNT - 1) % K_COUNT;
-        else if (act == A_DOWN) s_key_sel = (s_key_sel + 1) % K_COUNT;
-        else if (act == A_BACK || act == A_LEFT) s_menu_keys = 0;
-        else if (act == A_OK) {
-            if (s_key_sel == K_BACK) s_menu_keys = 0;
-            else if (s_key_sel == K_RESET) { ResetBindings(); Toast("Controls reset (Save to keep)"); }
-            else s_key_wait = 1;
-        }
-        return;
-    }
-    if (act == A_BACK) { CloseMenu(); return; }
-    int dir = act == A_LEFT ? -1 : act == A_RIGHT ? 1 : 0;
-    int enter = act == A_OK;
-    if (act == A_UP) s_menu_sel = (s_menu_sel + M_COUNT - 1) % M_COUNT;
-    else if (act == A_DOWN) s_menu_sel = (s_menu_sel + 1) % M_COUNT;
-    else if (dir || enter) {
-        switch (s_menu_sel) {
-        case M_RESUME: if (enter) CloseMenu(); break;
-        case M_SCALE:
-            s_scale += dir ? dir : 1;
-            if (s_scale < 1) s_scale = 8;
-            if (s_scale > 8) s_scale = 1;
-            SizeWindow();
-            break;
-        case M_FULLSCREEN: s_fullscreen = !s_fullscreen; SDL_SetWindowFullscreen(win, s_fullscreen); break;
-        case M_VSYNC: s_vsync = !s_vsync; SetVsync(); break;
-        case M_SHADER: {
-            if (!s_gl_on) { Toast("Shaders need OpenGL 3.3"); break; }
-            int sh = ShaderIndex();
-            sh = sh < 0 ? 0 : (sh + (dir ? dir : 1) + kShaderCount) % kShaderCount;
-            snprintf(s_shader, sizeof s_shader, "%s", kShaders[sh][0]);
-            ApplyVideoConfig();
-            if (s_gl.Reconfigure) s_gl.Reconfigure();
-            break;
-        }
-        case M_ASPECT:
-            s_aspect = (s_aspect + (dir ? dir : 1) + kSnesDisplayAspect_Count) % kSnesDisplayAspect_Count;
-            ApplyVideoConfig();
-            SizeWindow();
-            break;
-        case M_SMOOTH: s_smooth = !s_smooth; ApplyVideoConfig(); break;
-        case M_INTEGER: s_integer = !s_integer; break;
-        case M_AUDIO:
-            s_audio = !s_audio;
-            if (s_audio && !astream) {
-                if (!SDL_WasInit(SDL_INIT_AUDIO)) SDL_InitSubSystem(SDL_INIT_AUDIO);
-                SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, s_audio_rate };
-                astream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
-                if (astream) SDL_ResumeAudioStreamDevice(astream);
-                else { fprintf(stderr, "audio: %s\n", SDL_GetError()); s_audio = 0; }
-            } else if (!s_audio && astream) { SDL_DestroyAudioStream(astream); astream = NULL; }
-            break;
-        case M_VOLUME:
-            s_volume += (dir ? dir : 1) * 10;
-            if (s_volume < 0) s_volume = 0;
-            if (s_volume > 100) s_volume = enter ? 0 : 100;
-            break;
-        case M_PRACTICE:
-            s_practice = !s_practice;
-            if (s_practice) PrEnable();
-            break;
-        case M_LEVEL:
-            if (!s_practice) break;
-            if (dir) s_sel_level = (s_sel_level + 14 + dir) % 14;
-            else if (enter) PrStartLevel(s_sel_level);
-            break;
-        case M_KEYS: if (enter) { s_menu_keys = 1; s_key_sel = 0; } break;
-        case M_SAVE: if (enter) Toast(SaveConfig() ? "Settings saved" : "Cannot write ini"); break;
-        case M_QUIT: if (enter) running = 0; break;
-        }
+#define MENU_ROW(key, sec, label, desc, type, lo, hi, step, ch, n) \
+    { key, sec, label, desc, RECOMP_RUNTIME_UI_##type, lo, hi, step, ch, n, NULL }
+#define BIND_ROW(i) MENU_ROW("tlk.bind", "Controls", s_bind_label[i], \
+    "Enter, then the new key or button.", ACTION, 0, 0, 0, NULL, 0)
+static RecompRuntimeUiItem s_rows[R_COUNT] = {
+    [R_SCALE] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE, "Display", "Window scale",
+                         "Window height, times 224 pixels.", INT, 1, 8, 1, NULL, 0),
+    [R_FULLSCREEN] = MENU_ROW("tlk.fullscreen", "Display", "Fullscreen",
+                              "Also F11 or Alt+Enter.", BOOL, 0, 1, 1, NULL, 0),
+    [R_VSYNC] = MENU_ROW("tlk.vsync", "Display", "Vsync",
+                         "Pace to the display, not the 60.1 Hz clock.", BOOL, 0, 1, 1, NULL, 0),
+    [R_ASPECT] = MENU_ROW("tlk.aspect", "Display", "Aspect",
+                          "Picture shape: a TV, or square pixels.", CHOICE, 0, 2, 1, kAspectChoices, 3),
+    [R_DIM] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_MENU_DIM, "Display", "Game dimming",
+                       "How dark the game is behind the menu.", INT, 0, 100, 10, NULL, 0),
+    [R_OPACITY] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_MENU_OPACITY, "Display", "Menu opacity",
+                           "How solid the menu's background is.", INT, 0, 100, 10, NULL, 0),
+    [R_SHADER] = MENU_ROW("tlk.shader", "Graphics", "Shader",
+                          "Presets in assets/shaders.", CHOICE, 0, kShaderCount - 1, 1,
+                          s_shader_names, kShaderCount),
+    [R_SMOOTH] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER, "Graphics", "Smooth",
+                          "Bilinear filtering.", BOOL, 0, 1, 1, NULL, 0),
+    [R_INTEGER] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_INTEGER_SCALE, "Graphics", "Integer scaling",
+                           "Whole multiples of the game's pixels.", BOOL, 0, 1, 1, NULL, 0),
+    [R_AUDIO] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_AUDIO, "Audio", "Audio",
+                         "Sound on or off.", BOOL, 0, 1, 1, NULL, 0),
+    [R_VOLUME] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_VOLUME, "Audio", "Volume",
+                          "Percent.", INT, 0, 100, 10, NULL, 0),
+    [R_PRACTICE] = MENU_ROW("tlk.practice", "Practice", "Practice mode",
+                            "Timer, lag, inputs, best times. F9 restarts.",
+                            BOOL, 0, 1, 1, NULL, 0),
+    [R_LEVEL] = MENU_ROW("tlk.level", "Practice", "Level",
+                         "Where Start level goes.", CHOICE, 0, 13, 1, kSelectNames, 14),
+    [R_START] = MENU_ROW("tlk.start_level", "Practice", "Start level",
+                         "Power on and go to that level.", ACTION, 0, 0, 0, NULL, 0),
+    [R_BIND0 + 0] = BIND_ROW(0),   [R_BIND0 + 1] = BIND_ROW(1),   [R_BIND0 + 2] = BIND_ROW(2),
+    [R_BIND0 + 3] = BIND_ROW(3),   [R_BIND0 + 4] = BIND_ROW(4),   [R_BIND0 + 5] = BIND_ROW(5),
+    [R_BIND0 + 6] = BIND_ROW(6),   [R_BIND0 + 7] = BIND_ROW(7),   [R_BIND0 + 8] = BIND_ROW(8),
+    [R_BIND0 + 9] = BIND_ROW(9),   [R_BIND0 + 10] = BIND_ROW(10), [R_BIND0 + 11] = BIND_ROW(11),
+    [R_BIND0 + 12] = BIND_ROW(12),
+    [R_RESET] = MENU_ROW("tlk.reset_bindings", "Controls", "Reset defaults",
+                         "Default keys and gamepad buttons.", ACTION, 0, 0, 0, NULL, 0),
+    [R_RESUME] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_RESUME, "System", "Resume",
+                          "Back to the game.", ACTION, 0, 0, 0, NULL, 0),
+    [R_QUIT] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_QUIT, "System", "Quit",
+                        "Close the game. Press twice.", ACTION, 0, 0, 0, NULL, 0),
+};
+
+static void BindLabels(void) {
+    for (int i = 0; i < kBindings; i++) {
+        if (s_key_wait && i == s_key_sel)
+            snprintf(s_bind_label[i], sizeof s_bind_label[i], "%s:  press a key or button", kBindNames[i]);
+        else
+            snprintf(s_bind_label[i], sizeof s_bind_label[i], "%s:  %s  /  %s", kBindNames[i],
+                     SDL_GetKeyName(s_keys[i]), PadName(s_pad_btn[i]));
     }
 }
+
+static void ApplyBackdrop(void) {
+    recomp_runtime_ui_set_backdrop(s_ui, s_menu_dim / 100.0f, s_menu_opacity / 100.0f);
+}
+
+static void SetAudio(int on) {
+    s_audio = on;
+    if (s_audio && !astream) {
+        if (!SDL_WasInit(SDL_INIT_AUDIO)) SDL_InitSubSystem(SDL_INIT_AUDIO);
+        SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, s_audio_rate };
+        astream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+        if (astream) SDL_ResumeAudioStreamDevice(astream);
+        else { fprintf(stderr, "audio: %s\n", SDL_GetError()); s_audio = 0; }
+    } else if (!s_audio && astream) { SDL_DestroyAudioStream(astream); astream = NULL; }
+}
+
+static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
+    (void)ctx;
+    switch ((int)(item - s_rows)) {
+    case R_SCALE: *v = s_scale; break;
+    case R_FULLSCREEN: *v = s_fullscreen; break;
+    case R_VSYNC: *v = s_vsync; break;
+    case R_ASPECT: *v = SnesDisplayAspect_Clamp(s_aspect); break;
+    case R_DIM: *v = s_menu_dim; break;
+    case R_OPACITY: *v = s_menu_opacity; break;
+    case R_SHADER: { int sh = ShaderIndex(); *v = sh >= 0 ? sh : kShaderCount; break; }
+    case R_SMOOTH: *v = s_smooth; break;
+    case R_INTEGER: *v = s_integer; break;
+    case R_AUDIO: *v = s_audio; break;
+    case R_VOLUME: *v = s_volume; break;
+    case R_PRACTICE: *v = s_practice; break;
+    case R_LEVEL: *v = s_sel_level; break;
+    default: return 0;
+    }
+    return 1;
+}
+
+static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
+    (void)ctx;
+    switch ((int)(item - s_rows)) {
+    case R_SCALE: s_scale = v; SizeWindow(); break;
+    case R_FULLSCREEN: s_fullscreen = v; SDL_SetWindowFullscreen(win, s_fullscreen); break;
+    case R_VSYNC: s_vsync = v; SetVsync(); break;
+    case R_ASPECT: s_aspect = v; ApplyVideoConfig(); SizeWindow(); break;
+    case R_DIM: s_menu_dim = v; ApplyBackdrop(); break;
+    case R_OPACITY: s_menu_opacity = v; ApplyBackdrop(); break;
+    case R_SHADER:
+        snprintf(s_shader, sizeof s_shader, "%s", v < kShaderCount ? kShaders[v][0] : s_shader_custom);
+        ApplyVideoConfig();
+        if (s_gl.Reconfigure) s_gl.Reconfigure();
+        break;
+    case R_SMOOTH: s_smooth = v; ApplyVideoConfig(); break;
+    case R_INTEGER: s_integer = v; break;
+    case R_AUDIO: SetAudio(v); return s_audio == v;
+    case R_VOLUME: s_volume = v; break;
+    case R_PRACTICE:
+        s_practice = v;
+        if (s_practice) PrEnable();
+        break;
+    case R_LEVEL: s_sel_level = v; break;
+    default: return 0;
+    }
+    return 1;
+}
+
+static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
+    (void)ctx;
+    switch ((int)(item - s_rows)) {
+    case R_SHADER: return s_gl_on;
+    case R_LEVEL: case R_START: return s_practice;
+    default: return 1;
+    }
+}
+
+static void MenuSave(void *ctx) {
+    (void)ctx;
+    if (!SaveConfig()) recomp_runtime_ui_set_status(s_ui, "Cannot write the ini");
+}
+
+static void OpenMenu(void) { recomp_runtime_ui_open(s_ui); }
+static void CloseMenu(void) { recomp_runtime_ui_close(s_ui); }
+
+/* The menu opened or closed (by a key, a row, or the menu itself). */
+static void MenuShown(void *ctx, int open) {
+    (void)ctx;
+    s_menu_open = open;
+    s_key_wait = 0;
+    BindLabels();
+    if (open) { s_kbd_pad = 0; s_turbo_held = 0; TlkMenuImguiOpened(); }
+    else s_pad_hold = 1;
+}
+
+static int MenuRun(void *ctx, const RecompRuntimeUiItem *item) {
+    (void)ctx;
+    int r = (int)(item - s_rows);
+    if (r >= R_BIND0 && r < R_BIND0 + kBindings) {   /* the next key or button press binds */
+        s_key_sel = r - R_BIND0;
+        s_key_wait = 1;
+        BindLabels();
+        return 0;
+    }
+    switch (r) {
+    case R_START: PrStartLevel(s_sel_level); return 1;
+    case R_RESET:
+        ResetBindings();
+        BindLabels();
+        MenuSave(NULL);
+        return 1;
+    case R_RESUME: CloseMenu(); return 1;
+    case R_QUIT:
+        if (!recomp_runtime_ui_confirm(s_ui, item, "Press again to quit")) return 0;
+        running = 0;
+        return 1;
+    default: return 0;
+    }
+}
+
+/* A rebind finished: bind = 1 keeps the new key/button, 0 cancels. */
+static void BindDone(int bind) {
+    char msg[48];
+    s_key_wait = 0;
+    BindLabels();
+    if (bind) {
+        MenuSave(NULL);
+        snprintf(msg, sizeof msg, "%.47s", s_bind_label[s_key_sel]);
+    } else snprintf(msg, sizeof msg, "Cancelled");
+    recomp_runtime_ui_set_status(s_ui, msg);
+}
+
+static void MenuCreate(void) {
+    for (int i = 0; i < kShaderCount; i++) s_shader_names[i] = kShaders[i][1];
+    if (s_shader[0] && ShaderIndex() < 0) {   /* keep the ini's own shader as a choice */
+        snprintf(s_shader_custom, sizeof s_shader_custom, "%s", s_shader);
+        s_shader_names[kShaderCount] = "custom";
+        s_rows[R_SHADER].maximum = kShaderCount;
+        s_rows[R_SHADER].choice_count = kShaderCount + 1;
+    }
+    BindLabels();
+    RecompRuntimeUiConfig c;
+    memset(&c, 0, sizeof c);
+    c.title = "The Lion King";
+    c.subtitle = "Settings";
+    c.items = s_rows;
+    c.item_count = R_COUNT;
+    c.callbacks.get_value = MenuGet;
+    c.callbacks.set_value = MenuSet;
+    c.callbacks.run_action = MenuRun;
+    c.callbacks.is_enabled = MenuEnabled;
+    c.callbacks.save = MenuSave;
+    c.callbacks.visibility_changed = MenuShown;
+    c.theme = "snes";
+    c.accept_label = "Enter/A";
+    c.back_label = "Esc/B";
+    s_ui = recomp_runtime_ui_create(&c);
+    ApplyBackdrop();
+}
+
+/* Opens the menu on a section by its place in the list (--menu-page). */
+static void MenuOpenSection(int section) {
+    OpenMenu();
+    for (int i = 0; i < section; i++) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_DOWN, 1, 0);
+    recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
+}
+enum { kSectionControls = 4 };   /* Display, Graphics, Audio, Practice, Controls, System */
 
 /* Load a savestate during play (F5-F8, F9). */
 static int LoadStateLive(const char *path) {
@@ -1099,17 +1248,19 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
         if (!down) return;
         if (s_key_wait) {          /* rebinding: next key wins, Esc cancels */
             if (k != SDLK_ESCAPE) s_keys[s_key_sel] = k;
-            s_key_wait = 0;
+            BindDone(k != SDLK_ESCAPE);
             return;
         }
-        if (k == SDLK_ESCAPE) MenuAction(A_QUIT);
-        else if (k == SDLK_TAB) MenuAction(A_CLOSE);
-        else if (k == SDLK_UP) MenuAction(A_UP);
-        else if (k == SDLK_DOWN) MenuAction(A_DOWN);
-        else if (k == SDLK_LEFT) MenuAction(A_LEFT);
-        else if (k == SDLK_RIGHT) MenuAction(A_RIGHT);
-        else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) MenuAction(A_OK);
-        else if (k == SDLK_BACKSPACE && s_menu_keys) MenuAction(A_BACK);
+        RecompRuntimeUiInput in;
+        if (k == SDLK_TAB) in = RECOMP_RUNTIME_UI_INPUT_TOGGLE;
+        else if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) in = RECOMP_RUNTIME_UI_INPUT_BACK;
+        else if (k == SDLK_UP) in = RECOMP_RUNTIME_UI_INPUT_UP;
+        else if (k == SDLK_DOWN) in = RECOMP_RUNTIME_UI_INPUT_DOWN;
+        else if (k == SDLK_LEFT) in = RECOMP_RUNTIME_UI_INPUT_LEFT;
+        else if (k == SDLK_RIGHT) in = RECOMP_RUNTIME_UI_INPUT_RIGHT;
+        else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) in = RECOMP_RUNTIME_UI_INPUT_ACCEPT;
+        else return;
+        recomp_runtime_ui_handle_input(s_ui, in, 1, ke->repeat);
         return;
     }
     if (down && !ke->repeat) {
@@ -1153,7 +1304,8 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
 }
 
 /* Gamepad buttons drive the menu: Guide (or Back+Start) opens it; in it the
- * d-pad moves, South (A) selects, East (B) goes back, Start or Guide closes. */
+ * d-pad moves and changes values, South (A) selects, East (B) goes back,
+ * Start or Guide closes. */
 static void HandlePadButton(const SDL_GamepadButtonEvent *ge) {
     if (!ge->down) return;
     SDL_GamepadButton b = (SDL_GamepadButton)ge->button;
@@ -1165,23 +1317,26 @@ static void HandlePadButton(const SDL_GamepadButtonEvent *ge) {
     }
     if (s_key_wait) {   /* rebinding: next gamepad button wins, Guide cancels */
         if (b != SDL_GAMEPAD_BUTTON_GUIDE) s_pad_btn[s_key_sel] = b;
-        s_key_wait = 0;
+        BindDone(b != SDL_GAMEPAD_BUTTON_GUIDE);
         return;
     }
+    RecompRuntimeUiInput in;
     switch (b) {
-    case SDL_GAMEPAD_BUTTON_DPAD_UP: MenuAction(A_UP); break;
-    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: MenuAction(A_DOWN); break;
-    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: MenuAction(A_LEFT); break;
-    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: MenuAction(A_RIGHT); break;
-    case SDL_GAMEPAD_BUTTON_SOUTH: MenuAction(A_OK); break;
-    case SDL_GAMEPAD_BUTTON_EAST: MenuAction(A_BACK); break;
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: in = RECOMP_RUNTIME_UI_INPUT_UP; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: in = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: in = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: in = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+    case SDL_GAMEPAD_BUTTON_SOUTH: in = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
+    case SDL_GAMEPAD_BUTTON_EAST: in = RECOMP_RUNTIME_UI_INPUT_BACK; break;
     case SDL_GAMEPAD_BUTTON_START:
-    case SDL_GAMEPAD_BUTTON_GUIDE: MenuAction(A_CLOSE); break;
-    default: break;
+    case SDL_GAMEPAD_BUTTON_GUIDE: in = RECOMP_RUNTIME_UI_INPUT_TOGGLE; break;
+    default: return;
     }
+    recomp_runtime_ui_handle_input(s_ui, in, 1, 0);
 }
 
 static void HandleEvent(const SDL_Event *ev) {
+    if (s_menu_open) TlkMenuImguiEvent(ev);   /* mouse and window state for ImGui */
     switch (ev->type) {
     case SDL_EVENT_QUIT: running = 0; break;
     case SDL_EVENT_GAMEPAD_ADDED: OpenFirstGamepad(); break;
@@ -1246,12 +1401,11 @@ static int RemapSelfTest(void) {
     StCheck(s_kbd_pad == 1u, "default Z presses B");
     StKey(SDLK_Z, 0);
     StTap(SDLK_TAB);
-    StCheck(s_menu_open && !s_menu_keys, "Tab opens the settings menu");
-    for (int i = 0; i < M_KEYS; i++) StTap(SDLK_DOWN);
+    StCheck(s_menu_open, "Tab opens the settings menu");
+    for (int i = 0; i < kSectionControls; i++) StTap(SDLK_DOWN);
     StTap(SDLK_RETURN);
-    StCheck(s_menu_keys && s_key_sel == 0, "Controls page opens on B");
     StTap(SDLK_RETURN);
-    StCheck(s_key_wait, "Enter waits for a key");
+    StCheck(s_key_wait && s_key_sel == 0, "Controls opens on B, Enter waits for a key");
     StTap(SDLK_K);
     StCheck(!s_key_wait && s_keys[0] == SDLK_K, "K is now bound to B");
     StTap(SDLK_RETURN);
@@ -1260,27 +1414,38 @@ static int RemapSelfTest(void) {
 
     /* Gamepad navigation and binding with button events. */
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
-    StCheck(s_key_sel == 1, "pad d-pad down moves to Y");
     StPadEvent(SDL_GAMEPAD_BUTTON_SOUTH);
-    StCheck(s_key_wait, "pad South starts a rebind");
+    StCheck(s_key_wait && s_key_sel == 1, "pad d-pad down + South rebinds Y");
     StPadEvent(SDL_GAMEPAD_BUTTON_LEFT_STICK);
     StCheck(!s_key_wait && s_pad_btn[1] == SDL_GAMEPAD_BUTTON_LEFT_STICK, "pad L3 is now bound to Y");
 
-    /* Persist, reset, reload. */
-    StCheck(SaveConfig(), "SaveConfig writes the ini");
-    for (int i = 1; i < K_RESET; i++) StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
-    StCheck(s_key_sel == K_RESET, "cursor on Reset defaults");
+    /* Every rebind is saved; Reset defaults is saved too. */
+    ResetBindings();
+    LoadConfig(s_cfg_path);
+    StCheck(s_keys[0] == SDLK_K && s_pad_btn[1] == SDL_GAMEPAD_BUTTON_LEFT_STICK, "rebinds were saved to the ini");
+    for (int i = 1; i < kBindings; i++) StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
     StPadEvent(SDL_GAMEPAD_BUTTON_SOUTH);
     StCheck(s_keys[0] == SDLK_Z && s_pad_btn[1] == SDL_GAMEPAD_BUTTON_WEST, "Reset defaults restores Z / West");
     LoadConfig(s_cfg_path);
-    StCheck(s_keys[0] == SDLK_K && s_pad_btn[1] == SDL_GAMEPAD_BUTTON_LEFT_STICK, "ini reload restores K / L3");
+    StCheck(s_keys[0] == SDLK_Z && s_pad_btn[1] == SDL_GAMEPAD_BUTTON_WEST, "the reset was saved");
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);   /* wraps to B */
+    StPadEvent(SDL_GAMEPAD_BUTTON_SOUTH);
+    StTap(SDLK_K);
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    StPadEvent(SDL_GAMEPAD_BUTTON_SOUTH);
+    StPadEvent(SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    StCheck(s_keys[0] == SDLK_K && s_pad_btn[1] == SDL_GAMEPAD_BUTTON_LEFT_STICK,
+            "down from Reset wraps to B; K and L3 bound again");
     StPadEvent(SDL_GAMEPAD_BUTTON_EAST);
-    StCheck(s_menu_open && !s_menu_keys, "pad East leaves the Controls page");
+    StCheck(s_menu_open && !s_key_wait, "pad East leaves Controls, menu stays open");
+
+    /* Practice section, one up from Controls. */
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    StPadEvent(SDL_GAMEPAD_BUTTON_SOUTH);
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
-    StCheck(s_menu_sel == M_LEVEL && s_sel_level == 0, "Level row does nothing with practice off");
+    StCheck(s_sel_level == 0, "Level row does nothing with practice off");
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
-    StCheck(s_menu_sel == M_PRACTICE, "pad d-pad up reaches Practice mode");
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
     StCheck(s_practice, "Right turns practice mode on");
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
@@ -1288,15 +1453,12 @@ static int RemapSelfTest(void) {
     StCheck(s_sel_level == 13, "Left on Level wraps to the last level");
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
-    StCheck(SaveConfig(), "SaveConfig writes practice mode");
     s_practice = 0;
     LoadConfig(s_cfg_path);
-    StCheck(s_practice, "ini reload keeps practice mode on");
+    StCheck(s_practice, "practice mode was saved to the ini");
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
     StCheck(!s_practice, "Left turns it off again");
-    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
-    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
-    StCheck(s_menu_sel == M_KEYS, "pad d-pad down returns to Controls...");
+    Present();   /* draws the menu once (the dummy driver has no OpenGL: the 256x224 path) */
     StPadEvent(SDL_GAMEPAD_BUTTON_START);
     StCheck(!s_menu_open, "pad Start closes the menu");
     StKey(SDLK_K, 1);
@@ -1312,23 +1474,41 @@ static int RemapSelfTest(void) {
     StKey(SDLK_GRAVE, 0);
     StCheck(!TurboHeld(), "releasing ` ends turbo");
     StTap(SDLK_TAB);
-    StCheck(s_menu_open && s_menu_sel == M_KEYS, "menu reopens on Controls...");
+    StCheck(s_menu_open, "Tab reopens the menu");
+    StTap(SDLK_DOWN);   /* the menu reopens on the last section, Practice */
     StTap(SDLK_RETURN);
-    for (int i = 0; i < 3; i++) StTap(SDLK_UP);
-    StCheck(s_menu_keys && s_key_sel == kTurbo, "Up from B wraps to the turbo row");
+    StTap(SDLK_UP);
+    StTap(SDLK_UP);
     StTap(SDLK_RETURN);
+    StCheck(s_key_wait && s_key_sel == kTurbo, "Up from B wraps past Reset to the turbo row");
     StTap(SDLK_T);
     StCheck(!s_key_wait && s_keys[kTurbo] == SDLK_T, "T is now bound to turbo");
     StTap(SDLK_TAB);
     StKey(SDLK_T, 1);
     StCheck(TurboHeld(), "T holds turbo in game");
     StKey(SDLK_T, 0);
-    StCheck(SaveConfig(), "SaveConfig writes the turbo binding");
     ResetBindings();
     StCheck(s_keys[kTurbo] == SDLK_GRAVE && s_pad_btn[kTurbo] == SDL_GAMEPAD_BUTTON_RIGHT_STICK,
             "defaults: turbo ` / R3");
     LoadConfig(s_cfg_path);
     StCheck(s_keys[kTurbo] == SDLK_T && s_keys[0] == SDLK_K, "ini reload restores turbo T");
+
+    /* Esc backs out and closes; Quit takes two presses. */
+    StTap(SDLK_TAB);
+    StTap(SDLK_ESCAPE);
+    StCheck(!s_menu_open && running, "Esc closes the menu (no longer quits)");
+    StTap(SDLK_TAB);
+    StTap(SDLK_DOWN);   /* Controls -> System */
+    StTap(SDLK_RETURN);
+    StTap(SDLK_DOWN);
+    StTap(SDLK_RETURN);
+    StCheck(running && s_menu_open, "first press on Quit only asks");
+    StTap(SDLK_RETURN);
+    StCheck(!running, "second press quits");
+    running = 1;
+    StTap(SDLK_ESCAPE);
+    StTap(SDLK_ESCAPE);
+    StCheck(!s_menu_open, "Esc twice backs out of System and closes");
 
     /* Hotplug and live state with an SDL virtual gamepad. */
     SDL_VirtualJoystickDesc desc;
@@ -1516,9 +1696,17 @@ static uint8_t *PickRom(size_t *size, char *found, size_t found_n) {
     }
 }
 
-/* What is shown (game + overlays), before any shader. */
+/* What is shown: with OpenGL the whole window as composited (shader and menu
+ * included, at window size), else the 256x224 picture plus overlays. */
 static void DumpWindow(const char *path) {
-    if (WritePng(path, (const uint8_t *)s_screen, kWidth, kHeight, kWidth * 4)) printf("dump_window=%s\n", path);
+    int ok;
+    if (s_gl_on) {
+        s_dump_req = path;
+        Present();
+        s_dump_req = NULL;
+        ok = s_dump_ok;
+    } else ok = WritePng(path, (const uint8_t *)s_screen, kWidth, kHeight, kWidth * 4);
+    if (ok) printf("dump_window=%s\n", path);
     else fprintf(stderr, "dump-window: cannot write %s\n", path);
 }
 
@@ -1634,6 +1822,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "input: %zu %s from %s\n", s_tape_frames, s_polled ? "polls" : "frames", input_path);
     }
     if (!OpenVideo()) return 3;
+    MenuCreate();
 
     astream = NULL;
     /* The output rate is fixed for the session so turning audio on/off in the
@@ -1746,9 +1935,9 @@ int main(int argc, char **argv) {
         }
         if (practice_level >= 0 && s_practice) { PrStartLevel(practice_level % 14); practice_level = -1; }
         if (menu_at >= 0 && frame == menu_at) {
-            OpenMenu();
+            if (menu_page) MenuOpenSection(kSectionControls);
+            else OpenMenu();
             menu_shown = 1;
-            if (menu_page) { s_menu_sel = M_KEYS; s_menu_keys = 1; s_key_sel = 0; }
             menu_at = -1;
         }
 
@@ -1837,6 +2026,8 @@ int main(int argc, char **argv) {
     }
     if (astream) SDL_DestroyAudioStream(astream);
     if (s_pad) SDL_CloseGamepad(s_pad);
+    TlkMenuImguiShutdown();
+    recomp_runtime_ui_destroy(s_ui);
     if (tex) SDL_DestroyTexture(tex);
     if (ren) SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
