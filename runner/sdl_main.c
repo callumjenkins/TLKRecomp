@@ -537,7 +537,7 @@ static void DrawMenu(void) {
 
 static void DrawToast(void) {
     if (!s_toast[0] || SDL_GetTicksNS() > s_toast_until) return;
-    int w = (int)strlen(s_toast) * 8 + 8, y = s_practice ? 24 : 4;   /* practice: under its timer */
+    int w = (int)strlen(s_toast) * 8 + 8, y = s_practice && !s_menu_open ? 24 : 4;   /* practice: under its timer */
     Panel(4, y, w, 16);
     Ink(255, 255, 255);
     DrawText(8, y + 4, s_toast);
@@ -872,7 +872,7 @@ static int TurboHeld(void);
 /* Shows s_pixels plus the overlay (menu when open, toast, turbo tag). */
 static void Present(void) {
     memcpy(s_screen, s_pixels, sizeof s_screen);
-    if (s_practice) DrawPractice();
+    if (s_practice && !s_menu_open) DrawPractice();
     if (s_menu_open) DrawMenu();
     DrawToast();
     if (TurboHeld() && !s_menu_open) {
