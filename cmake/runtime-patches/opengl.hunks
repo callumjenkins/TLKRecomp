@@ -24,3 +24,30 @@ static unsigned int g_program, g_flash_program, g_VAO, g_shader_VAO;
                       viewport.width, viewport.height);
     glBindVertexArray(g_VAO);
 >>>>
+
+# Task UI: tlk_sdl draws recomp-ui's in-game menu (Dear ImGui) over the game
+# picture. The presenter swaps inside EndDraw, so a host has no other point
+# between the game quad and the swap: let it register one draw call there,
+# with the whole drawable as the viewport.
+@@ overlay-decl
+<<<<
+static void (*g_compute_viewport)(int, int, int, int, SnesDisplayViewport *);
+====
+static void (*g_compute_viewport)(int, int, int, int, SnesDisplayViewport *);
+static void (*g_overlay)(int, int);
+
+void snesrecomp_opengl_set_overlay(void (*draw)(int, int)) {
+  g_overlay = draw;
+}
+>>>>
+
+@@ overlay-draw
+<<<<
+  SDL_GL_SwapWindow(g_window);
+====
+  if (g_overlay) {
+    glViewport(0, 0, drawable_width, drawable_height);
+    g_overlay(drawable_width, drawable_height);
+  }
+  SDL_GL_SwapWindow(g_window);
+>>>>
