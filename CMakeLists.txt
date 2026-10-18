@@ -152,6 +152,14 @@ if(TLK_BUILD_HOSTS)
             DESTINATION ${CMAKE_INSTALL_DOCDIR})
     install(FILES snesrecomp/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}
             RENAME LICENSE-snesrecomp.txt)
+    # The settings menu: recomp-ui (MIT) with Dear ImGui (MIT), and the one
+    # font it draws with (Lato, OFL 1.1), looked up in assets/fonts.
+    install(FILES ${RECOMP_UI_ROOT}/assets/common/fonts/LatoLatin-Regular.ttf
+            DESTINATION ${CMAKE_INSTALL_BINDIR}/assets/fonts)
+    install(FILES ${RECOMP_UI_ROOT}/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}
+            RENAME LICENSE-recomp-ui.txt)
+    install(FILES packaging/LICENSE-imgui.txt packaging/LICENSE-Lato.txt
+            DESTINATION ${CMAKE_INSTALL_DOCDIR})
     if(TLK_STATIC_SDL)
         include(FetchContent)
         FetchContent_GetProperties(SDL3)   # sdl3_SOURCE_DIR (set in a function)

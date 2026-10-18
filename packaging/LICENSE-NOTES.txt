@@ -17,3 +17,9 @@ a cartridge you own.
 SDL3 3.4.10 (window, audio, input) is statically linked into tlk_sdl.
 It is (c) Sam Lantinga and contributors under the zlib license (full
 text in LICENSE-SDL3.txt; https://libsdl.org/license.php).
+
+The settings menu is recomp-ui (c) Matthew Stanley, MIT license
+(LICENSE-recomp-ui.txt), drawn with Dear ImGui (c) Omar Cornut, MIT
+license (LICENSE-imgui.txt). Its font, assets/fonts/LatoLatin-Regular.ttf,
+is Lato (c) Lukasz Dziedzic under the SIL Open Font License 1.1
+(LICENSE-Lato.txt).

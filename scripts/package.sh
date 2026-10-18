@@ -31,17 +31,17 @@ cp "$STAGE/bin/tlk_sdl" "$PKG/"
 cp -r "$STAGE/bin/assets" "$PKG/"
 strip "$PKG/tlk_sdl" 2>/dev/null || true
 cp "$STAGE"/share/doc/*/README.txt "$STAGE"/share/doc/*/LICENSE-NOTES.txt \
-   "$STAGE"/share/doc/*/LICENSE-snesrecomp.txt \
-   "$STAGE"/share/doc/*/LICENSE-SDL3.txt "$PKG/"
+   "$STAGE"/share/doc/*/LICENSE-*.txt "$PKG/"
 rm -rf "$STAGE"
 # The packaged binary must not need a system SDL.
 if ldd "$PKG/tlk_sdl" | grep -qi sdl; then
     echo "tlk_sdl still links a shared SDL:" >&2; ldd "$PKG/tlk_sdl" >&2; exit 1
 fi
 
-# Nothing but the binary, the text files and the shader presets may go in.
+# Nothing but the binary, the text files, the shader presets and the menu
+# font may go in.
 bad=$(find "$PKG" -type f ! -name tlk_sdl ! -name '*.txt' \
-      ! -path "$PKG/assets/shaders/*" -print)
+      ! -path "$PKG/assets/shaders/*" ! -path "$PKG/assets/fonts/*.ttf" -print)
 [ -z "$bad" ] || { echo "unexpected files in package: $bad" >&2; exit 1; }
 if find "$PKG" -iname '*.sfc' -o -iname '*.smc' -o -name '*.c' -o -name '*.h' | grep -q .; then
     echo "ROM or source file in package" >&2; exit 1
