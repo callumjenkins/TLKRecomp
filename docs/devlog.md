@@ -2112,3 +2112,38 @@ wine tlk_sdl.exe, Xvfb, f1500 --dump-window            off / 2x pixel-identical,
 
 Not verified: a Mode 7 scene (none exists in this game), the owner's desktop, the release packages, TAS sync vs
 BizHawk (game side untouched).
+
+## Task LVL: level select apart from practice mode, with INVUL
+
+The menu's Level and Start level rows sat in the Practice section and were greyed out with practice off. They now
+have their own section, Level select (between Audio and Practice), usable either way, plus an **Invulnerable** row
+(Off / Infinite health / Infinite lives): the debug menu's INVUL option. Picking a level or INVUL does nothing by
+itself, so the action row is labelled `Start <level>  [Enter/A]` and changing either row puts "Now Enter/A on Start"
+in the footer instead of "Saved" (neither is kept in the ini). `--practice-level N` no longer needs
+`--speedrun practice`; `--invul N` goes with it, and `--menu-page level` opens the section for screenshots.
+
+**The tape recipe had INVUL wrong.** The debug menu's cursor starts on LEVEL, not INVUL: with A x k right after
+B A R R Y, `tlk_sdl --practice-level 3 --invul k` gave level 3 + k and `$7FFF9C = 0`. The macro now presses Up first
+(only when k > 0, so the INVUL-off input is unchanged); `tools/re/make_level_tape.py` and `level_select.md` fixed the
+same way. What the values do, from the disassembly: 1 refills health `$2004` from `$7FFFAC` every frame while it is
+non-zero (`$C00201`), 2 stores 3 in lives `$7FFFAA` before the death path decrements it (`$C08AD9`).
+
+Evidence (2026-10-18, main working tree, existing generated/):
+
+```
+tlk_sdl --practice-level 3 --invul 0 --frames 2600    frame 61f6953b... (same as task PRACTICE, l03_idle.tape)
+same, --invul 0/1/2, state at f2600 -> headless       $7FFF9C = 0 / 1 / 2, $7FFF9E = 3 for all
+idle from f2600 to f10000 (Stampede)                  off: lives 8 -> 2; 1: health 4, lives 8, reaches level 4;
+                                                      2: lives held at 2
+tlk_sdl --selftest-remap                              PASS (0 failed), also with an empty ini
+pytest tools/tests                                    27 passed
+Xvfb, OpenGL, --menu-page level --dump-window         section and three rows drawn, looked at
+```
+
+The self-test read `speedrun = practice` from the player's `tlk_sdl.ini` in the working directory and failed 5
+practice checks on clean main before this change; it now sets practice off before
+those checks. recomp-ui's ImGui backend shows "OPEN" as the value of every action row, Start included; changing that
+means editing the submodule.
+
+Not run: the emulation gates (compare_modes, tapes, allbugs: `tlk_headless` does not build `sdl_main.c`), the MinGW
+build, a real key press in the owner's window.
