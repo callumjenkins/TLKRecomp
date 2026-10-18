@@ -56,8 +56,11 @@ stick to move, Start/Back = Start/Select. Guide (or Back+Start) opens the
 menu; d-pad moves, A selects, B goes back, Start closes. Pads can be
 plugged in while playing.
 
-Settings menu: window scale, fullscreen, vsync, audio, volume and
-"Controls...". On the Controls page pick a SNES button and press Enter
+Settings menu: window scale, fullscreen, vsync, shader, aspect,
+smoothing, integer scaling, audio, volume and "Controls...". Shaders
+(CRT, LCD grid, Sharpen, Composite) are the files in assets/shaders and
+need OpenGL 3.3; keep that folder next to the program. Aspect 8:7 shows
+square pixels, 4:3 the shape a TV showed. On the Controls page pick a SNES button and press Enter
 (or pad A), then press the new key or the new gamepad button. Esc / Guide
 cancels. "Reset defaults" restores the table above. "Save settings"
 writes tlk_sdl.ini in the current directory (or $TLK_SDL_INI).

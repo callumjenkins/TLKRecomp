@@ -30,6 +30,7 @@ cmake --install "$BUILD" --prefix "$STAGE"
 
 mkdir -p "$PKG"
 cp "$STAGE/bin/tlk_sdl.exe" "$PKG/"
+cp -r "$STAGE/bin/assets" "$PKG/"
 x86_64-w64-mingw32-strip "$PKG/tlk_sdl.exe" 2>/dev/null || true
 cp "$STAGE"/share/doc/*/README.txt "$STAGE"/share/doc/*/LICENSE-NOTES.txt \
    "$STAGE"/share/doc/*/LICENSE-snesrecomp.txt \
@@ -39,11 +40,12 @@ rm -rf "$STAGE"
 for f in "$PKG"/*.txt; do sed -i 's/\r*$/\r/' "$f"; done
 # Only system DLLs may be imported (no SDL3.dll, libgcc, libwinpthread...).
 dlls=$($OBJDUMP -p "$PKG/tlk_sdl.exe" | sed -n 's/^[[:space:]]*DLL Name: //p')
-bad=$(printf '%s\n' "$dlls" | grep -viE '^(kernel32|user32|gdi32|winmm|imm32|ole32|oleaut32|version|advapi32|setupapi|shell32|msvcrt|ucrtbase|api-ms-win-[a-z0-9-]+|ws2_32|dbghelp|cfgmgr32|hid|dinput8|dxgi|d3d9|d3d11|d3d12|xinput1_4|comdlg32|shlwapi|uuid|bcrypt|rpcrt4|dwmapi|uxtheme|dxguid)\.dll$' || true)
+bad=$(printf '%s\n' "$dlls" | grep -viE '^(kernel32|user32|gdi32|winmm|imm32|ole32|oleaut32|version|advapi32|setupapi|shell32|msvcrt|ucrtbase|api-ms-win-[a-z0-9-]+|ws2_32|dbghelp|cfgmgr32|hid|dinput8|dxgi|d3d9|d3d11|d3d12|xinput1_4|comdlg32|shlwapi|uuid|bcrypt|rpcrt4|dwmapi|uxtheme|dxguid|opengl32)\.dll$' || true)
 [ -z "$bad" ] || { echo "tlk_sdl.exe imports non-system DLLs: $bad" >&2; exit 1; }
 
-# Nothing but the binary and the text files may go in.
-bad=$(find "$PKG" -type f ! -name tlk_sdl.exe ! -name '*.txt' -print)
+# Nothing but the binary, the text files and the shader presets may go in.
+bad=$(find "$PKG" -type f ! -name tlk_sdl.exe ! -name '*.txt' \
+      ! -path "$PKG/assets/shaders/*" -print)
 [ -z "$bad" ] || { echo "unexpected files in package: $bad" >&2; exit 1; }
 if find "$PKG" -iname '*.sfc' -o -iname '*.smc' -o -name '*.c' -o -name '*.h' | grep -q .; then
     echo "ROM or source file in package" >&2; exit 1

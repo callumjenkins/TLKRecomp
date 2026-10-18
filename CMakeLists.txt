@@ -135,6 +135,9 @@ endif()
 if(TLK_BUILD_HOSTS)
     include(GNUInstallDirs)
     install(TARGETS tlk_sdl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    # Shader presets are looked up next to the binary (assets/shaders/...).
+    install(DIRECTORY ${SNESRECOMP_ROOT}/runner/assets/shaders
+            DESTINATION ${CMAKE_INSTALL_BINDIR}/assets)
     install(FILES packaging/README.txt packaging/LICENSE-NOTES.txt
             DESTINATION ${CMAKE_INSTALL_DOCDIR})
     install(FILES snesrecomp/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}
