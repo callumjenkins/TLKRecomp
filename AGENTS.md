@@ -52,8 +52,10 @@ python3 scripts/generate_snesrecomp.py [--rom PATH] && cmake --build build -j
 The generator looks for `Lion King, The (USA).sfc` in the repo dir or its parent (SHA-256 `457abe63...0f3712`).
 In a worktree under `.claude/worktrees/` neither path has it: pass `--rom`.
 
-Build cost: a regeneration recompiles all 59 generated bank files (`generated/snesrecomp/*.c`) at `-O3`. No
-measured timing exists; time one before quoting an ETA, and count it twice if the Windows build is in play.
+Build cost (measured 2026-10-18, 12 threads, `-O3`): a cold `./build.sh` takes about 7.5 min, the MinGW build about
+the same; with `ccache` warm a clean rebuild takes seconds. The generated C is split into 140 files of 2 KiB ROM
+span each (patch 0012) and compiled once, shared by both hosts. Regeneration only rewrites files whose content
+changed.
 
 Windows: MinGW-w64 cross build into `build-win/` (commands in README), run and gate it under Wine
 (`scripts/compare_modes.sh -b <wrapper that execs wine build-win/tlk_headless.exe>`). Never tested on real

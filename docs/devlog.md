@@ -2147,3 +2147,43 @@ means editing the submodule.
 
 Not run: the emulation gates (compare_modes, tapes, allbugs: `tlk_headless` does not build `sdl_main.c`), the MinGW
 build, a real key press in the owner's window.
+
+## Task BLD: faster builds
+
+A cold `./build.sh` took 13:41 (measured in a worktree on 2026-10-18). Two causes:
+
+- **Each host compiled the generated C again.** `snesrecomp_game`, `tlk_headless` and `tlk_sdl` each built all 59
+  generated files: 177 compiles. `snesrecomp_game` is now an OBJECT library that both hosts link, so 59 (an OBJECT
+  library also keeps the module-registration constructor that a static archive could drop). CMake puts `ccache` in
+  front of the compiler when it is installed (`-DTLK_USE_CCACHE=OFF`, or an explicit launcher, overrides it).
+- **HiROM code landed in one file per bank.** snesrecomp shards a bank by entry PC with
+  `part = max(0, (pc16 - 0x8000) // span)`, which assumes LoROM. In Lion King, every entry in `$0000-$7FFF` went to
+  part 00, so each `bankXX_part00_v2.c` covered 34 KiB of ROM instead of 2 KiB: `bankc3_part00` was 14 MB and took
+  1,008 s to compile alone, which set the build's length. Patch `0012-hirom-low-half-shards.patch` gives
+  `$0000-$7FFF` its own parts after the `$8000-$FFFF` ones (part 10 = `$0000-$07FF`; LoROM numbering unchanged).
+  59 files became 140; the largest is 4.4 MB (`bankc0_part00`, 185 s). The split happens after emission, so the
+  generated functions are the same, only grouped differently.
+
+Evidence (2026-10-18, worktree, 12 threads, regenerated with patch 0012):
+
+```
+./build.sh, CCACHE_DISABLE=1, empty build/        442 s (was 13:41)
+clean, then rebuild with ccache warm              345 compiles from cache, ~1 s (fill run: 433 s)
+MinGW build-win, cold                             460 s
+compare_modes 600 3000 / -t 6987M 1200 6000        MATCH, WRAM same (57ccb8d5, c897f389, dd861e16, 946033bd)
+same under Wine (build-win/tlk_headless.exe)      MATCH, same four hashes as Linux
+check_all_tapes -s                                71 MATCH, 0 MISMATCH
+check_idle_lle / check_native_decomp 3000         IDLE MATCH / IDENTICAL
+save f3000 / load in new process / f6000           946033bd10683657
+ram_sync_compare 6987M / 6781M / 4735M            36,904 / 37,093 / 38,870
+check_allbugs                                     ALLBUGS PASS
+check_exit_mx                                     282 ok, 11 UNPROVEN, 0 WRONG
+pytest tools/tests                                27 passed
+tlk_sdl --selftest-remap (SDL dummy)              PASS (0 failed)
+tlk_sdl, Xvfb, 6987M f6000 --dump-window          level 1, Simba on the ledge, looked at
+20,000 frames of 6987M, old vs new binary, 3x     19.84-20.00 s vs 19.66-20.37 s, same f20000 hash
+```
+
+Not run: the setup-host configuration (`-DSNESRECOMP_SETUP_HOST=ON` with an empty `generated/`), which now
+compiles `setup_host_dispatch.c` in the game library; TLK does not ship one. Not tested: real Windows, the release
+packages, the owner's desktop.
