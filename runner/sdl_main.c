@@ -50,7 +50,9 @@
  *
  * Keys (default): arrows, Z=B X=A A=Y S=X Q=L W=R Enter=Start RShift=Select,
  * F11 or Alt+Enter fullscreen. F1-F4 save state slot 1-4, F5-F8 (or
- * Shift+F1-F4) load it; slots are tlk_slotN.state next to the ini. Tab or Esc
+ * Shift+F1-F4) load it; slots are tlk_slotN.state next to the ini. Hold ` (pad:
+ * right stick click) for turbo: turbo_speed times faster, 4 by default, sound
+ * muted; rebindable on the Controls page. Tab or Esc
  * opens the settings overlay (emulation pauses); Esc in the overlay quits.
  * Gamepads default to by position (south=B, east=A, west=Y, north=X); Guide or
  * Back+Start opens the overlay. The Controls page rebinds a key or a gamepad
@@ -218,27 +220,31 @@ static void PollHookCompiled(void) { PollHook(&g_cpu, 0xC0A07C); }
 
 /* ── Config ─────────────────────────────────────────────────────────────── */
 /* Runtime pad bits: 0 B, 1 Y, 2 Select, 3 Start, 4 Up, 5 Down, 6 Left,
- * 7 Right, 8 A, 9 X, 10 L, 11 R. */
-static const char *const kButtonNames[12] = {
-    "b", "y", "select", "start", "up", "down", "left", "right", "a", "x", "l", "r" };
-static const SDL_Keycode kDefaultKeys[12] = {
+ * 7 Right, 8 A, 9 X, 10 L, 11 R. Binding 12 is turbo (hold to fast-forward),
+ * not a pad bit. */
+enum { kSnesButtons = 12, kTurbo = 12, kBindings = 13 };
+static const char *const kButtonNames[kBindings] = {
+    "b", "y", "select", "start", "up", "down", "left", "right", "a", "x", "l", "r", "turbo" };
+static const SDL_Keycode kDefaultKeys[kBindings] = {
     SDLK_Z, SDLK_A, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT,
-    SDLK_X, SDLK_S, SDLK_Q, SDLK_W };
+    SDLK_X, SDLK_S, SDLK_Q, SDLK_W, SDLK_GRAVE };
 /* Gamepad defaults are by position (south=B, east=A, west=Y, north=X). The
  * left stick and the analog triggers always add d-pad / L / R on top. */
-static const SDL_GamepadButton kDefaultPad[12] = {
+static const SDL_GamepadButton kDefaultPad[kBindings] = {
     SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_BACK,
     SDL_GAMEPAD_BUTTON_START, SDL_GAMEPAD_BUTTON_DPAD_UP, SDL_GAMEPAD_BUTTON_DPAD_DOWN,
     SDL_GAMEPAD_BUTTON_DPAD_LEFT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT, SDL_GAMEPAD_BUTTON_EAST,
     SDL_GAMEPAD_BUTTON_NORTH, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,
-    SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER };
-static SDL_Keycode s_keys[12];
-static SDL_GamepadButton s_pad_btn[12];
+    SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, SDL_GAMEPAD_BUTTON_RIGHT_STICK };
+static SDL_Keycode s_keys[kBindings];
+static SDL_GamepadButton s_pad_btn[kBindings];
 static void ResetBindings(void) {
     memcpy(s_keys, kDefaultKeys, sizeof s_keys);
     memcpy(s_pad_btn, kDefaultPad, sizeof s_pad_btn);
 }
 static int s_scale = 3, s_fullscreen, s_vsync, s_audio = 1, s_audio_rate = 48000, s_volume = 100;
+/* Turbo: while its key or button is held, run s_turbo_speed frames per shown frame. */
+static int s_turbo_speed = 4, s_turbo_held;
 /* Video: aspect is a SnesDisplayAspect (default 8:7 = square pixels, the
  * picture as it always was here); shader "" = none, else a .glslp/.glsl path.
  * Shaders need OpenGL 3.3 (opengl = 0 forces the plain SDL renderer). */
@@ -263,8 +269,9 @@ static char *Trim(char *s) {
 
 /* Plain "key = value" lines; [sections] and ; or # comments are ignored.
  * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, volume, shader,
- * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, and one per button
- * (b y select start up down left right a x l r) holding an SDL key name such
+ * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, turbo_speed (2-16),
+ * and one per binding
+ * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
 static void LoadConfig(const char *path) {
     FILE *f = fopen(path, "r");
@@ -294,15 +301,16 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "smooth")) s_smooth = atoi(v);
         else if (!strcmp(k, "integer_scale")) s_integer = atoi(v);
         else if (!strcmp(k, "opengl")) s_opengl = atoi(v);
+        else if (!strcmp(k, "turbo_speed")) s_turbo_speed = SDL_clamp(atoi(v), 2, 16);
         else if (!strncmp(k, "pad_", 4)) {
-            for (int i = 0; i < 12; i++)
+            for (int i = 0; i < kBindings; i++)
                 if (!strcmp(k + 4, kButtonNames[i])) {
                     SDL_GamepadButton b = SDL_GetGamepadButtonFromString(v);
                     if (b != SDL_GAMEPAD_BUTTON_INVALID) s_pad_btn[i] = b;
                     else fprintf(stderr, "config: unknown gamepad button '%s' for %s\n", v, k);
                 }
         } else {
-            for (int i = 0; i < 12; i++)
+            for (int i = 0; i < kBindings; i++)
                 if (!strcmp(k, kButtonNames[i])) {
                     SDL_Keycode kc = SDL_GetKeyFromName(v);
                     if (kc != SDLK_UNKNOWN) s_keys[i] = kc;
@@ -324,11 +332,12 @@ static int SaveConfig(void) {
     fprintf(f, "; shader: empty, a bundled assets/shaders/*.glslp or your own .glslp/.glsl path\n");
     fprintf(f, "shader = %s\naspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
             s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
+    fprintf(f, "; hold turbo to run turbo_speed times faster\nturbo_speed = %d\n", s_turbo_speed);
     fprintf(f, "; keys use SDL key names\n");
-    for (int i = 0; i < 12; i++) fprintf(f, "%s = %s\n", kButtonNames[i], SDL_GetKeyName(s_keys[i]));
+    for (int i = 0; i < kBindings; i++) fprintf(f, "%s = %s\n", kButtonNames[i], SDL_GetKeyName(s_keys[i]));
     fprintf(f, "; gamepad buttons use SDL names (a = south, b = east, x = west, y = north,\n"
                "; back, start, guide, leftshoulder, rightshoulder, dpup, dpdown, ...)\n");
-    for (int i = 0; i < 12; i++)
+    for (int i = 0; i < kBindings; i++)
         fprintf(f, "pad_%s = %s\n", kButtonNames[i], SDL_GetGamepadStringForButton(s_pad_btn[i]));
     return fclose(f) == 0;
 }
@@ -402,8 +411,8 @@ static double audio_acc;
 
 enum { M_RESUME, M_SCALE, M_FULLSCREEN, M_VSYNC, M_SHADER, M_ASPECT, M_SMOOTH, M_INTEGER,
        M_AUDIO, M_VOLUME, M_KEYS, M_SAVE, M_QUIT, M_COUNT };
-/* Bindings page rows: 12 buttons, then "Reset defaults", then "Back". */
-enum { K_RESET = 12, K_BACK = 13, K_COUNT = 14 };
+/* Bindings page rows: 12 buttons and turbo, then "Reset defaults", then "Back". */
+enum { K_RESET = kBindings, K_BACK = kBindings + 1, K_COUNT = kBindings + 2 };
 static int s_menu_open, s_menu_sel, s_menu_keys, s_key_sel, s_key_wait;
 
 /* Short on-screen names by position; the ini keeps SDL's names. */
@@ -475,7 +484,7 @@ static void DrawMenu(void) {
         DrawText(24, 196, "Pad: Guide or Back+Start");
     } else {
         for (int i = 0; i < K_COUNT; i++) {
-            if (i < 12) {
+            if (i < kBindings) {
                 int w = s_key_wait && i == s_key_sel;
                 const char *kn = SDL_GetKeyName(s_keys[i]);
                 char kshort[16];
@@ -488,8 +497,8 @@ static void DrawMenu(void) {
             } else snprintf(line, sizeof line, i == K_RESET ? "Reset defaults" : "Back");
             if (i == s_key_sel) Ink(255, 255, 255);
             else Ink(150, 150, 150);
-            DrawText(24, 36 + i * 11, i == s_key_sel ? ">" : " ");
-            DrawText(36, 36 + i * 11, line);
+            DrawText(24, 28 + i * 11, i == s_key_sel ? ">" : " ");
+            DrawText(36, 28 + i * 11, line);
         }
         Ink(150, 150, 150);
         DrawText(24, 196, s_key_wait ? "Esc/Guide cancels" : "Enter/A: bind  Bksp: back");
@@ -520,11 +529,20 @@ static void SizeWindow(void) {
     if (!s_fullscreen) SDL_SetWindowSize(win, WindowWidth(), kHeight * s_scale);
 }
 
-/* Shows s_pixels plus the overlay (menu when open, toast). */
+static int TurboHeld(void);
+
+/* Shows s_pixels plus the overlay (menu when open, toast, turbo tag). */
 static void Present(void) {
     memcpy(s_screen, s_pixels, sizeof s_screen);
     if (s_menu_open) DrawMenu();
     DrawToast();
+    if (TurboHeld() && !s_menu_open) {
+        char t[8];
+        snprintf(t, sizeof t, ">>%dx", s_turbo_speed);
+        Panel(kWidth - 48, 4, 44, 16);
+        Ink(255, 255, 255);
+        DrawText(kWidth - 44, 8, t);
+    }
     if (s_gl_on) {
         uint8 *px;
         int pitch;
@@ -613,7 +631,7 @@ static void OpenFirstGamepad(void) {
 static uint16_t GamepadState(void) {
     if (!s_pad) return 0;
     uint16_t w = 0;
-    for (int i = 0; i < 12; i++)
+    for (int i = 0; i < kSnesButtons; i++)
         if (SDL_GetGamepadButton(s_pad, s_pad_btn[i])) w |= (uint16_t)(1u << i);
     const int dz = 16000;
     int ax = SDL_GetGamepadAxis(s_pad, SDL_GAMEPAD_AXIS_LEFTX);
@@ -632,11 +650,16 @@ static uint16_t GamepadState(void) {
     return w;
 }
 
+/* Turbo key or pad button held (the pad waits like GamepadState after the menu). */
+static int TurboHeld(void) {
+    return s_turbo_held || (s_pad && !s_pad_hold && SDL_GetGamepadButton(s_pad, s_pad_btn[kTurbo]));
+}
+
 /* ── Menu actions (keyboard and gamepad share them) ─────────────────────── */
 enum { A_UP, A_DOWN, A_LEFT, A_RIGHT, A_OK, A_BACK, A_CLOSE, A_QUIT };
 
 static void OpenMenu(void) {
-    s_menu_open = 1; s_menu_keys = 0; s_key_wait = 0; s_kbd_pad = 0;
+    s_menu_open = 1; s_menu_keys = 0; s_key_wait = 0; s_kbd_pad = 0; s_turbo_held = 0;
 }
 static void CloseMenu(void) {
     s_menu_open = 0; s_key_wait = 0; s_pad_hold = 1;
@@ -759,7 +782,8 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
         }
     }
     if (k == SDLK_RETURN && (ke->mod & SDL_KMOD_ALT)) return;
-    for (int i = 0; i < 12; i++)
+    if (k == s_keys[kTurbo]) s_turbo_held = down;
+    for (int i = 0; i < kSnesButtons; i++)
         if (s_keys[i] == k) {
             if (down) s_kbd_pad |= (uint16_t)(1u << i);
             else s_kbd_pad &= (uint16_t)~(1u << i);
@@ -810,7 +834,7 @@ static void HandleEvent(const SDL_Event *ev) {
     case SDL_EVENT_GAMEPAD_BUTTON_UP: HandlePadButton(&ev->gbutton); break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: HandleKey(&ev->key); break;
-    case SDL_EVENT_WINDOW_FOCUS_LOST: s_kbd_pad = 0; break;
+    case SDL_EVENT_WINDOW_FOCUS_LOST: s_kbd_pad = 0; s_turbo_held = 0; break;
     default: break;
     }
 }
@@ -899,6 +923,30 @@ static int RemapSelfTest(void) {
     StCheck(s_kbd_pad == 0, "Z no longer presses B");
     StKey(SDLK_Z, 0);
 
+    /* Turbo: a binding on the Controls page, not a pad bit. */
+    StKey(SDLK_GRAVE, 1);
+    StCheck(TurboHeld() && s_kbd_pad == 0, "default ` holds turbo and presses no button");
+    StKey(SDLK_GRAVE, 0);
+    StCheck(!TurboHeld(), "releasing ` ends turbo");
+    StTap(SDLK_TAB);
+    StCheck(s_menu_open && s_menu_sel == M_KEYS, "menu reopens on Controls...");
+    StTap(SDLK_RETURN);
+    for (int i = 0; i < 3; i++) StTap(SDLK_UP);
+    StCheck(s_menu_keys && s_key_sel == kTurbo, "Up from B wraps to the turbo row");
+    StTap(SDLK_RETURN);
+    StTap(SDLK_T);
+    StCheck(!s_key_wait && s_keys[kTurbo] == SDLK_T, "T is now bound to turbo");
+    StTap(SDLK_TAB);
+    StKey(SDLK_T, 1);
+    StCheck(TurboHeld(), "T holds turbo in game");
+    StKey(SDLK_T, 0);
+    StCheck(SaveConfig(), "SaveConfig writes the turbo binding");
+    ResetBindings();
+    StCheck(s_keys[kTurbo] == SDLK_GRAVE && s_pad_btn[kTurbo] == SDL_GAMEPAD_BUTTON_RIGHT_STICK,
+            "defaults: turbo ` / R3");
+    LoadConfig(s_cfg_path);
+    StCheck(s_keys[kTurbo] == SDLK_T && s_keys[0] == SDLK_K, "ini reload restores turbo T");
+
     /* Hotplug and live state with an SDL virtual gamepad. */
     SDL_VirtualJoystickDesc desc;
     SDL_INIT_INTERFACE(&desc);
@@ -925,6 +973,12 @@ static int RemapSelfTest(void) {
         StPump();
         StCheck(GamepadState() == (1u << 8), "virtual East reads as A (default)");
         SDL_SetJoystickVirtualButton(js, SDL_GAMEPAD_BUTTON_EAST, false);
+        SDL_SetJoystickVirtualButton(js, SDL_GAMEPAD_BUTTON_RIGHT_STICK, true);
+        StPump();
+        StCheck(TurboHeld() && GamepadState() == 0, "virtual R3 holds turbo and presses no button");
+        SDL_SetJoystickVirtualButton(js, SDL_GAMEPAD_BUTTON_RIGHT_STICK, false);
+        StPump();
+        StCheck(!TurboHeld(), "releasing R3 ends turbo");
         SDL_SetJoystickVirtualButton(js, SDL_GAMEPAD_BUTTON_GUIDE, true);
         StPump();
         StCheck(s_menu_open, "virtual Guide opens the menu");
@@ -1304,12 +1358,17 @@ int main(int argc, char **argv) {
             }
         }
 
+        /* Turbo: only every s_turbo_speed-th frame is shown and paced, and the
+         * sound is muted (still rendered, so the resampler keeps up). */
+        int turbo = TurboHeld() ? s_turbo_speed : 1;
+        int shown = frame % turbo == 0;
+
         /* Audio: one field's worth, trimmed to hold the device queue. */
         if (astream || s_wav) {
             double want = audio_per_frame;
             if (astream) {
                 int queued = SDL_GetAudioStreamQueued(astream) / 4;
-                if (queued == 0 && frame > 10 && pace) underruns++;
+                if (queued == 0 && frame > 10 && pace && turbo == 1) underruns++;
                 double e = (double)(audio_target - queued) / audio_target;
                 if (e > 1) e = 1;
                 if (e < -1) e = -1;
@@ -1323,7 +1382,7 @@ int main(int argc, char **argv) {
                 RtlRenderAudio(abuf, c, 2);
                 if (s_volume < 100)
                     for (int j = 0; j < c * 2; j++) abuf[j] = (int16_t)(abuf[j] * s_volume / 100);
-                if (astream && pace) SDL_PutAudioStreamData(astream, abuf, c * 4);
+                if (astream && pace && turbo == 1) SDL_PutAudioStreamData(astream, abuf, c * 4);
                 if (s_wav && s_wav_frames < s_wav_limit) {
                     uint32_t w = (uint32_t)c;
                     if (w > s_wav_limit - s_wav_frames) w = s_wav_limit - s_wav_frames;
@@ -1334,11 +1393,11 @@ int main(int argc, char **argv) {
             }
         }
 
-        Present();
+        if (shown) Present();
 
         if (frames > 0 && frame >= frames) break;
 
-        if (pace && !s_vsync) {
+        if (pace && !s_vsync && shown) {
             deadline += period_ns;
             uint64_t now = SDL_GetTicksNS();
             if (now < deadline) SDL_DelayPrecise(deadline - now);
