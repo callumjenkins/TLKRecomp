@@ -37,9 +37,10 @@
  *   --load state          start from a savestate (frame count continues)
  *   --load-at N state     load a savestate after frame N, in process (proof runs)
  *   --menu-at N           open the settings menu after frame N (screenshots)
- *   --menu-page controls  with --menu-at: open the Controls (remap) section
+ *   --menu-page controls|level  with --menu-at: open the Controls (remap) or Level select section
  *   --speedrun off|practice  practice mode on or off (overrides the ini)
- *   --practice-level N    with practice: level select N (0-13) after frame 1 (proof runs)
+ *   --practice-level N    level select N (0-13) after frame 1 (proof runs)
+ *   --invul N             with --practice-level: debug-menu INVUL 0 off, 1 health, 2 lives
  *   --dump-window path    write the last presented window as PNG (with OpenGL: the
  *                         whole window at its size, shader and menu included)
  *   --selftest-remap      drive the menu/remap/hotplug code with synthetic SDL
@@ -459,11 +460,14 @@ static long frame;
 static const char *input_path;
 static double audio_acc;
 
-/* Level select names, debug-menu order (practice mode). */
+/* Level select names, debug-menu order. */
 static const char *const kSelectNames[14] = {
     "Pridelands", "Monkeys", "Graveyard", "Stampede", "Exile", "Hakuna", "Destiny",
     "Be Prepared", "Return", "Pride Rock", "Bug Toss", "Bug Hunt 1", "Bug Hunt 2", "Bug Hunt 3" };
-static int s_sel_level;
+/* Debug-menu INVUL ($7FFF9C): 1 refills health every frame ($C00201), 2 resets
+ * lives to 3 before each death ($C08AD9). */
+static const char *const kInvulNames[3] = { "Off", "Infinite health", "Infinite lives" };
+static int s_sel_level, s_sel_invul;
 /* Menu state the rest of the host reads. The menu itself (rows, cursor,
  * drawing) is recomp-ui's runtime menu, built by MenuCreate. s_menu_gl: it
  * is drawn with Dear ImGui over the OpenGL presenter, else into s_screen. */
@@ -763,8 +767,8 @@ static void DrawPractice(void) {
 
 /* Level select: reload the power-on savestate and play the debug-menu
  * recipe of tlk-map/make_level_tape.py (task F): title -> Options -> B A R R Y
- * opens INVUL / LEVEL, each A on LEVEL adds one, Start, then Up+Start on the
- * title starts at that level. Input only, no WRAM writes. */
+ * opens INVUL / LEVEL, each A on INVUL or LEVEL adds one, Start, then Up+Start
+ * on the title starts at that level. Input only, no WRAM writes. */
 static uint16_t s_macro[2048];
 static int s_macro_n, s_macro_i;
 
@@ -773,12 +777,16 @@ static void MacroTap(uint16_t w) {   /* 2 frames held, 4 released */
     for (int i = 0; i < 2 && s_macro_n < 2048; i++) s_macro[s_macro_n++] = w;
     MacroWait(4);
 }
-static void BuildLevelMacro(int level) {
+static void BuildLevelMacro(int level, int invul) {
     enum { B = 1 << 0, Y = 1 << 1, START = 1 << 3, UP = 1 << 4, DOWN = 1 << 5, A = 1 << 8, R = 1 << 11 };
     s_macro_n = 0; s_macro_i = 0;
     MacroWait(700); MacroTap(DOWN); MacroWait(10); MacroTap(START); MacroWait(80);
     MacroTap(B); MacroWait(20); MacroTap(A); MacroWait(20); MacroTap(R); MacroWait(20);
     MacroTap(R); MacroWait(20); MacroTap(Y); MacroWait(60);
+    if (invul) {   /* the cursor starts on LEVEL (measured): Up to INVUL */
+        MacroTap(UP); MacroWait(20);
+        for (int i = 0; i < invul; i++) { MacroTap(A); MacroWait(20); }
+    }
     MacroTap(DOWN); MacroWait(20);
     for (int i = 0; i < level; i++) { MacroTap(A); MacroWait(20); }
     MacroWait(20); MacroTap(START); MacroWait(60); MacroTap(UP); MacroWait(20); MacroTap(START);
@@ -787,13 +795,15 @@ static void BuildLevelMacro(int level) {
 static void PrBootPath(char *out, size_t n) { SidePath("tlk_practice_boot.state", out, n); }
 static int LoadStateLive(const char *path);
 static void CloseMenu(void);
+static void StartLabel(void);
 
 static void PrStartLevel(int level) {
     char path[1100], msg[64];
     PrBootPath(path, sizeof path);
     if (!LoadStateLive(path)) { Toast("Level select: no power-on state"); return; }
-    BuildLevelMacro(level);
+    BuildLevelMacro(level, s_sel_invul);
     s_sel_level = level;
+    StartLabel();
     PrSync();
     pr.st = PR_IDLE; pr.fresh = 0; pr.loading = 0; pr.frames = 0; pr.lag = 0;
     pr.run_on = 0; pr.run_frames = 0;
@@ -1061,7 +1071,7 @@ enum {
     R_SCALE, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
     R_SHADER, R_HD_MODE7, R_SMOOTH, R_INTEGER,
     R_AUDIO, R_VOLUME,
-    R_PRACTICE, R_LEVEL, R_START,
+    R_LEVEL, R_INVUL, R_START, R_PRACTICE,
     R_BIND0, R_RESET = R_BIND0 + kBindings,
     R_RESUME, R_QUIT, R_COUNT };
 
@@ -1073,6 +1083,8 @@ static const char *s_shader_names[kShaderCount + 1];
 static char s_shader_custom[1024];
 /* Binding rows show their binding in the label ("B:  Z  /  Bottom"). */
 static char s_bind_label[kBindings][64];
+/* The level select's action row names the level it goes to. */
+static char s_start_label[48];
 
 #define MENU_ROW(key, sec, label, desc, type, lo, hi, step, ch, n) \
     { key, sec, label, desc, RECOMP_RUNTIME_UI_##type, lo, hi, step, ch, n, NULL }
@@ -1105,13 +1117,16 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
                          "Sound on or off.", BOOL, 0, 1, 1, NULL, 0),
     [R_VOLUME] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_VOLUME, "Audio", "Volume",
                           "Percent.", INT, 0, 100, 10, NULL, 0),
+    [R_LEVEL] = MENU_ROW("tlk.level", "Level select", "Level",
+                         "Nothing happens until Start below.", CHOICE, 0, 13, 1, kSelectNames, 14),
+    [R_INVUL] = MENU_ROW("tlk.invul", "Level select", "Invulnerable",
+                         "The game's debug option. Applies on Start below.",
+                         CHOICE, 0, 2, 1, kInvulNames, 3),
+    [R_START] = MENU_ROW("tlk.start_level", "Level select", s_start_label,
+                         "Press Enter/A: restarts the game at that level.", ACTION, 0, 0, 0, NULL, 0),
     [R_PRACTICE] = MENU_ROW("tlk.practice", "Practice", "Practice mode",
                             "Timer, lag, inputs, best times. F9 restarts.",
                             BOOL, 0, 1, 1, NULL, 0),
-    [R_LEVEL] = MENU_ROW("tlk.level", "Practice", "Level",
-                         "Where Start level goes.", CHOICE, 0, 13, 1, kSelectNames, 14),
-    [R_START] = MENU_ROW("tlk.start_level", "Practice", "Start level",
-                         "Power on and go to that level.", ACTION, 0, 0, 0, NULL, 0),
     [R_BIND0 + 0] = BIND_ROW(0),   [R_BIND0 + 1] = BIND_ROW(1),   [R_BIND0 + 2] = BIND_ROW(2),
     [R_BIND0 + 3] = BIND_ROW(3),   [R_BIND0 + 4] = BIND_ROW(4),   [R_BIND0 + 5] = BIND_ROW(5),
     [R_BIND0 + 6] = BIND_ROW(6),   [R_BIND0 + 7] = BIND_ROW(7),   [R_BIND0 + 8] = BIND_ROW(8),
@@ -1124,6 +1139,10 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_QUIT] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_QUIT, "System", "Quit",
                         "Close the game. Press twice.", ACTION, 0, 0, 0, NULL, 0),
 };
+
+static void StartLabel(void) {
+    snprintf(s_start_label, sizeof s_start_label, "Start %s  [Enter/A]", kSelectNames[s_sel_level]);
+}
 
 static void BindLabels(void) {
     for (int i = 0; i < kBindings; i++) {
@@ -1167,6 +1186,7 @@ static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
     case R_VOLUME: *v = s_volume; break;
     case R_PRACTICE: *v = s_practice; break;
     case R_LEVEL: *v = s_sel_level; break;
+    case R_INVUL: *v = s_sel_invul; break;
     default: return 0;
     }
     return 1;
@@ -1174,7 +1194,8 @@ static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
 
 static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
     (void)ctx;
-    switch ((int)(item - s_rows)) {
+    int r = (int)(item - s_rows);
+    switch (r) {
     case R_SCALE: s_scale = v; SizeWindow(); break;
     case R_FULLSCREEN: s_fullscreen = v; SDL_SetWindowFullscreen(win, s_fullscreen); break;
     case R_VSYNC: s_vsync = v; SetVsync(); break;
@@ -1195,7 +1216,12 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
         s_practice = v;
         if (s_practice) PrEnable();
         break;
-    case R_LEVEL: s_sel_level = v; break;
+    case R_LEVEL: case R_INVUL:   /* not in the ini; 0 keeps this hint in place of "Saved" */
+        if (r == R_LEVEL) s_sel_level = v;
+        else s_sel_invul = v;
+        StartLabel();
+        recomp_runtime_ui_set_status(s_ui, "Now Enter/A on Start");
+        return 0;
     default: return 0;
     }
     return 1;
@@ -1205,7 +1231,6 @@ static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
     (void)ctx;
     switch ((int)(item - s_rows)) {
     case R_SHADER: return s_gl_on;
-    case R_LEVEL: case R_START: return s_practice;
     default: return 1;
     }
 }
@@ -1274,6 +1299,7 @@ static void MenuCreate(void) {
         s_rows[R_SHADER].choice_count = kShaderCount + 1;
     }
     BindLabels();
+    StartLabel();
     RecompRuntimeUiConfig c;
     memset(&c, 0, sizeof c);
     c.title = "The Lion King";
@@ -1299,7 +1325,7 @@ static void MenuOpenSection(int section) {
     for (int i = 0; i < section; i++) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_DOWN, 1, 0);
     recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
 }
-enum { kSectionControls = 4 };   /* Display, Graphics, Audio, Practice, Controls, System */
+enum { kSectionLevel = 3, kSectionControls = 5 };   /* Display, Graphics, Audio, Level select, Practice, Controls, System */
 
 /* Load a savestate during play (F5-F8, F9). */
 static int LoadStateLive(const char *path) {
@@ -1510,20 +1536,28 @@ static int RemapSelfTest(void) {
     StPadEvent(SDL_GAMEPAD_BUTTON_EAST);
     StCheck(s_menu_open && !s_key_wait, "pad East leaves Controls, menu stays open");
 
-    /* Practice section, one up from Controls. */
+    /* Level select section, two up from Controls: works with practice off
+     * (off here whatever the player's ini says). */
+    s_practice = 0;
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
     StPadEvent(SDL_GAMEPAD_BUTTON_SOUTH);
-    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    StCheck(!s_practice && s_sel_level == 13, "Left on Level wraps to the last level, practice off");
+    StCheck(strstr(s_start_label, "Bug Hunt 3") != NULL, "the Start row names the level");
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
-    StCheck(s_sel_level == 0, "Level row does nothing with practice off");
-    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
-    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
-    StCheck(s_practice, "Right turns practice mode on");
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
-    StCheck(s_sel_level == 13, "Left on Level wraps to the last level");
+    StCheck(s_sel_level == 0 && s_sel_invul == 2, "Left on Invulnerable wraps to infinite lives");
     StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
-    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    StCheck(s_sel_invul == 0, "Right wraps it back to off");
+    StPadEvent(SDL_GAMEPAD_BUTTON_EAST);
+
+    /* Practice section, one up from Controls. */
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    StPadEvent(SDL_GAMEPAD_BUTTON_SOUTH);
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    StCheck(s_practice, "Right turns practice mode on");
     s_practice = 0;
     LoadConfig(s_cfg_path);
     StCheck(s_practice, "practice mode was saved to the ini");
@@ -1662,8 +1696,8 @@ static void Usage(void) {
         "               [--frames N] [--hash-at a,b,..] [--dump-png path] [--no-pace]\n"
         "               [--no-audio] [--wav path [--wav-seconds S]]\n"
         "               [--save-at N state] [--load state] [--load-at N state]\n"
-        "               [--menu-at N [--menu-page controls]] [--selftest-remap]\n"
-        "               [--speedrun off|practice [--practice-level N]] [--dump-window path]\n"
+        "               [--menu-at N [--menu-page controls|level]] [--selftest-remap]\n"
+        "               [--speedrun off|practice] [--practice-level N [--invul N]] [--dump-window path]\n"
         "               [--list-drivers]\n"
         "Without --rom (or rom= in the ini) the .sfc/.smc files next to the binary and in the\n"
         "current directory are tried. Needs The Lion King (USA), CRC32 C8FBFAA8.\n");
@@ -1799,7 +1833,7 @@ int main(int argc, char **argv) {
     const char *record_path = NULL;
     double wav_seconds = 10.0;
 
-    int selftest = 0, menu_page = 0;
+    int selftest = 0, menu_page = -1;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--list-drivers")) {
             int v = SDL_GetVersion();
@@ -1841,10 +1875,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--load-at") && v && i + 2 < argc) { load_at = atol(v); load_at_path = argv[i + 2]; i += 2; }
         else if (!strcmp(a, "--load") && v) { load_path = v; i++; }
         else if (!strcmp(a, "--menu-at") && v) { menu_at = atol(v); i++; }
-        else if (!strcmp(a, "--menu-page") && v) { menu_page = !strcmp(v, "controls") || !strcmp(v, "keys"); i++; }
+        else if (!strcmp(a, "--menu-page") && v) {
+            menu_page = !strcmp(v, "controls") || !strcmp(v, "keys") ? kSectionControls
+                      : !strcmp(v, "level") ? kSectionLevel : -1;
+            i++;
+        }
         else if (!strcmp(a, "--selftest-remap")) selftest = 1;
         else if (!strcmp(a, "--speedrun") && v) { s_practice = !strcmp(v, "practice"); i++; }
         else if (!strcmp(a, "--practice-level") && v) { practice_level = atoi(v); i++; }
+        else if (!strcmp(a, "--invul") && v) { s_sel_invul = atoi(v); if (s_sel_invul < 0 || s_sel_invul > 2) s_sel_invul = 0; i++; }
         else if (!strcmp(a, "--dump-window") && v) { dump_window = v; i++; }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { Usage(); return 0; }
         else { Usage(); return 2; }
@@ -2005,9 +2044,9 @@ int main(int argc, char **argv) {
             load_at_path = NULL;   /* once */
             Toast("Loaded state");
         }
-        if (practice_level >= 0 && s_practice) { PrStartLevel(practice_level % 14); practice_level = -1; }
+        if (practice_level >= 0) { PrStartLevel(practice_level % 14); practice_level = -1; }
         if (menu_at >= 0 && frame == menu_at) {
-            if (menu_page) MenuOpenSection(kSectionControls);
+            if (menu_page >= 0) MenuOpenSection(menu_page);
             else OpenMenu();
             menu_shown = 1;
             menu_at = -1;
