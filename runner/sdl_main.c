@@ -38,6 +38,9 @@
  *   --load-at N state     load a savestate after frame N, in process (proof runs)
  *   --menu-at N           open the settings overlay after frame N (screenshots)
  *   --menu-page controls  with --menu-at: open the controls (remap) page
+ *   --speedrun off|practice  practice mode on or off (overrides the ini)
+ *   --practice-level N    with practice: level select N (0-13) after frame 1 (proof runs)
+ *   --dump-window path    write the last presented window (game + overlays) as PNG
  *   --selftest-remap      drive the menu/remap/hotplug code with synthetic SDL
  *                         events and a virtual gamepad, print PASS/FAIL, exit
  *   --list-drivers        print the SDL version and the video/audio drivers
@@ -52,7 +55,9 @@
  * F11 or Alt+Enter fullscreen. F1-F4 save state slot 1-4, F5-F8 (or
  * Shift+F1-F4) load it; slots are tlk_slotN.state next to the ini. Hold ` (pad:
  * right stick click) for turbo: turbo_speed times faster, 4 by default, sound
- * muted; rebindable on the Controls page. Tab or Esc
+ * muted; rebindable on the Controls page. Practice mode (menu, speedrun =
+ * practice) adds a level timer, lag counter, input display and best times; F9
+ * restarts the level. Tab or Esc
  * opens the settings overlay (emulation pauses); Esc in the overlay quits.
  * Gamepads default to by position (south=B, east=A, west=Y, north=X); Guide or
  * Back+Start opens the overlay. The Controls page rebinds a key or a gamepad
@@ -207,8 +212,13 @@ static uint16_t TapePolled(void) {
     if (!s_tape || s_poll_idx >= s_tape_frames) return 0;
     return joypad_auto_read_word(s_tape[s_poll_idx]) & 0x0fffu;
 }
+/* Game pad reads this frame; a frame with none is a lag frame (same rule as
+ * tlk_headless --ram-log). */
+static unsigned long s_polls_frame;
 static void PollHook(CpuState *cpu, uint32_t pc24) {
     (void)cpu; (void)pc24;
+    s_polls_frame++;
+    if (!s_polled) return;   /* practice mode only counts reads */
     uint16_t w = TapePolled();
     g_snes->input1_currentState = w;
     joypad_set_pad(0, w);
@@ -257,6 +267,7 @@ static const char *const kShaders[][2] = {
     { "assets/shaders/sharp.glslp", "Sharpen" },
     { "assets/shaders/warm-composite.glslp", "Composite" } };
 enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
+static int s_practice;   /* speedrun = practice: level timer, lag, inputs, best times, restart */
 static char s_rom_cfg[1024];
 static const char *s_cfg_path;
 
@@ -270,7 +281,7 @@ static char *Trim(char *s) {
 /* Plain "key = value" lines; [sections] and ; or # comments are ignored.
  * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, volume, shader,
  * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, turbo_speed (2-16),
- * and one per binding
+ * speedrun (off or practice), and one per binding
  * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
 static void LoadConfig(const char *path) {
@@ -302,6 +313,7 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "integer_scale")) s_integer = atoi(v);
         else if (!strcmp(k, "opengl")) s_opengl = atoi(v);
         else if (!strcmp(k, "turbo_speed")) s_turbo_speed = SDL_clamp(atoi(v), 2, 16);
+        else if (!strcmp(k, "speedrun")) s_practice = !strcmp(v, "practice");
         else if (!strncmp(k, "pad_", 4)) {
             for (int i = 0; i < kBindings; i++)
                 if (!strcmp(k + 4, kButtonNames[i])) {
@@ -333,6 +345,7 @@ static int SaveConfig(void) {
     fprintf(f, "shader = %s\naspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
             s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
     fprintf(f, "; hold turbo to run turbo_speed times faster\nturbo_speed = %d\n", s_turbo_speed);
+    fprintf(f, "speedrun = %s\n", s_practice ? "practice" : "off");
     fprintf(f, "; keys use SDL key names\n");
     for (int i = 0; i < kBindings; i++) fprintf(f, "%s = %s\n", kButtonNames[i], SDL_GetKeyName(s_keys[i]));
     fprintf(f, "; gamepad buttons use SDL names (a = south, b = east, x = west, y = north,\n"
@@ -352,11 +365,18 @@ static const char *LastSep(const char *p) {
     return sl;
 }
 
+/* A file next to the ini. */
+static void SidePath(const char *name, char *out, size_t n) {
+    const char *sl = LastSep(s_cfg_path);
+    if (sl) snprintf(out, n, "%.*s/%s", (int)(sl - s_cfg_path), s_cfg_path, name);
+    else snprintf(out, n, "%s", name);
+}
+
 /* Savestate slot path: tlk_slotN.state in the ini's directory. */
 static void SlotPath(int slot, char *out, size_t n) {
-    const char *sl = LastSep(s_cfg_path);
-    if (sl) snprintf(out, n, "%.*s/tlk_slot%d.state", (int)(sl - s_cfg_path), s_cfg_path, slot);
-    else snprintf(out, n, "tlk_slot%d.state", slot);
+    char name[32];
+    snprintf(name, sizeof name, "tlk_slot%d.state", slot);
+    SidePath(name, out, n);
 }
 
 /* ── Overlay: 8x8 text in the 256x224 logical space ────────────────────── */
@@ -409,8 +429,13 @@ static long frame;
 static const char *input_path;
 static double audio_acc;
 
+/* Level select names, debug-menu order (practice mode). */
+static const char *const kSelectNames[14] = {
+    "Pridelands", "Monkeys", "Graveyard", "Stampede", "Exile", "Hakuna", "Destiny",
+    "Be Prepared", "Return", "Pride Rock", "Bug Toss", "Bug Hunt 1", "Bug Hunt 2", "Bug Hunt 3" };
+static int s_sel_level;
 enum { M_RESUME, M_SCALE, M_FULLSCREEN, M_VSYNC, M_SHADER, M_ASPECT, M_SMOOTH, M_INTEGER,
-       M_AUDIO, M_VOLUME, M_KEYS, M_SAVE, M_QUIT, M_COUNT };
+       M_AUDIO, M_VOLUME, M_PRACTICE, M_LEVEL, M_KEYS, M_SAVE, M_QUIT, M_COUNT };
 /* Bindings page rows: 12 buttons and turbo, then "Reset defaults", then "Back". */
 enum { K_RESET = kBindings, K_BACK = kBindings + 1, K_COUNT = kBindings + 2 };
 static int s_menu_open, s_menu_sel, s_menu_keys, s_key_sel, s_key_wait;
@@ -469,19 +494,24 @@ static void DrawMenu(void) {
             case M_INTEGER: snprintf(line, sizeof line, "Int. scale < %s >", s_integer ? "on" : "off"); break;
             case M_AUDIO: snprintf(line, sizeof line, "Audio      < %s >", s_audio ? "on" : "off"); break;
             case M_VOLUME: snprintf(line, sizeof line, "Volume     < %d%% >", s_volume); break;
+            case M_PRACTICE: snprintf(line, sizeof line, "Practice   < %s >", s_practice ? "on" : "off"); break;
+            case M_LEVEL:
+                if (s_practice) snprintf(line, sizeof line, "Level      < %s >", kSelectNames[s_sel_level]);
+                else snprintf(line, sizeof line, "Level      (practice)");
+                break;
             case M_KEYS: snprintf(line, sizeof line, "Controls..."); break;
             case M_SAVE: snprintf(line, sizeof line, "Save settings"); break;
             case M_QUIT: snprintf(line, sizeof line, "Quit"); break;
             }
             if (i == s_menu_sel) Ink(255, 255, 255);
             else Ink(150, 150, 150);
-            DrawText(24, 28 + i * 11, i == s_menu_sel ? ">" : " ");
-            DrawText(36, 28 + i * 11, line);
+            DrawText(24, 28 + i * 10, i == s_menu_sel ? ">" : " ");
+            DrawText(36, 28 + i * 10, line);
         }
         Ink(150, 150, 150);
-        DrawText(24, 176, "F1-F4 save, F5-F8 load");
-        DrawText(24, 186, "Esc quits  Tab resumes");
-        DrawText(24, 196, "Pad: Guide or Back+Start");
+        DrawText(24, 182, "F1-F4 save  F5-F8 load");
+        DrawText(24, 192, "F9 restart  Esc quits");
+        DrawText(24, 202, "Pad: Guide or Back+Start");
     } else {
         for (int i = 0; i < K_COUNT; i++) {
             if (i < kBindings) {
@@ -507,10 +537,318 @@ static void DrawMenu(void) {
 
 static void DrawToast(void) {
     if (!s_toast[0] || SDL_GetTicksNS() > s_toast_until) return;
-    int w = (int)strlen(s_toast) * 8 + 8;
-    Panel(4, 4, w, 16);
+    int w = (int)strlen(s_toast) * 8 + 8, y = s_practice ? 24 : 4;   /* practice: under its timer */
+    Panel(4, y, w, 16);
     Ink(255, 255, 255);
-    DrawText(8, 8, s_toast);
+    DrawText(8, y + 4, s_toast);
+}
+
+/* ── Practice mode ──────────────────────────────────────────────────────── */
+/* Reads WRAM only, never writes it, so emulation and recordings are the same
+ * with it on or off. Timing follows SBDWolf's practice hack (timer.asm): the
+ * level timer starts when the fade-in after a level load ends, counts frames
+ * that are neither fading ($0056 bit 0) nor paused ($0A89), and stops on level
+ * complete (the level number $7FFF9E changes with the load trigger $A692 set;
+ * Pride Rock: $A6C2 set) or on a
+ * death (lives $7FFFAA drop). Only a run that entered the level fresh (not a
+ * respawn or a savestate) counts for best times, as the hack skips
+ * checkpoints. F9 reloads an automatic savestate taken when the level's load
+ * finished. */
+enum { PR_IDLE, PR_ARMED, PR_RUNNING, PR_DONE, PR_DIED };
+enum { kPrLevels = 10, kPrDiffs = 4 };   /* best times: levels 0-9 (as the hack), by difficulty */
+static const char *const kPrLevelNames[kPrLevels] = {
+    "Pridelands", "Monkeys", "Graveyard", "Stampede", "Exile",
+    "Hakuna", "Destiny", "Be Prepared", "Return", "Pride Rock" };   /* short: toasts fit 256 px */
+static struct {
+    int st, level, fresh, eligible, loading, hook;
+    int run_on, run_done, run_dirty;   /* run timer: everything from game start */
+    long frames, lag, run_frames;
+    uint16_t lvl, state, lives, fin, pad, cpx, cpy;
+    uint8_t fade;
+} pr;
+static long s_best[kPrLevels][kPrDiffs];   /* frames, 0 = none */
+/* Checkpoint splits: level time when the checkpoint ($7FFFA4/A6) changed, keyed by its position. */
+typedef struct { int l, d; uint16_t x, y; long fr; } PrCp;
+static PrCp s_cp_best[64];
+static int s_cp_n;
+/* TAS reference: 6987M (tapes/6987M.read.tape) measured with these same rules. */
+static const long kTasLevel[kPrLevels] = { 1390, 7757, 4240, 4185, 1431, 4016, 4716, 2695, 2491, 3064 };
+static const PrCp kTasCp[] = { { 0, 0, 0x04B0, 0x0070, 904 }, { 1, 0, 0x1270, 0x01E0, 4562 },
+                               { 6, 0, 0x08C0, 0x0270, 1920 } };
+
+static uint16_t Wram16(uint32_t off) { return (uint16_t)(g_ram[off] | g_ram[off + 1] << 8); }
+
+static void PrTimesPath(char *out, size_t n) { SidePath("tlk_practice_times.txt", out, n); }
+static void PrRestartPath(char *out, size_t n) { SidePath("tlk_practice_restart.state", out, n); }
+
+/* "level difficulty frames" per line. */
+static void PrLoadTimes(void) {
+    char path[1100], line[64];
+    PrTimesPath(path, sizeof path);
+    memset(s_best, 0, sizeof s_best);
+    s_cp_n = 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        int l, d;
+        unsigned x, y;
+        long fr;
+        if (sscanf(line, "cp %d %d %x %x %ld", &l, &d, &x, &y, &fr) == 5) {
+            if (s_cp_n < 64 && fr > 0) s_cp_best[s_cp_n++] = (PrCp){ l, d, (uint16_t)x, (uint16_t)y, fr };
+        } else if (sscanf(line, "%d %d %ld", &l, &d, &fr) == 3 && l >= 0 && l < kPrLevels && d >= 0 && d < kPrDiffs && fr > 0)
+            s_best[l][d] = fr;
+    }
+    fclose(f);
+}
+static void PrSaveTimes(void) {
+    char path[1100];
+    PrTimesPath(path, sizeof path);
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "cannot write %s\n", path); return; }
+    fprintf(f, "; tlk_sdl practice best times: level difficulty frames (60.0988 per second)\n"
+               "; checkpoints: cp level difficulty x y frames\n");
+    for (int l = 0; l < kPrLevels; l++)
+        for (int d = 0; d < kPrDiffs; d++)
+            if (s_best[l][d]) fprintf(f, "%d %d %ld\n", l, d, s_best[l][d]);
+    for (int i = 0; i < s_cp_n; i++)
+        fprintf(f, "cp %d %d %04X %04X %ld\n", s_cp_best[i].l, s_cp_best[i].d, s_cp_best[i].x, s_cp_best[i].y, s_cp_best[i].fr);
+    fclose(f);
+}
+
+/* Frames as m:ss.cc of real time. */
+static void PrFmt(char *out, size_t n, long frames) {
+    long cs = (long)(frames * 100.0 / NTSC_FPS + 0.5);
+    snprintf(out, n, "%ld:%02ld.%02ld", cs / 6000, cs / 100 % 60, cs % 100);
+}
+
+/* Signed difference, "+0:01.23" / "-0:01.23". */
+static void PrDelta(char *out, size_t n, long diff) {
+    char t[16];
+    PrFmt(t, sizeof t, diff < 0 ? -diff : diff);
+    snprintf(out, n, "%c%s", diff < 0 ? '-' : '+', t);
+}
+
+/* Take the current WRAM as the baseline, so the next frame sees no transition. */
+static void PrSync(void) {
+    pr.lvl = Wram16(0x1FF9E); pr.state = Wram16(0x0008); pr.lives = Wram16(0x1FFAA);
+    pr.fin = Wram16(0xA6C2); pr.fade = g_ram[0x0056];
+    pr.cpx = Wram16(0x1FFA4); pr.cpy = Wram16(0x1FFA6);
+}
+
+/* After a savestate load: time from here, not for best times. F9 sets eligible. */
+static void PrAfterLoad(int eligible) {
+    PrSync();
+    pr.level = pr.lvl; pr.fresh = 0; pr.eligible = eligible; pr.loading = 0;
+    pr.run_dirty = 1;
+    pr.frames = 0; pr.lag = 0;
+    pr.st = (pr.fade & 1) ? PR_ARMED : PR_RUNNING;
+}
+
+static void PrFinish(void) {
+    char t[16], msg[64];
+    PrFmt(t, sizeof t, pr.frames);
+    pr.st = PR_DONE;
+    int l = pr.level, d = Wram16(0x1FF92);
+    if (l == 9) pr.run_done = 1;
+    const char *name = l >= 0 && l < kPrLevels ? kPrLevelNames[l] : "Bonus";
+    if (!pr.eligible || l < 0 || l >= kPrLevels || d < 0 || d >= kPrDiffs) {
+        snprintf(msg, sizeof msg, "%s %s", name, t);
+    } else if (!s_best[l][d] || pr.frames < s_best[l][d]) {
+        long old = s_best[l][d];
+        s_best[l][d] = pr.frames;
+        PrSaveTimes();
+        if (old) {
+            char dt[16];
+            PrFmt(dt, sizeof dt, old - pr.frames);
+            snprintf(msg, sizeof msg, "%s %s best -%s", name, t, dt);
+        } else snprintf(msg, sizeof msg, "%s %s best", name, t);
+    } else {
+        char dt[16];
+        PrFmt(dt, sizeof dt, pr.frames - s_best[l][d]);
+        snprintf(msg, sizeof msg, "%s %s +%s", name, t, dt);
+    }
+    Toast(msg);
+}
+
+/* Simba reached a checkpoint: level time so far against the best and the TAS. */
+static void PrCheckpoint(uint16_t x, uint16_t y) {
+    char t[16], dt[16], msg[64];
+    int l = pr.level, d = Wram16(0x1FF92);
+    PrFmt(t, sizeof t, pr.frames);
+    snprintf(msg, sizeof msg, "CP %s", t);
+    PrCp *b = NULL;
+    for (int i = 0; i < s_cp_n; i++)
+        if (s_cp_best[i].l == l && s_cp_best[i].d == d && s_cp_best[i].x == x && s_cp_best[i].y == y) b = &s_cp_best[i];
+    if (pr.eligible && b && pr.frames >= b->fr) {
+        PrDelta(dt, sizeof dt, pr.frames - b->fr);
+        snprintf(msg, sizeof msg, "CP %s %s", t, dt);
+    } else if (pr.eligible) {
+        if (b) {
+            PrDelta(dt, sizeof dt, pr.frames - b->fr);
+            snprintf(msg, sizeof msg, "CP %s best %s", t, dt);
+            b->fr = pr.frames;
+        } else {
+            for (size_t i = 0; i < sizeof kTasCp / sizeof kTasCp[0]; i++)
+                if (kTasCp[i].l == l && kTasCp[i].x == x && kTasCp[i].y == y) {
+                    PrDelta(dt, sizeof dt, pr.frames - kTasCp[i].fr);
+                    snprintf(msg, sizeof msg, "CP %s TAS %s", t, dt);
+                }
+            if (s_cp_n < 64) s_cp_best[s_cp_n++] = (PrCp){ l, d, x, y, pr.frames };
+        }
+        PrSaveTimes();
+    }
+    Toast(msg);
+}
+
+/* Once per emulated frame, after RtlRunFrame. */
+static void PracticeFrame(uint16_t pad) {
+    uint16_t lvl = Wram16(0x1FF9E), state = Wram16(0x0008), lives = Wram16(0x1FFAA);
+    uint16_t fin = Wram16(0xA6C2), pause = Wram16(0x0A89), demo = Wram16(0x1E03) & 0x8000;
+    uint8_t fade = g_ram[0x0056];
+    pr.pad = pad;
+    uint16_t cpx = Wram16(0x1FFA4), cpy = Wram16(0x1FFA6);
+    if (lvl != pr.lvl) {   /* run timer: starts leaving the title ($0E), stops back on it */
+        if (pr.lvl == 0x0E && !demo) { pr.run_on = 1; pr.run_done = 0; pr.run_frames = 0; pr.run_dirty = lvl != 0; }
+        if (lvl == 0x0E) { pr.run_on = 0; pr.run_frames = 0; }
+    }
+    if (pr.run_on && !pr.run_done) pr.run_frames++;
+    if (lvl != pr.lvl) {   /* level complete ($A692 set), or game start / game over (not) */
+        if (pr.st == PR_RUNNING && Wram16(0xA692)) PrFinish();
+        else if (pr.st == PR_RUNNING || pr.st == PR_ARMED) pr.st = PR_IDLE;
+        pr.fresh = 1;
+    } else if (pr.st == PR_RUNNING && lvl == 9 && fin && !pr.fin) {
+        PrFinish();                                   /* Pride Rock: the last hit on Scar */
+    } else if (pr.st == PR_RUNNING && (cpx != pr.cpx || cpy != pr.cpy)) {
+        PrCheckpoint(cpx, cpy);
+    } else if (pr.st == PR_RUNNING && lives < pr.lives) {
+        pr.st = PR_DIED;
+        pr.fresh = 0;
+    }
+    if (state == 0 || state == 0x8000) pr.loading = 1;   /* $0008: 0 loading, 4 playing (6 in between) */
+    if (state == 4 && pr.loading) {   /* a load just finished */
+        pr.loading = 0;
+        if (!demo && lvl != 0x0E) {     /* $0E: title */
+            pr.st = PR_ARMED; pr.level = lvl; pr.eligible = pr.fresh;
+            if (pr.fresh && lvl < kPrLevels) {
+                char path[1100];
+                PrRestartPath(path, sizeof path);
+                tlk_state_save(path, (uint32_t)frame);
+            }
+            pr.fresh = 0;
+        }
+    }
+    if (pr.st == PR_ARMED && !(fade & 1)) { pr.st = PR_RUNNING; pr.frames = 0; pr.lag = 0; }
+    if (pr.st == PR_RUNNING && !(fade & 1) && !pause) {
+        pr.frames++;
+        if (!s_polls_frame) pr.lag++;
+    }
+    pr.lvl = lvl; pr.state = state; pr.lives = lives; pr.fin = fin; pr.fade = fade;
+    pr.cpx = cpx; pr.cpy = cpy;
+}
+
+/* Grey label, then the value in the current ink; returns the next x. */
+static int PrLabel(int x, int y, const char *label) {
+    uint32_t ink = s_ink;
+    Ink(150, 150, 150);
+    DrawText(x, y, label);
+    s_ink = ink;
+    return x + (int)strlen(label) * 8;
+}
+
+/* Two rows at the top, between the health meter (ends x~42) and the roar
+ * meter (starts x~215): level time and T(AS), then R(UN) and L(AG), in fixed
+ * columns so nothing jumps while the digits change. */
+static void DrawPractice(void) {
+    char t[16], lvl[16], tas[16], run[16], lag[16];
+    if (pr.st == PR_IDLE) snprintf(t, sizeof t, "-:--.--");
+    else PrFmt(t, sizeof t, pr.st == PR_ARMED ? 0 : pr.frames);
+    snprintf(lvl, sizeof lvl, "%s%s", pr.st == PR_DIED ? "x" : "", t);
+    tas[0] = run[0] = 0;
+    if (pr.level >= 0 && pr.level < kPrLevels && pr.st != PR_IDLE) PrFmt(tas, sizeof tas, kTasLevel[pr.level]);
+    if (pr.run_on) {
+        PrFmt(t, sizeof t, pr.run_frames);
+        snprintf(run, sizeof run, "%s%s", t, pr.run_dirty ? "*" : "");
+    }
+    snprintf(lag, sizeof lag, "%ld", pr.lag);
+    enum { kX = 60, kY = 4 };   /* 17 characters wide, centred */
+    Panel(kX - 2, kY - 2, 17 * 8 + 4, 20);
+    if (pr.st == PR_DONE) Ink(120, 255, 120);
+    else if (pr.st == PR_DIED) Ink(255, 120, 120);
+    else Ink(255, 255, 255);
+    DrawText(kX, kY, lvl);
+    Ink(200, 200, 200);
+    DrawText(PrLabel(kX + 9 * 8, kY, "T"), kY, tas);
+    DrawText(PrLabel(kX, kY + 9, "R"), kY + 9, run);
+    DrawText(PrLabel(kX + 12 * 8, kY + 9, "L"), kY + 9, lag);
+    /* Inputs, bottom right: d-pad, face buttons, shoulders, Select (s), Start (S). */
+    static const struct { char c; int bit; } kIn[] = {
+        { '<', 6 }, { '^', 4 }, { 'v', 5 }, { '>', 7 }, { 'B', 0 }, { 'A', 8 }, { 'Y', 1 },
+        { 'X', 9 }, { 'L', 10 }, { 'R', 11 }, { 's', 2 }, { 'S', 3 } };
+    int n = (int)(sizeof kIn / sizeof kIn[0]), ix = 252 - n * 8, iy = 212;
+    Panel(ix - 2, iy - 2, n * 8 + 4, 12);
+    for (int i = 0; i < n; i++) {
+        char g[2] = { kIn[i].c, 0 };
+        if (pr.pad & (1u << kIn[i].bit)) Ink(255, 210, 80);
+        else Ink(70, 70, 70);
+        DrawText(ix + i * 8, iy, g);
+    }
+}
+
+/* Level select: reload the power-on savestate and play the debug-menu
+ * recipe of tlk-map/make_level_tape.py (task F): title -> Options -> B A R R Y
+ * opens INVUL / LEVEL, each A on LEVEL adds one, Start, then Up+Start on the
+ * title starts at that level. Input only, no WRAM writes. */
+static uint16_t s_macro[2048];
+static int s_macro_n, s_macro_i;
+
+static void MacroWait(int n) { while (n-- > 0 && s_macro_n < 2048) s_macro[s_macro_n++] = 0; }
+static void MacroTap(uint16_t w) {   /* 2 frames held, 4 released */
+    for (int i = 0; i < 2 && s_macro_n < 2048; i++) s_macro[s_macro_n++] = w;
+    MacroWait(4);
+}
+static void BuildLevelMacro(int level) {
+    enum { B = 1 << 0, Y = 1 << 1, START = 1 << 3, UP = 1 << 4, DOWN = 1 << 5, A = 1 << 8, R = 1 << 11 };
+    s_macro_n = 0; s_macro_i = 0;
+    MacroWait(700); MacroTap(DOWN); MacroWait(10); MacroTap(START); MacroWait(80);
+    MacroTap(B); MacroWait(20); MacroTap(A); MacroWait(20); MacroTap(R); MacroWait(20);
+    MacroTap(R); MacroWait(20); MacroTap(Y); MacroWait(60);
+    MacroTap(DOWN); MacroWait(20);
+    for (int i = 0; i < level; i++) { MacroTap(A); MacroWait(20); }
+    MacroWait(20); MacroTap(START); MacroWait(60); MacroTap(UP); MacroWait(20); MacroTap(START);
+}
+
+static void PrBootPath(char *out, size_t n) { SidePath("tlk_practice_boot.state", out, n); }
+static int LoadStateLive(const char *path);
+static void CloseMenu(void);
+
+static void PrStartLevel(int level) {
+    char path[1100], msg[64];
+    PrBootPath(path, sizeof path);
+    if (!LoadStateLive(path)) { Toast("Level select: no power-on state"); return; }
+    BuildLevelMacro(level);
+    s_sel_level = level;
+    PrSync();
+    pr.st = PR_IDLE; pr.fresh = 0; pr.loading = 0; pr.frames = 0; pr.lag = 0;
+    pr.run_on = 0; pr.run_frames = 0;
+    snprintf(msg, sizeof msg, "Loading %s", kSelectNames[level]);
+    Toast(msg);
+    CloseMenu();
+}
+
+/* Lag counting needs the pad-read hook (the same one --input-polled uses);
+ * it only counts unless a polled tape is playing. Armed once, after SnesInit. */
+static int s_snes_ready;
+static void PrEnable(void) {
+    if (!s_snes_ready) return;
+    if (!pr.hook) {
+        interp_bridge_add_pre_opcode_hook(0xC0A07C, PollHook);
+        interp_bridge_add_pre_opcode_hook(0x00A07C, PollHook);
+        g_tlk_aot_pad_read_hook = PollHookCompiled;
+        pr.hook = 1;
+    }
+    PrLoadTimes();
+    PrSync();
+    pr.st = PR_IDLE;
 }
 
 /* ── Presenting ─────────────────────────────────────────────────────────── */
@@ -534,6 +872,7 @@ static int TurboHeld(void);
 /* Shows s_pixels plus the overlay (menu when open, toast, turbo tag). */
 static void Present(void) {
     memcpy(s_screen, s_pixels, sizeof s_screen);
+    if (s_practice) DrawPractice();
     if (s_menu_open) DrawMenu();
     DrawToast();
     if (TurboHeld() && !s_menu_open) {
@@ -726,11 +1065,31 @@ static void MenuAction(int act) {
             if (s_volume < 0) s_volume = 0;
             if (s_volume > 100) s_volume = enter ? 0 : 100;
             break;
+        case M_PRACTICE:
+            s_practice = !s_practice;
+            if (s_practice) PrEnable();
+            break;
+        case M_LEVEL:
+            if (!s_practice) break;
+            if (dir) s_sel_level = (s_sel_level + 14 + dir) % 14;
+            else if (enter) PrStartLevel(s_sel_level);
+            break;
         case M_KEYS: if (enter) { s_menu_keys = 1; s_key_sel = 0; } break;
         case M_SAVE: if (enter) Toast(SaveConfig() ? "Settings saved" : "Cannot write ini"); break;
         case M_QUIT: if (enter) running = 0; break;
         }
     }
+}
+
+/* Load a savestate during play (F5-F8, F9). */
+static int LoadStateLive(const char *path) {
+    uint32_t hf = 0;
+    if (!tlk_state_load(path, &hf)) return 0;
+    if (input_path && !s_polled) frame = (long)hf;
+    RecStop("a savestate was loaded (the recording replays only up to here)");
+    audio_acc = 0;
+    if (astream) SDL_ClearAudioStream(astream);
+    return 1;
 }
 
 static void HandleKey(const SDL_KeyboardEvent *ke) {
@@ -760,6 +1119,13 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
             SDL_SetWindowFullscreen(win, s_fullscreen);
             return;
         }
+        if (k == SDLK_F9 && s_practice) {
+            char path[1100];
+            PrRestartPath(path, sizeof path);
+            if (LoadStateLive(path)) { PrAfterLoad(1); Toast("Restart level"); }
+            else Toast("No level start yet");
+            return;
+        }
         int fn = k >= SDLK_F1 && k <= SDLK_F8 ? (int)(k - SDLK_F1) : -1;
         if (fn >= 0) {
             int load = fn >= 4 || (ke->mod & SDL_KMOD_SHIFT);
@@ -767,12 +1133,8 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
             char path[1100], msg[64];
             SlotPath(slot, path, sizeof path);
             if (load) {
-                uint32_t hf = 0;
-                if (tlk_state_load(path, &hf)) {
-                    if (input_path && !s_polled) frame = (long)hf;
-                    RecStop("a savestate was loaded (the recording replays only up to here)");
-                    audio_acc = 0;
-                    if (astream) SDL_ClearAudioStream(astream);
+                if (LoadStateLive(path)) {
+                    if (s_practice) PrAfterLoad(0);
                     snprintf(msg, sizeof msg, "Loaded slot %d", slot);
                 } else snprintf(msg, sizeof msg, "Slot %d: no state", slot);
             } else
@@ -914,6 +1276,27 @@ static int RemapSelfTest(void) {
     StCheck(s_keys[0] == SDLK_K && s_pad_btn[1] == SDL_GAMEPAD_BUTTON_LEFT_STICK, "ini reload restores K / L3");
     StPadEvent(SDL_GAMEPAD_BUTTON_EAST);
     StCheck(s_menu_open && !s_menu_keys, "pad East leaves the Controls page");
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    StCheck(s_menu_sel == M_LEVEL && s_sel_level == 0, "Level row does nothing with practice off");
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    StCheck(s_menu_sel == M_PRACTICE, "pad d-pad up reaches Practice mode");
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    StCheck(s_practice, "Right turns practice mode on");
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    StCheck(s_sel_level == 13, "Left on Level wraps to the last level");
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    StCheck(SaveConfig(), "SaveConfig writes practice mode");
+    s_practice = 0;
+    LoadConfig(s_cfg_path);
+    StCheck(s_practice, "ini reload keeps practice mode on");
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    StCheck(!s_practice, "Left turns it off again");
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    StPadEvent(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    StCheck(s_menu_sel == M_KEYS, "pad d-pad down returns to Controls...");
     StPadEvent(SDL_GAMEPAD_BUTTON_START);
     StCheck(!s_menu_open, "pad Start closes the menu");
     StKey(SDLK_K, 1);
@@ -1029,6 +1412,7 @@ static void Usage(void) {
         "               [--no-audio] [--wav path [--wav-seconds S]]\n"
         "               [--save-at N state] [--load state] [--load-at N state]\n"
         "               [--menu-at N [--menu-page controls]] [--selftest-remap]\n"
+        "               [--speedrun off|practice [--practice-level N]] [--dump-window path]\n"
         "               [--list-drivers]\n"
         "Without --rom (or rom= in the ini) the .sfc/.smc files next to the binary and in the\n"
         "current directory are tried. Needs The Lion King (USA), CRC32 C8FBFAA8.\n");
@@ -1132,6 +1516,12 @@ static uint8_t *PickRom(size_t *size, char *found, size_t found_n) {
     }
 }
 
+/* What is shown (game + overlays), before any shader. */
+static void DumpWindow(const char *path) {
+    if (WritePng(path, (const uint8_t *)s_screen, kWidth, kHeight, kWidth * 4)) printf("dump_window=%s\n", path);
+    else fprintf(stderr, "dump-window: cannot write %s\n", path);
+}
+
 static void PrintHash(const uint8_t *data, size_t n) {
     uint8_t h[32];
     sha256_compute(data, n, h);
@@ -1144,6 +1534,8 @@ int main(int argc, char **argv) {
     const char *cfg_path = getenv("TLK_SDL_INI") ? getenv("TLK_SDL_INI") : "tlk_sdl.ini";
     const char *save_path = NULL, *load_path = NULL, *load_at_path = NULL;
     long frames = 0, save_at = -1, load_at = -1, menu_at = -1;
+    int practice_level = -1, menu_shown = 0;
+    const char *dump_window = NULL;
     int cli_scale = 0, cli_fs = 0, no_audio = 0, no_record = 0;
     const char *record_path = NULL;
     double wav_seconds = 10.0;
@@ -1192,6 +1584,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--menu-at") && v) { menu_at = atol(v); i++; }
         else if (!strcmp(a, "--menu-page") && v) { menu_page = !strcmp(v, "controls") || !strcmp(v, "keys"); i++; }
         else if (!strcmp(a, "--selftest-remap")) selftest = 1;
+        else if (!strcmp(a, "--speedrun") && v) { s_practice = !strcmp(v, "practice"); i++; }
+        else if (!strcmp(a, "--practice-level") && v) { practice_level = atoi(v); i++; }
+        else if (!strcmp(a, "--dump-window") && v) { dump_window = v; i++; }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { Usage(); return 0; }
         else { Usage(); return 2; }
     }
@@ -1270,7 +1665,9 @@ int main(int argc, char **argv) {
         interp_bridge_add_pre_opcode_hook(0xC0A07C, PollHook);
         interp_bridge_add_pre_opcode_hook(0x00A07C, PollHook);
         g_tlk_aot_pad_read_hook = PollHookCompiled; /* task CC: compiled $C0A05D / $C0A073 */
+        pr.hook = 1;
     }
+    s_snes_ready = 1;
 
     frame = 0;
     if (load_path) {
@@ -1279,6 +1676,12 @@ int main(int argc, char **argv) {
         frame = (long)hf;
         printf("loaded_state=%s at_frame=%ld\n", load_path, frame);
     }
+    if (!load_path && (interactive || practice_level >= 0)) {   /* power-on state for level select */
+        char boot[1100];
+        PrBootPath(boot, sizeof boot);
+        tlk_state_save(boot, 0);
+    }
+    if (s_practice) PrEnable();
     /* --frames runs are scripted proof runs: they must not clobber a player's recording. */
     if (record_path || (!input_path && !load_path && !no_record && frames == 0)) {
         char rec[1100];
@@ -1307,11 +1710,14 @@ int main(int argc, char **argv) {
 
         if (s_menu_open) {   /* paused: keep presenting the last frame plus the overlay */
             Present();
+            if (dump_window && menu_shown) { DumpWindow(dump_window); running = 0; }   /* --menu-at screenshots */
             SDL_Delay(16);
             deadline = SDL_GetTicksNS();
             continue;
         }
-        uint32_t pad = input_path ? (s_polled ? TapePolled() : TapeFrame(frame))
+        int macro = s_macro_i < s_macro_n;   /* level select: fast-forward its input */
+        uint32_t pad = macro ? s_macro[s_macro_i++]
+                     : input_path ? (s_polled ? TapePolled() : TapeFrame(frame))
                                   : (uint32_t)(s_kbd_pad | GamepadState());
         if (s_rec) {
             uint8_t b[2] = { (uint8_t)pad, (uint8_t)(pad >> 8) };
@@ -1322,6 +1728,8 @@ int main(int argc, char **argv) {
         PpuBeginDrawing(g_ppu, s_pixels, kWidth * kBpp, kPpuRenderFlags_NewRenderer);
         kTlkGameInfo.draw_ppu_frame();
         frame++;
+        if (s_practice) PracticeFrame((uint16_t)pad);
+        s_polls_frame = 0;
         if (g_fail) { fprintf(stderr, "runtime failure (g_fail) at frame %ld\n", frame); break; }
         if (save_path && frame == save_at) {
             if (!tlk_state_save(save_path, (uint32_t)frame)) { fprintf(stderr, "cannot save state %s\n", save_path); return 8; }
@@ -1332,11 +1740,14 @@ int main(int argc, char **argv) {
             if (!tlk_state_load(load_at_path, &hf)) { fprintf(stderr, "cannot load state %s\n", load_at_path); return 8; }
             printf("loaded_state=%s at_frame=%ld -> %u\n", load_at_path, frame, hf);
             frame = (long)hf;
+            if (s_practice) PrAfterLoad(0);
             load_at_path = NULL;   /* once */
             Toast("Loaded state");
         }
+        if (practice_level >= 0 && s_practice) { PrStartLevel(practice_level % 14); practice_level = -1; }
         if (menu_at >= 0 && frame == menu_at) {
             OpenMenu();
+            menu_shown = 1;
             if (menu_page) { s_menu_sel = M_KEYS; s_menu_keys = 1; s_key_sel = 0; }
             menu_at = -1;
         }
@@ -1360,7 +1771,7 @@ int main(int argc, char **argv) {
 
         /* Turbo: only every s_turbo_speed-th frame is shown and paced, and the
          * sound is muted (still rendered, so the resampler keeps up). */
-        int turbo = TurboHeld() ? s_turbo_speed : 1;
+        int turbo = macro ? 30 : TurboHeld() ? s_turbo_speed : 1;   /* level select: fast-forward */
         int shown = frame % turbo == 0;
 
         /* Audio: one field's worth, trimmed to hold the device queue. */
@@ -1393,11 +1804,13 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (shown) Present();
+        if (shown || (dump_window && frames > 0 && frame >= frames)) Present();
+        if (dump_window && frames > 0 && frame >= frames) DumpWindow(dump_window);
 
         if (frames > 0 && frame >= frames) break;
 
-        if (pace && !s_vsync && shown) {
+        if (macro) deadline = SDL_GetTicksNS();
+        else if (pace && !s_vsync && shown) {
             deadline += period_ns;
             uint64_t now = SDL_GetTicksNS();
             if (now < deadline) SDL_DelayPrecise(deadline - now);

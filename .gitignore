@@ -39,4 +39,5 @@ Thumbs.db
 /last_session.rec
 /tlk_sdl.ini
 /tlk_slot*.state
+/tlk_practice_*
 .pytest_cache/
