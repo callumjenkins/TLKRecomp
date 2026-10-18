@@ -25,6 +25,8 @@ heading.
 - **No game data in git.** No ROMs, extracted assets, generated C (`generated/`) or BizHawk movies. The `.gitignore` covers ROMs, `build*/`, `generated/`. The four `tapes/*.read.tape` files are
   the only input data committed: CC BY 2.0, converted from TASVideos movies (`LICENSE`, README
   "Watching a speedrun"). Any new tape needs the same credit line and license check before it is committed.
+- **Never edit the `recomp-ui/` submodule** (MIT): it is `tlk_sdl`'s settings menu. TLK supplies the rows and
+  callbacks (`runner/sdl_main.c`) and the Dear ImGui glue (`runner/tlk_menu_imgui.cpp`).
 - **Never edit the `snesrecomp/` submodule.** Codegen changes go in `patches/snesrecomp/NNNN-*.patch` (applied to a
   copy in `build/snesrecomp-codegen`); runtime changes go in `cmake/runtime-patches/*.hunks` (a missing anchor
   fails the build, on purpose).
@@ -37,7 +39,7 @@ heading.
 ## Build
 
 ```sh
-git submodule update --init          # a fresh clone or worktree has an empty snesrecomp/
+git submodule update --init          # a fresh clone or worktree has empty snesrecomp/ and recomp-ui/
 ./build.sh                           # generates generated/ only if empty, then builds build/tlk_headless, build/tlk_sdl
 ```
 

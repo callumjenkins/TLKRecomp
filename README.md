@@ -56,15 +56,19 @@ F11 or Alt+Enter toggles fullscreen.
 |---|---|
 | F1-F4 | save state to slot 1-4 |
 | F5-F8 (or Shift+F1-F4) | load slot 1-4 |
-| ` (hold) | turbo: the game runs `turbo_speed` times faster (4 by default), sound muted; works on a tape too. Pad: right stick click. Rebind on the Controls page |
+| ` (hold) | turbo: the game runs `turbo_speed` times faster (4 by default), sound muted; works on a tape too. Pad: right stick click. Rebind in the menu's Controls |
 | F9 | practice mode: restart the current level |
-| Tab or Esc | settings menu (game pauses); in the menu Esc quits, Tab resumes |
+| Tab or Esc | settings menu (game pauses); in the menu Esc goes back and closes, Tab resumes |
 
 Save states are `tlk_slot1.state` .. `tlk_slot4.state` in the same folder as the ini. They only load in the build that
-wrote them. The settings menu (arrows + Enter, Left/Right change a value) has window scale, fullscreen, vsync, the
-video options below, audio on/off, volume, practice mode (below) and controls ("Controls...": pick a SNES button, press Enter or pad A, then press the new key *or*
-gamepad button; Esc or Guide cancels; "Reset defaults" restores the table above). "Save settings" writes `tlk_sdl.ini`
-(it rewrites the file, so comments are dropped). An SDL gamepad works out of the box and can be plugged in while the
+wrote them. The settings menu is [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui)'s in-game menu (the
+same one other recomps use), drawn with Dear ImGui over the game. Up/Down pick a section (Display, Graphics, Audio,
+Practice, Controls, System), Enter opens it, Left/Right change a value, Esc goes back. It has window scale,
+fullscreen, vsync, the video options below, how much the menu dims the game, audio on/off, volume, practice mode
+(below) and Controls (pick a SNES button, press Enter or pad A, then press the new key *or* gamepad button; Esc or
+Guide cancels; "Reset defaults" restores the table above). System has Resume and Quit (press twice). Every change
+applies at once and is saved to `tlk_sdl.ini` (the file is rewritten, so comments are dropped). Without OpenGL 3.3
+the menu is drawn small inside the game picture. An SDL gamepad works out of the box and can be plugged in while the
 game runs (buttons by position: bottom = B, right = A, left = Y, top = X; shoulders and triggers = L/R; left stick or
 d-pad moves). Guide, or Back+Start, opens the menu from the pad; in it the d-pad moves, A selects, B goes back, Start
 closes.
@@ -75,9 +79,9 @@ the ROM, checks it, and saves the path as `rom =` in `tlk_sdl.ini` so it is not 
 
 Video goes through snesrecomp's OpenGL 3.3 presenter. The menu's Shader row cycles the bundled presets (CRT,
 LCD grid, Sharpen, Composite; CC0, from snesrecomp's `runner/assets/shaders`), which the build copies to
-`build/assets/shaders` and the release packages ship next to the binary. Aspect, Smooth and Int. scale work with or
+`build/assets/shaders` and the release packages ship next to the binary. Aspect, Smooth and Integer scaling work with or
 without a shader. Without OpenGL 3.3 (or with `opengl = 0`) the game runs on the plain SDL renderer and the Shader row
-says "no OpenGL". None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU frame.
+is greyed out. None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU frame.
 
 Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_INI`):
 
@@ -130,7 +134,7 @@ practice hack. It only reads the game's memory, so the game plays exactly the sa
   difference to your best.
 - **F9** restarts the level: it loads a save state taken automatically when the level finished loading
   (`tlk_practice_restart.state`).
-- **Level** row in the menu: pick a level with Left/Right, Enter starts it. It goes back to power-on and plays the
+- **Level** and **Start level** in the menu's Practice section: pick a level with Left/Right, then Start level. It goes back to power-on and plays the
   game's debug-menu code (Options, B A R R Y) in about two seconds, so difficulty and options are the defaults.
 
 ## Watching a speedrun

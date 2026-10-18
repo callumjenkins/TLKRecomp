@@ -51,7 +51,8 @@ Keys (defaults)
   ` (hold)        turbo: game runs 4x faster, sound muted
                   (pad: right stick click; rebind it on the Controls
                   page, speed is turbo_speed in tlk_sdl.ini)
-  Tab or Esc      settings menu (the game pauses); in the menu Esc quits
+  Tab or Esc      settings menu (the game pauses); in the menu Esc goes
+                  back, System > Quit (pressed twice) quits
 
 Gamepad: any controller SDL knows. Buttons by position: bottom = B,
 right = A, left = Y, top = X, shoulders/triggers = L/R, d-pad or left
@@ -59,14 +60,18 @@ stick to move, Start/Back = Start/Select. Guide (or Back+Start) opens the
 menu; d-pad moves, A selects, B goes back, Start closes. Pads can be
 plugged in while playing.
 
-Settings menu: window scale, fullscreen, vsync, shader, aspect,
-smoothing, integer scaling, audio, volume and "Controls...". Shaders
+Settings menu: Up/Down pick a section, Enter opens it, Left/Right
+change a value, Esc goes back. Display, Graphics (shader, smoothing,
+integer scaling), Audio, Practice, Controls and System (Resume, Quit).
+Every change is applied and saved at once. Shaders
 (CRT, LCD grid, Sharpen, Composite) are the files in assets/shaders and
 need OpenGL 3.3; keep that folder next to the program. Aspect 8:7 shows
-square pixels, 4:3 the shape a TV showed. On the Controls page pick a SNES button and press Enter
-(or pad A), then press the new key or the new gamepad button. Esc / Guide
-cancels. "Reset defaults" restores the table above. "Save settings"
-writes tlk_sdl.ini in the current directory (or $TLK_SDL_INI).
+square pixels, 4:3 the shape a TV showed. In Controls pick a SNES
+button and press Enter (or pad A), then press the new key or the new
+gamepad button. Esc / Guide cancels. "Reset defaults" restores the
+table above. Settings go to tlk_sdl.ini in the current directory (or
+$TLK_SDL_INI). The menu's font is in assets/fonts; keep that folder
+next to the program too.
 
 Save states are tlk_slot1.state .. tlk_slot4.state next to the ini. They
 only load in the same build that wrote them.
