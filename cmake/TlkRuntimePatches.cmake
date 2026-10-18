@@ -10,7 +10,8 @@
 #   TLK_RUNTIME_PATCHED_SOURCES the copies (absolute paths)
 #   TLK_RUNTIME_ORIGINAL_SOURCES the pinned sources they replace
 # and provides tlk_use_patched_runtime_sources(<list-var>) to swap the
-# originals for the copies in a runtime source list.
+# originals for the copies in a runtime source list, and
+# tlk_use_patched_target_sources(<target>) for desktop presenter sources.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(TLK_RUNTIME_PATCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/runtime-patches" CACHE PATH "Directory of runtime adaptation hunks")
@@ -51,16 +52,45 @@ endforeach()
 list(LENGTH TLK_RUNTIME_PATCHED_SOURCES tlk_runtime_patched_count)
 message(STATUS "TLK: ${tlk_runtime_patched_count} runtime sources adapted in ${TLK_RUNTIME_PATCHED_DIR}")
 
+# Desktop presenter sources (runner/src/desktop/) are not in the runner source
+# list: snesrecomp_target_opengl and friends add them to one target. They are
+# swapped on that target by tlk_use_patched_target_sources instead.
+set(TLK_RUNTIME_DESKTOP_DIR "${SNESRECOMP_ROOT}/runner/src/desktop/")
+
 function(tlk_use_patched_runtime_sources list_name)
     set(sources ${${list_name}})
-    foreach(original IN LISTS TLK_RUNTIME_ORIGINAL_SOURCES)
+    foreach(original patched IN ZIP_LISTS TLK_RUNTIME_ORIGINAL_SOURCES TLK_RUNTIME_PATCHED_SOURCES)
+        string(FIND "${original}" "${TLK_RUNTIME_DESKTOP_DIR}" desktop)
+        if(desktop EQUAL 0)
+            continue()
+        endif()
         list(FIND sources "${original}" index)
         if(index EQUAL -1)
             message(FATAL_ERROR
                 "TLK runtime adaptation targets ${original}, which is not in ${list_name}")
         endif()
         list(REMOVE_ITEM sources "${original}")
+        list(APPEND sources "${patched}")
     endforeach()
-    list(APPEND sources ${TLK_RUNTIME_PATCHED_SOURCES})
     set(${list_name} ${sources} PARENT_SCOPE)
+endfunction()
+
+# Swap the patched desktop sources into <target>, after the snesrecomp_target_*
+# call that added the originals. Every desktop adaptation must apply here.
+function(tlk_use_patched_target_sources target)
+    get_target_property(sources ${target} SOURCES)
+    foreach(original patched IN ZIP_LISTS TLK_RUNTIME_ORIGINAL_SOURCES TLK_RUNTIME_PATCHED_SOURCES)
+        string(FIND "${original}" "${TLK_RUNTIME_DESKTOP_DIR}" desktop)
+        if(NOT desktop EQUAL 0)
+            continue()
+        endif()
+        list(FIND sources "${original}" index)
+        if(index EQUAL -1)
+            message(FATAL_ERROR
+                "TLK runtime adaptation targets ${original}, which is not a source of ${target}")
+        endif()
+        list(REMOVE_ITEM sources "${original}")
+        list(APPEND sources "${patched}")
+    endforeach()
+    set_target_properties(${target} PROPERTIES SOURCES "${sources}")
 endfunction()

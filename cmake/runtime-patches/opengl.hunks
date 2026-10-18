@@ -1,0 +1,26 @@
+# Task VIDEO: GlslShader_Render points its vertex attributes at its own buffer
+# on whatever VAO is bound, then disables them. That VAO is g_VAO, whose
+# attributes 0/1 the default program needs, so after any shader preset the
+# "no shader" path drew nothing (black window). Give the shader path its own
+# VAO and rebind g_VAO after it.
+file: runner/src/desktop/opengl.c
+
+@@ shader-vao-decl
+<<<<
+static unsigned int g_program, g_flash_program, g_VAO;
+====
+static unsigned int g_program, g_flash_program, g_VAO, g_shader_VAO;
+>>>>
+
+@@ shader-vao-bind
+<<<<
+    GlslShader_Render(g_glsl_shader, &g_texture, viewport.x, viewport.y,
+                      viewport.width, viewport.height);
+====
+    if (!g_shader_VAO)
+      glGenVertexArrays(1, &g_shader_VAO);
+    glBindVertexArray(g_shader_VAO);
+    GlslShader_Render(g_glsl_shader, &g_texture, viewport.x, viewport.y,
+                      viewport.width, viewport.height);
+    glBindVertexArray(g_VAO);
+>>>>

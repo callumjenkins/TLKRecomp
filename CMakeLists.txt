@@ -125,6 +125,7 @@ if(TLK_BUILD_HOSTS)
     # OpenGL presenter + GLSL presets (CC0), staged to build/assets/shaders.
     snesrecomp_target_opengl(tlk_sdl)
     snesrecomp_target_shader_presets(tlk_sdl)
+    tlk_use_patched_target_sources(tlk_sdl)
 endif()
 
 # ── Install / packaging ───────────────────────────────────────────────────
