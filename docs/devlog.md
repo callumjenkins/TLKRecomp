@@ -1964,3 +1964,26 @@ Not verified: real GPU
 drivers and a real Windows machine, fullscreen. `lcd-grid-pass.glsl` (snesrecomp) mostly darkens the picture: its
 `edge` term uses `smoothstep(0.84, 0.96, cell)` where `1 - smoothstep` looks intended, so the grid barely shows.
 Not patched here (submodule). A full build of both hosts takes ~7 min; each package ~8 min.
+
+## Task TURBO: hold-to-turbo key in tlk_sdl
+
+Owner asked for a turbo key. Hold `` ` `` (bsnes's default; `turbo =` in the ini, any SDL key name) to run
+`turbo_speed` (default 4, 2-16) times faster. Emulation still steps one frame at a time with the same pad word, so
+recordings, tapes and hashes are unchanged; while held only every Nth frame is presented and paced, and the sound is
+muted (still rendered, so the resampler stays fed; underruns not counted). A ">>4x" tag shows top right. Released
+on focus loss and when the menu opens. Turbo is binding 13 on the Controls page (`kTurbo`, after the 12 SNES
+buttons; not a pad bit): rebind to a key or a pad button, default `` ` `` / right stick click (R3), saved as
+`turbo =` / `pad_turbo =`. Rows moved up 8 px so the page still fits above its footer.
+
+Evidence (2026-10-17, Xvfb + llvmpipe, SDL dummy audio, `--frames 1500 --hash-at 1500`, key held via XTest from 3 s):
+
+```
+no turbo          wall 24.9 s  frame d55aba8a... wram 8b65177d...
+turbo 4x          wall  8.3 s  same hashes        (expected ~8.5 s)
+turbo 8x (ini)    wall  5.6 s  same hashes        (expected ~5.8 s; turbo = ` read back from the ini)
+SDL_VIDEO_DRIVER=dummy tlk_sdl --selftest-remap   remap_selftest: PASS (0 failed), 11 new turbo checks: ` and
+  rebound T hold turbo without a pad bit, Controls row rebind, save/reset/reload, virtual pad R3 holds turbo
+Controls page on Xvfb (--menu-at 300 --menu-page controls): turbo row fits, looked at
+```
+
+Not verified: a real audio device (dummy driver only), a real gamepad (virtual pad only), how fast a slower CPU gets.

@@ -56,6 +56,7 @@ F11 or Alt+Enter toggles fullscreen.
 |---|---|
 | F1-F4 | save state to slot 1-4 |
 | F5-F8 (or Shift+F1-F4) | load slot 1-4 |
+| ` (hold) | turbo: the game runs `turbo_speed` times faster (4 by default), sound muted; works on a tape too. Pad: right stick click. Rebind on the Controls page |
 | Tab or Esc | settings menu (game pauses); in the menu Esc quits, Tab resumes |
 
 Save states are `tlk_slot1.state` .. `tlk_slot4.state` in the same folder as the ini. They only load in the build that
@@ -91,7 +92,9 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     smooth = 0         ; 1 = bilinear scaling (with no shader)
     integer_scale = 0  ; 1 = whole-number scaling only (black borders, even pixels)
     opengl = 1         ; 0 = plain SDL renderer, no shaders
+    turbo_speed = 4    ; 2-16, how much faster the game runs while turbo is held
     ; keys use SDL key names
+    turbo = `
     b = Z
     a = X
     start = Return
@@ -100,6 +103,7 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     pad_b = a
     pad_y = x
     pad_start = start
+    pad_turbo = rightstick
 
 Packaging: `scripts/package.sh` builds `dist/TLKRecomp-linux-x86_64.tar.gz` (binary + README + license notes, no ROM
 and no game data). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` the same way from the MinGW

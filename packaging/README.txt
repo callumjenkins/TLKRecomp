@@ -48,6 +48,9 @@ Keys (defaults)
   F11, Alt+Enter  fullscreen
   F1-F4           save state, slot 1-4
   F5-F8           load state, slot 1-4 (also Shift+F1-F4)
+  ` (hold)        turbo: game runs 4x faster, sound muted
+                  (pad: right stick click; rebind it on the Controls
+                  page, speed is turbo_speed in tlk_sdl.ini)
   Tab or Esc      settings menu (the game pauses); in the menu Esc quits
 
 Gamepad: any controller SDL knows. Buttons by position: bottom = B,
