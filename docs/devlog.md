@@ -1987,3 +1987,38 @@ Controls page on Xvfb (--menu-at 300 --menu-page controls): turbo row fits, look
 ```
 
 Not verified: a real audio device (dummy driver only), a real gamepad (virtual pad only), how fast a slower CPU gets.
+
+## Task PRACTICE: speedrun practice mode in tlk_sdl
+
+Written on 2026-10-14 in the `speedrun-practice` worktree and left staged, never committed; the owner missed it on
+2026-10-17. Rebased onto main (video + turbo). "Practice" in the settings menu or `speedrun = practice`: level timer
+(SBDWolf practice hack rules: starts after the fade-in, skips fades and pause, stops on level end or a death), 6987M
+TAS level time as a target, run timer, lag counter, checkpoint splits, input display, best times in
+`tlk_practice_times.txt`, F9 restarts the level from an automatic state, and a Level row that replays the debug-menu
+level select from a power-on state. Reads WRAM only. Port to main: the overlay is now drawn in software into
+`s_screen` (task VIDEO), so the half-size SDL-renderer font is gone; the bar is two rows of the 8x8 font between the
+health and roar meters, hidden while the menu is open. The settings rows moved to 10 px spacing to fit 15 rows. The
+level-select macro fast-forwards through the turbo path (every 30th frame shown, muted). `--dump-window` now writes
+`s_screen`.
+
+Evidence (2026-10-17, worktree `TLKRecomp-sr`, generated/ from main, SDL dummy video):
+
+```
+compare_modes.sh 600 3000 / -t 6987M.tape 1200 6000    MATCH x4, WRAM same (57ccb8d5, 89a48d6c, dd861e16, 946033bd)
+check_all_tapes.sh -s                                  71 MATCH, 0 MISMATCH
+check_idle_lle.sh                                      IDLE MATCH frames=12000 every=5
+check_native_decomp.sh 3000                            IDENTICAL
+save f3000 / load / f6000                              946033bd10683657
+TAS sync 6987M / 6781M / 4735M                         36,904 / 37,093 / 38,870
+check_allbugs.sh                                       ALLBUGS PASS
+check_exit_mx.py                                       0 WRONG
+pytest tools/tests                                     27 passed
+tlk_sdl --selftest-remap                               PASS (0 failed), incl. 9 practice checks
+tlk_sdl 6987M.tape f6000, practice off vs on           both 946033bd... / wram 87fa6746... (practice changes nothing)
+tlk_sdl 6987M.read.tape polled, practice               Pridelands 0:23.13 (= built-in TAS table), CP +0:00.00
+tlk_sdl --practice-level 3 --frames 2600               frame 61f6953b... = l03_idle.tape at f2600 (headless)
+--dump-window: bar, input display, menu                looked at
+```
+
+Full build of `snesrecomp_game tlk_headless tlk_sdl` from clean: 22.6 min. Not verified: a real window, real key
+presses (F9 restart was not exercised), a real gamepad, best times across sessions.
