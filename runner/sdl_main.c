@@ -86,6 +86,7 @@
 #include "verified_rom.h"
 #include "tlk_font8x8.h"
 #include "tlk_savestate.h"
+#include "tlk_wide.h"
 
 #include "common_cpu_infra.h"
 #include "common_rtl.h"
@@ -290,6 +291,21 @@ enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
 static int s_hd_mode7;
 static uint32_t *s_hd;
 static const char *const kHdMode7Choices[] = { "off", "2x", "3x", "4x" };
+/* Widescreen (tlk_wide.c): 0 off, 1 16:9, 2 21:9, 3 the window's shape. Levels
+ * are drawn wider by a host compositor; other screens stay 4:3 with black
+ * sides. s_wide_hud puts the HUD at the picture's edges. Hashes and
+ * --dump-png stay native. */
+static int s_wide, s_wide_hud = 1;
+/* Widescreen enemies: 1 widens the game's spawn window by the margin, so
+ * enemies are created out of view (tlk_wide.c TlkWideSetSpawnLead). This
+ * changes the game: recordings and tapes made without it do not replay. */
+static int s_wide_spawn, s_wide_extra;
+static const char *const kWideSpawnChoices[] = { "as the game", "out of view" };
+static const char *const kWideChoices[] = { "off", "16:9", "21:9", "fit window" };
+static const char *const kWideIni[] = { "off", "16:9", "21:9", "adaptive" };
+static const char *const kWideHudChoices[] = { "in place", "at the edges" };
+static uint32_t s_wide_px[TLK_WIDE_MAX_WIDTH * TLK_WIDE_HEIGHT];
+static double s_wide_aspect;   /* aspect of the picture being shown, 0 when native */
 static int s_practice;   /* speedrun = practice: level timer, lag, inputs, best times, restart */
 /* How the open menu covers the game, in percent: dimming of the picture
  * behind it, and how solid its panel is (see recomp_runtime_ui_set_backdrop). */
@@ -306,7 +322,9 @@ static char *Trim(char *s) {
 
 /* Plain "key = value" lines; [sections] and ; or # comments are ignored.
  * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, volume, shader,
- * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, hd_mode7 (0 or 2-4), turbo_speed (2-16),
+ * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, hd_mode7 (0 or 2-4),
+ * widescreen (off 16:9 21:9 adaptive), widescreen_hud (edges or in place),
+ * widescreen_enemies (as the game or out of view), turbo_speed (2-16),
  * speedrun (off or practice), menu_dim and menu_opacity (0-100), and one per binding
  * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
@@ -339,6 +357,13 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "integer_scale")) s_integer = atoi(v);
         else if (!strcmp(k, "opengl")) s_opengl = atoi(v);
         else if (!strcmp(k, "hd_mode7")) s_hd_mode7 = atoi(v) >= 2 ? SDL_min(atoi(v), 4) : 0;
+        else if (!strcmp(k, "widescreen")) {
+            s_wide = 0;
+            for (int i = 1; i < 4; i++) if (!strcmp(v, kWideIni[i])) s_wide = i;
+            if (!s_wide && strcmp(v, "off")) fprintf(stderr, "config: unknown widescreen '%s' (off, 16:9, 21:9, adaptive)\n", v);
+        }
+        else if (!strcmp(k, "widescreen_hud")) s_wide_hud = strcmp(v, "in place") != 0;
+        else if (!strcmp(k, "widescreen_enemies")) s_wide_spawn = !strcmp(v, "out of view");
         else if (!strcmp(k, "turbo_speed")) s_turbo_speed = SDL_clamp(atoi(v), 2, 16);
         else if (!strcmp(k, "speedrun")) s_practice = !strcmp(v, "practice");
         else if (!strcmp(k, "menu_dim")) s_menu_dim = SDL_clamp(atoi(v), 0, 100);
@@ -374,6 +399,12 @@ static int SaveConfig(void) {
     fprintf(f, "shader = %s\naspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
             s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
     fprintf(f, "; Mode 7 drawn at 2-4x the native resolution (0 = off)\nhd_mode7 = %d\n", s_hd_mode7);
+    fprintf(f, "; levels drawn wider: off, 16:9, 21:9 or adaptive (the window's shape)\nwidescreen = %s\n"
+               "; HUD in widescreen: edges or in place\nwidescreen_hud = %s\n",
+            kWideIni[s_wide], s_wide_hud ? "edges" : "in place");
+    fprintf(f, "; widescreen enemies: \"as the game\" or \"out of view\" (created beyond the wider picture;\n"
+               "; changes the game, so recordings and tapes made without it do not replay)\nwidescreen_enemies = %s\n",
+            kWideSpawnChoices[s_wide_spawn]);
     fprintf(f, "; hold turbo to run turbo_speed times faster\nturbo_speed = %d\n", s_turbo_speed);
     fprintf(f, "speedrun = %s\n", s_practice ? "practice" : "off");
     fprintf(f, "; settings menu: game dimming and panel opacity, percent\nmenu_dim = %d\nmenu_opacity = %d\n",
@@ -836,6 +867,14 @@ static void ApplyVideoConfig(void) { TlkVideoConfig(s_shader, s_aspect, s_smooth
 /* sw x sh is the presented picture, native or HD; the maths runs on the
  * native size so integer scaling still counts game pixels. */
 static void ComputeViewport(int sw, int sh, int dw, int dh, SnesDisplayViewport *vp) {
+    if (s_wide_aspect > 0 && sh == kHeight && sw > kWidth) {   /* widescreen: its own shape */
+        *vp = SnesDisplayAspect_FitViewport(s_wide_aspect, dw, dh);
+        if (s_integer && vp->height >= kHeight) {   /* whole multiples of the game's lines */
+            int h = vp->height / kHeight * kHeight, w = (int)(h * s_wide_aspect + 0.5);
+            *vp = (SnesDisplayViewport){ (dw - w) / 2, (dh - h) / 2, w, h };
+        }
+        return;
+    }
     if (sw > kWidth) { sh = sh * kWidth / sw; sw = kWidth; }
     SnesDisplayAspect_ComputeViewport(sw, sh, dw, dh, SnesDisplayAspect_Clamp(s_aspect), false,
                                       s_integer != 0, vp);
@@ -843,6 +882,8 @@ static void ComputeViewport(int sw, int sh, int dw, int dh, SnesDisplayViewport 
 
 /* Window size for the scale and aspect: height = 224 * scale. */
 static int WindowWidth(void) {
+    /* Widescreen: the window takes the picture's shape (fit window starts at 16:9). */
+    if (s_wide) return (int)(kHeight * s_scale * (s_wide == 2 ? 21.0 / 9.0 : 16.0 / 9.0) + 0.5);
     return SnesDisplayAspect_ComputeWindowWidth(kWidth, kHeight, kHeight * s_scale, SnesDisplayAspect_Clamp(s_aspect));
 }
 static void SizeWindow(void) {
@@ -915,6 +956,46 @@ static void ComposeHd(uint8_t *dst, int pitch) {
         }
 }
 
+/* Width of the widescreen picture for the current setting and window, 0 when
+ * the native picture is shown. Widescreen wins over HD Mode 7, which this game
+ * never uses. */
+static int WideWidth(void) {
+    s_wide_aspect = 0;
+    s_wide_extra = 0;
+    if (!s_wide || !TlkWideEnabled()) return 0;
+    double aspect = s_wide == 1 ? 16.0 / 9.0 : 21.0 / 9.0;
+    if (s_wide == 3) {
+        int dw = 0, dh = 0;
+        SDL_GetWindowSizeInPixels(win, &dw, &dh);
+        aspect = dw > 0 && dh > 0 ? (double)dw / dh : 16.0 / 9.0;
+    }
+    SnesDisplayFrame f = SnesDisplayAspect_ComputeAdaptiveFrame(kWidth, kHeight, TLK_WIDE_MAX_WIDTH, aspect,
+                                                                SnesDisplayAspect_Clamp(s_aspect));
+    if (f.width <= kWidth) return 0;
+    s_wide_aspect = f.aspect;
+    s_wide_extra = f.extra;
+    return f.width;
+}
+
+/* The widescreen picture into dst (pitch in bytes), with every overlay pixel
+ * (where s_screen differs from s_pixels) over its native centre. */
+static void ComposeWide(uint8_t *dst, int pitch, int w) {
+    const int extra = (w - kWidth) / 2;
+    if (!TlkWideDraw(s_wide_px, w, s_wide_hud != 0)) {   /* nothing captured yet: native, centred */
+        memset(s_wide_px, 0, (size_t)w * kHeight * 4);
+        for (int y = 0; y < kHeight; y++) memcpy(s_wide_px + (size_t)y * w + extra, s_pixels + y * kWidth * 4, kWidth * 4);
+    }
+    for (int y = 0; y < kHeight; y++) {
+        uint32_t *row = (uint32_t *)(dst + (size_t)y * pitch);
+        memcpy(row, s_wide_px + (size_t)y * w, (size_t)w * 4);
+        for (int x = 0; x < kWidth; x++) {
+            uint32_t p, o = s_screen[y * kWidth + x];
+            memcpy(&p, s_pixels + (y * kWidth + x) * 4, 4);
+            if (o != p) row[extra + x] = o;
+        }
+    }
+}
+
 /* Shows s_pixels plus the overlay (menu when open, toast, turbo tag). */
 static void Present(void) {
     memcpy(s_screen, s_pixels, sizeof s_screen);
@@ -929,12 +1010,14 @@ static void Present(void) {
     }
     /* Without ImGui the same menu is drawn into the 256x224 picture. */
     if (s_menu_open && !s_menu_gl) recomp_runtime_ui_render_argb8888(s_ui, s_screen, kWidth, kHeight, kWidth * 4);
-    const int sc = s_hd ? s_hd_mode7 : 1;
+    const int sc = s_hd ? s_hd_mode7 : 1, ww = WideWidth();
+    const int tw = ww ? ww : kWidth * sc, th = ww ? kHeight : kHeight * sc;
     if (s_gl_on) {
         uint8 *px;
         int pitch;
-        s_gl.BeginDraw(kWidth * sc, kHeight * sc, &px, &pitch);
-        if (sc > 1) ComposeHd(px, pitch);
+        s_gl.BeginDraw(tw, th, &px, &pitch);
+        if (ww) ComposeWide(px, pitch, ww);
+        else if (sc > 1) ComposeHd(px, pitch);
         else for (int y = 0; y < kHeight; y++) memcpy(px + (size_t)y * pitch, s_screen + y * kWidth, kWidth * 4);
         s_gl.EndDraw();
         return;
@@ -942,28 +1025,36 @@ static void Present(void) {
     int dw = 0, dh = 0;
     SDL_GetCurrentRenderOutputSize(ren, &dw, &dh);
     SnesDisplayViewport vp;
-    ComputeViewport(kWidth, kHeight, dw, dh, &vp);
+    ComputeViewport(ww ? tw : kWidth, ww ? th : kHeight, dw, dh, &vp);
     SDL_FRect dst = { (float)vp.x, (float)vp.y, (float)vp.width, (float)vp.height };
-    if (tex && tex->w != kWidth * sc) {   /* HD Mode 7 changed: a texture of the new size */
+    if (tex && (tex->w != tw || tex->h != th)) {   /* HD Mode 7 or widescreen changed: a texture of the new size */
         SDL_DestroyTexture(tex);
         tex = NULL;
     }
     if (!tex) {
-        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth * sc, kHeight * sc);
+        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, tw, th);
         if (!tex) return;
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
     }
     SDL_SetTextureScaleMode(tex, s_smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
-    if (sc > 1) {
+    if (ww || sc > 1) {
         void *px;
         int pitch;
         if (!SDL_LockTexture(tex, NULL, &px, &pitch)) return;
-        ComposeHd((uint8_t *)px, pitch);
+        if (ww) ComposeWide((uint8_t *)px, pitch, ww);
+        else ComposeHd((uint8_t *)px, pitch);
         SDL_UnlockTexture(tex);
     } else SDL_UpdateTexture(tex, NULL, s_screen, kWidth * kBpp);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
     SDL_RenderTexture(ren, tex, NULL, &dst);
+    if (s_dump_req) {   /* --dump-window: the rendered window, as with OpenGL */
+        SDL_Surface *shot = SDL_RenderReadPixels(ren, NULL), *xrgb = NULL;
+        if (shot) xrgb = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_XRGB8888);
+        s_dump_ok = xrgb && WritePng(s_dump_req, (const uint8_t *)xrgb->pixels, xrgb->w, xrgb->h, xrgb->pitch);
+        SDL_DestroySurface(xrgb);
+        SDL_DestroySurface(shot);
+    }
     SDL_RenderPresent(ren);
 }
 
@@ -1070,7 +1161,7 @@ static int TurboHeld(void) {
  * applied at once and saved to the ini (the menu calls MenuSave after it). */
 enum {
     R_SCALE, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
-    R_SHADER, R_HD_MODE7, R_SMOOTH, R_INTEGER,
+    R_SHADER, R_HD_MODE7, R_WIDE, R_WIDE_HUD, R_WIDE_SPAWN, R_SMOOTH, R_INTEGER,
     R_AUDIO, R_VOLUME,
     R_LEVEL, R_INVUL, R_START, R_PRACTICE,
     R_BIND0, R_RESET = R_BIND0 + kBindings,
@@ -1115,6 +1206,13 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_HD_MODE7] = MENU_ROW("tlk.hd_mode7", "Graphics", "HD Mode 7",
                             "Mode 7 scenes drawn at a finer resolution.", CHOICE, 0, 3, 1,
                             kHdMode7Choices, 4),
+    [R_WIDE] = MENU_ROW("tlk.widescreen", "Graphics", "Widescreen",
+                        "Levels drawn wider. Other screens stay 4:3.", CHOICE, 0, 3, 1, kWideChoices, 4),
+    [R_WIDE_HUD] = MENU_ROW("tlk.widescreen_hud", "Graphics", "Widescreen HUD",
+                            "Health, roar and lives in widescreen.", CHOICE, 0, 1, 1, kWideHudChoices, 2),
+    [R_WIDE_SPAWN] = MENU_ROW("tlk.widescreen_enemies", "Graphics", "Widescreen enemies",
+                              "Out of view: created beyond the wider picture. Changes the game.",
+                              CHOICE, 0, 1, 1, kWideSpawnChoices, 2),
     [R_SMOOTH] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER, "Graphics", "Smooth",
                           "Bilinear filtering.", BOOL, 0, 1, 1, NULL, 0),
     [R_INTEGER] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_INTEGER_SCALE, "Graphics", "Integer scaling",
@@ -1192,6 +1290,9 @@ static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
     case R_OPACITY: *v = s_menu_opacity; break;
     case R_SHADER: { int sh = ShaderIndex(); *v = sh >= 0 ? sh : kShaderCount; break; }
     case R_HD_MODE7: *v = s_hd_mode7 ? s_hd_mode7 - 1 : 0; break;
+    case R_WIDE: *v = s_wide; break;
+    case R_WIDE_HUD: *v = s_wide_hud; break;
+    case R_WIDE_SPAWN: *v = s_wide_spawn; break;
     case R_SMOOTH: *v = s_smooth; break;
     case R_INTEGER: *v = s_integer; break;
     case R_AUDIO: *v = s_audio; break;
@@ -1220,6 +1321,9 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
         if (s_gl.Reconfigure) s_gl.Reconfigure();
         break;
     case R_HD_MODE7: s_hd_mode7 = v ? v + 1 : 0; ApplyHdMode7(); break;
+    case R_WIDE: s_wide = v; TlkWideEnable(s_wide != 0); SizeWindow(); break;
+    case R_WIDE_HUD: s_wide_hud = v; break;
+    case R_WIDE_SPAWN: s_wide_spawn = v; break;
     case R_SMOOTH: s_smooth = v; ApplyVideoConfig(); break;
     case R_INTEGER: s_integer = v; break;
     case R_AUDIO: SetAudio(v); return s_audio == v;
@@ -1350,6 +1454,7 @@ enum { kSectionLevel = 3, kSectionControls = 5, kSectionAbout = 7 };   /* Displa
 static int LoadStateLive(const char *path) {
     uint32_t hf = 0;
     if (!tlk_state_load(path, &hf)) return 0;
+    TlkWideReset();
     if (input_path && !s_polled) frame = (long)hf;
     RecStop("a savestate was loaded (the recording replays only up to here)");
     audio_acc = 0;
@@ -1848,7 +1953,7 @@ static uint8_t *PickRom(size_t *size, char *found, size_t found_n) {
  * included, at window size), else the 256x224 picture plus overlays. */
 static void DumpWindow(const char *path) {
     int ok;
-    if (s_gl_on) {
+    if (s_gl_on || ren) {
         s_dump_req = path;
         Present();
         s_dump_req = NULL;
@@ -2016,6 +2121,8 @@ int main(int argc, char **argv) {
     RtlRegisterGame(&kTlkGameInfo);
     if (!SnesInit(rom, (int)rom_size)) { fprintf(stderr, "snesrecomp rejected the ROM\n"); return 4; }
     ApplyHdMode7();
+    TlkWideSetRom(rom, rom_size);
+    TlkWideEnable(s_wide != 0);   /* after SnesInit: the interp bridge hook table is runtime state */
     if (s_polled) {
         interp_bridge_add_pre_opcode_hook(0xC0A07C, PollHook);
         interp_bridge_add_pre_opcode_hook(0x00A07C, PollHook);
@@ -2079,9 +2186,11 @@ int main(int argc, char **argv) {
             fwrite(b, 1, 2, s_rec);
             if (frame % 60 == 0) fflush(s_rec);  /* keep it usable after a crash */
         }
+        TlkWideSetSpawnLead(s_wide_spawn && WideWidth() ? s_wide_extra : 0);
         RtlRunFrame(pad);
         PpuBeginDrawing(g_ppu, s_pixels, kWidth * kBpp, kPpuRenderFlags_NewRenderer);
         kTlkGameInfo.draw_ppu_frame();
+        TlkWideEndFrame(s_pixels);
         frame++;
         if (s_practice) PracticeFrame((uint16_t)pad);
         s_polls_frame = 0;
@@ -2093,6 +2202,7 @@ int main(int argc, char **argv) {
         if (load_at_path && frame == load_at) {
             uint32_t hf = 0;
             if (!tlk_state_load(load_at_path, &hf)) { fprintf(stderr, "cannot load state %s\n", load_at_path); return 8; }
+            TlkWideReset();
             printf("loaded_state=%s at_frame=%ld -> %u\n", load_at_path, frame, hf);
             frame = (long)hf;
             if (s_practice) PrAfterLoad(0);
