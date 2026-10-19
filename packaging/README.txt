@@ -36,6 +36,14 @@ tlk_sdl.exe and double-click it, or run it from a terminal with --rom as
 above. tlk_sdl.ini, the save-state slots and last_session.rec go in the
 folder it is started from.
 
+macOS on Apple Silicon (the -macos-arm64 .zip): the same program, with
+SDL3 built in. It is not notarized, so macOS refuses the first start;
+allow it in System Settings > Privacy & Security, or clear the flag in
+Terminal with: xattr -dr com.apple.quarantine TLKRecomp-macos-arm64
+Then run ./tlk_sdl from Terminal in that folder. tlk_sdl.ini, the
+save-state slots and last_session.rec go in the current directory. The
+macOS build has been run on one Mac only.
+
 Options: --scale N, --fullscreen, --no-audio, --config file.ini, --help.
 
 Keys (defaults)
