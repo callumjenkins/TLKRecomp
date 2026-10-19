@@ -1,0 +1,176 @@
+name: release
+
+# Builds the Linux, Windows and macOS players for a v* tag and publishes them
+# as one release here and on the GitHub mirror.
+#
+# The builds need the ROM, which never leaves the build machines: the repo
+# variables TLK_ROM (teresa) and TLK_ROM_MAC (the MacBook) are its path there
+# (the generator checks its SHA-256).
+# - linux-windows (teresa): scripts/release.sh builds both and compares
+#   compiled mode with --lle on each (Windows under Wine). It is the fast
+#   subset of docs/VERIFYING.md: run the full gates before tagging.
+# - macos (the MacBook's own runner, repo-scoped, ~/tlkrecomp-ci): builds
+#   and packs, and runs the build headless for 3000 frames. No comparison.
+#   While the MacBook sleeps the job waits, and so does the release.
+# - publish (teresa): one release with all three packages and SHA256SUMS.
+#   GitHub gets it with the GH_RELEASE_TOKEN secret once the post-receive
+#   hook has mirrored the tag; without the secret only Gitea does.
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-windows:
+    # teresa, on the host: the ROM, MinGW, Wine and ccache are there.
+    runs-on: docker-build
+    timeout-minutes: 60
+    env:
+      # Cache hits across checkouts in different work dirs.
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Build and check
+        env:
+          ROM: ${{ vars.TLK_ROM }}
+        run: |
+          [ -n "$ROM" ] || { echo "::error::Set the repo variable TLK_ROM to the ROM's path on teresa."; exit 1; }
+          scripts/release.sh -r "$ROM"
+      # v3: v4 refuses non-GitHub hosts.
+      - uses: actions/upload-artifact@v3
+        with:
+          name: linux-windows
+          path: |
+            dist/TLKRecomp-linux-x86_64.tar.gz
+            dist/TLKRecomp-windows-x86_64.zip
+
+  macos:
+    runs-on: macos-arm64
+    timeout-minutes: 60
+    env:
+      # Apple's toolchain: the nix gcc that comes first on the runner's PATH
+      # can't link (duplicate LC_RPATH).
+      CC: /usr/bin/clang
+      CXX: /usr/bin/clang++
+      CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER: /usr/bin/clang
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Build
+        env:
+          ROM: ${{ vars.TLK_ROM_MAC }}
+        run: |
+          [ -n "$ROM" ] || { echo "::error::Set the repo variable TLK_ROM_MAC to the ROM's path on the Mac."; exit 1; }
+          python3 scripts/generate_snesrecomp.py --rom "$ROM"
+          scripts/package_mac.sh -b build-mac
+          cmake --build build-mac --target tlk_headless
+      - name: Run
+        env:
+          ROM: ${{ vars.TLK_ROM_MAC }}
+        run: |
+          build-mac/tlk_headless --rom "$ROM" --frames 3000 | tee build-mac/run.txt
+          grep -q '^result=completed frames=3000$' build-mac/run.txt
+      - uses: actions/upload-artifact@v3
+        with:
+          name: macos
+          path: dist/TLKRecomp-macos-arm64.zip
+
+  publish:
+    needs: [linux-windows, macos]
+    runs-on: docker-build
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v3
+        with:
+          name: linux-windows
+          path: dist
+      - uses: actions/download-artifact@v3
+        with:
+          name: macos
+          path: dist
+
+      - name: Release notes
+        run: |
+          cd dist
+          sha256sum TLKRecomp-linux-x86_64.tar.gz TLKRecomp-windows-x86_64.zip TLKRecomp-macos-arm64.zip > SHA256SUMS
+          cd ..
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)
+          {
+            echo "The Lion King (SNES), recompiled for Linux x86_64, Windows x86_64 and macOS on Apple Silicon."
+            echo
+            echo "The game is not included. You need your own ROM: \`Lion King, The (USA).sfc\`,"
+            echo "SHA-256 \`457abe634e0a8be03e29513a3dca8f3e9d0ddc6bf97d8931f2316094260f3712\`."
+            echo "Unpack, put the ROM next to \`tlk_sdl\` (or pick it in the dialog) and run it. README.txt in the package has the rest."
+            echo
+            echo "The macOS build is not notarized: allow it in System Settings > Privacy & Security on first start (README.txt)."
+            echo
+            if [ -n "$prev" ]; then
+              echo "## Changes since $prev"
+              echo
+              git log --no-merges --format='- %s' "$prev..$TAG"
+            else
+              echo "First release."
+            fi
+            echo
+            echo "## SHA-256"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } > dist/notes.md
+          cat dist/notes.md
+
+      - name: Publish on Gitea
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth="Authorization: token $TOKEN"
+          # Reruns reuse the tag's release and replace its files.
+          id=$(curl -fsS -H "$auth" "$api/releases/tags/$TAG" | jq -r .id) || id=""
+          if [ -z "$id" ]; then
+            id=$(jq -n --arg t "$TAG" --rawfile b dist/notes.md '{tag_name: $t, name: $t, body: $b}' |
+              curl -fsS -H "$auth" -H 'Content-Type: application/json' -d @- "$api/releases" | jq -r .id)
+          fi
+          for f in dist/TLKRecomp-* dist/SHA256SUMS; do
+            name=$(basename "$f")
+            old=$(curl -fsS -H "$auth" "$api/releases/$id/assets" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id')
+            for a in $old; do curl -fsS -X DELETE -H "$auth" "$api/releases/$id/assets/$a"; done
+            curl -fsS -H "$auth" -F "attachment=@$f" "$api/releases/$id/assets?name=$name" > /dev/null
+            echo "uploaded $name"
+          done
+          echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+
+      - name: Publish on GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::No GH_RELEASE_TOKEN secret: skipped the GitHub release."; exit 0
+          fi
+          # The mirror hook pushes the tag; give it two minutes.
+          for i in $(seq 24); do
+            gh api "repos/$REPO/git/ref/tags/$TAG" > /dev/null 2>&1 && break
+            [ "$i" -lt 24 ] || { echo "::error::$TAG never reached github.com/$REPO."; exit 1; }
+            sleep 5
+          done
+          if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/TLKRecomp-* dist/SHA256SUMS -R "$REPO" --clobber
+          else
+            gh release create "$TAG" dist/TLKRecomp-* dist/SHA256SUMS -R "$REPO" --verify-tag \
+              --title "$TAG" --notes-file dist/notes.md
+          fi
+          echo "https://github.com/$REPO/releases/tag/$TAG"
