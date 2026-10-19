@@ -29,6 +29,12 @@
  * Two backends with the same switch points: ucontext + an mmap'd stack on
  * Linux/macOS, the Win32 fiber API on Windows (ucontext does not exist
  * there). Both give the game the same 64 MB stack. */
+#ifdef __APPLE__
+/* macOS hides the (deprecated) ucontext calls without _XOPEN_SOURCE, and
+ * _XOPEN_SOURCE alone would hide MAP_ANONYMOUS. */
+#define _XOPEN_SOURCE 600
+#define _DARWIN_C_SOURCE
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +49,9 @@
 #else
 #include <sys/mman.h>
 #include <ucontext.h>
+#ifndef MAP_STACK
+#define MAP_STACK 0  /* macOS has no such flag */
+#endif
 #endif
 
 int tlk_interp_bridge_run_until_quiescent_raw(CpuState *cpu, uint32_t entry_pc24);
