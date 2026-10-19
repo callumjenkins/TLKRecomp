@@ -92,17 +92,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # One download for both: a second use of the same action in a job fails
+      # on the host runner (its re-clone hits read-only git packs).
       - uses: actions/download-artifact@v3
         with:
-          name: linux-windows
-          path: dist
-      - uses: actions/download-artifact@v3
-        with:
-          name: macos
-          path: dist
+          path: artifacts
 
       - name: Release notes
         run: |
+          mkdir -p dist
+          mv artifacts/*/TLKRecomp-* dist/
           cd dist
           sha256sum TLKRecomp-linux-x86_64.tar.gz TLKRecomp-windows-x86_64.zip TLKRecomp-macos-arm64.zip > SHA256SUMS
           cd ..
