@@ -2256,3 +2256,134 @@ pytest tools/tests                                        23 passed, 4 skipped (
 
 Not tested: Finder double-click of the .app and Gatekeeper on a downloaded .dmg, the .exe on real Windows, the
 AppImage on another distro (built on Arch: it needs a glibc at least as new as this machine's).
+
+## Task WIDE: widescreen with a host compositor
+
+The owner asked for widescreen "using the same enhanced renderer technique that megamanx uses". Read from
+mstan/MegaManXSNESRecomp (cloned to `../ext/`, `docs/custom-renderer-spike.md`, `src/mmx_renderer.c`): the shared PPU
+stays 256 pixels wide and authentic; each visible line's PPU state is snapshotted; a separate Mode 1 compositor draws a
+wider picture from the snapshots, sampling the margins from data the game keeps (its level maps, ROM metatiles) instead
+of the PPU's rolling tilemap, and drawing sprites from the game's piece submissions captured before its screen clip,
+with signed coordinates. MMX layers ~2,000 lines of per-stage repairs on top; none of that is copied, only the
+technique. `runner/tlk_wide.c` is TLK's version.
+
+**What TLK keeps that the margins can use** (checked on savestates of all nine platform levels, f1500-f40000 of 6987M):
+
+- BG1 (foreground): the native tilemap is 64x32 at VRAM `$4000`, a ring the game streams as the camera moves. The level
+  map is copied to `$7F0000` at load (`NOTES.md` +09); cell `& $FFF8` indexes the ROM block table (+0F) for four
+  tilemap words. Rebuilding the visible tilemap from map + block table matched VRAM on 957 of 957 tiles in every level.
+  BG1 HOFS/VOFS equal the camera `$B29B/$B29D` modulo the ring, one frame behind; the page comes from the camera,
+  the phase from the per-line scroll (MMX's `ExpandStageScroll`).
+- BG2 (backdrop): a static 512x256 loop per level (VRAM `$4800`, unchanged across each level's states), so the margins
+  sample it with the live per-line scroll and wrap, as the PPU would.
+- BG3 is off in levels (TM = `$13`); its margins stay empty.
+- Sprites: every piece goes through `$C0A727` (16x16) or `$C0A7AE` (8x8), which drop pieces outside x -15..255
+  (-7..255) before writing OAM at `$0300`. The recorder repeats their arithmetic without the test: offset at `[$99]`,
+  object screen position `$B4/$B6`, flips `$AF/$B2`, tile `$ACFD/$ADFD + $93*2`, attributes `$B1`, slot `$A8`, Y
+  offset `$8C`. The NMI uploads OAM at `$C0A033` only when the game finished the frame (`$0ACF`), so the recorded list
+  is latched there and pairs with the OAM it describes. Pass start `$C0AAC0` sets `$A8 = 5`: slots 0-4 are the
+  reserved HUD (lives). The object loop at `$C0A58E` draws objects with obj+9 bit 6 with the camera (`$52/$54`) at
+  zero: the health and roar boxes. Those are the screen-fixed pieces.
+
+**Hooks, all read-only.** Lines: `tlk_game.c` passes an observer to the beam driver's existing
+`snes_beam_frame_driver_draw_ppu_frame_observed`; it sees each visible line just after the PPU drew it (registers
+from the raster journal, live CGRAM/OAM/VRAM). VRAM is copied only when `vramWriteCount` moves. Pieces: compiled code
+calls `aot_pace_point(cpu, ..., pc24)` after every instruction with a constant PC, so a three-PC test in
+`runner/aot_pace.h` folds away at every other call site; the interpreter side is the upstream
+`interp_bridge_add_pre_opcode_hook`. A first attempt hooked `cpu_trace_func_entry` with a runtime hunk; TLK builds
+with `SNESRECOMP_TRACE=0`, where that call is an empty inline, so it never fired (link error, hunk removed).
+
+**Compositor.** Mode 1 decode, priorities, windows, colour math, brightness and the 32-sprite / 34-sliver limits
+follow `ppu.c` (`PpuDrawWholeLine`, `ppu_evaluateSprites`). The centre 256 columns use VRAM and OAM like the PPU, so
+they must equal the PPU's picture: `tlk_headless --wide W` counts differing pixels as `native_mismatch`. Margins: BG1
+from the map, BG2/OBJ as above, HUD pieces moved out by the margin (a screen-fixed object entirely on one side of the
+centre goes to that edge; one across the middle stays). Not a level (title, menus, Stampede, bonus stages: the map
+does not match the tilemap) or a line in another mode: the native picture, centred, black sides.
+
+**The ostrich ride.** First full run at 21:9: 569 frames with centre differences, first f3871. Simba and the camera
+jump back 432 pixels there (`$B21B` `$997` -> `$7E7` at f3840); afterwards the map behind the camera no longer shows
+what is on screen (121 of 957 visible tiles differ at f3870, the screen shows sky where the map has a giraffe). Two
+general rules came out of it: the centre always comes from VRAM, and a side's margin uses the map only if map and
+VRAM agree at that edge on every line of the frame, else the PPU's own ring. Stage detection needs a majority of
+sampled tiles to agree, not 90%, so the ride does not flicker between wide and 4:3 (49 frames sampled f3500-f4700,
+none narrow). Left after the warp: the ring margin can show older scenery (a strip of water at f3871's bottom left).
+
+**Settings.** Graphics > Widescreen (off, 16:9, 21:9, fit window) and Widescreen HUD (at the edges, in place);
+`widescreen = off|16:9|21:9|adaptive`, `widescreen_hud = edges|in place`. Off by default. Fixed ratios size the window
+to that shape; fit window follows the window. `Present` draws the wide picture into the GL or SDL texture; the toast,
+practice display and in-picture menu are laid over its centre (pixels where `s_screen` differs from `s_pixels`, as
+for HD Mode 7). Integer scaling keeps whole multiples of the 224 lines. Widescreen wins over HD Mode 7 (this game has
+no Mode 7 line): the first build let HD Mode 7 win, and the owner, whose ini has `hd_mode7 = 4`, saw only 4:3. State loads
+drop the recorded pieces. Plain-SDL `--dump-window` now reads the rendered window back instead of saving the 256x224
+buffer, so that path can be checked too.
+
+Cost: 6987M 6,000 frames headless 6.4 s off, 14.7 s at 342 wide (~1.4 ms per frame for capture + compose, this
+machine).
+
+Not done: widening the game's own activation window. Enemies appear where the game creates them, which at 21:9 can be
+inside the picture (MMX widens its spawn scans; that changes the game and would break every gate, so it would need to
+be a separate, opt-in mode). Not checked: whether some objects skip drawing entirely when far off screen (they would be missing from the margins).
+
+Evidence (2026-10-19, worktree `widescreen`):
+
+```
+compare_modes 600 3000 / -t 6987M 1200 6000        MATCH, WRAM same (57ccb8d5, c897f389, dd861e16, 946033bd)
+check_all_tapes -s                                71 MATCH, 0 MISMATCH
+check_idle_lle / check_native_decomp 3000         IDLE MATCH / IDENTICAL
+save f3000 / load in new process / f6000           946033bd10683657
+ram_sync_compare 6987M / 6781M / 4735M            36,904 / 37,093 / 38,870
+check_allbugs                                     ALLBUGS PASS
+check_exit_mx                                     282 ok, 11 UNPROVEN, 0 WRONG
+pytest tools/tests                                23 passed, 4 skipped
+tlk_sdl --selftest-remap (SDL dummy)              PASS (0 failed)
+6987M 48,000 f: off / --wide 342 HUD / --wide 448  same frame and WRAM hashes (fce5e678 / c4278b1b)
+--lle 3000 f, with and without --wide 342          same hashes; margin_sprite_pixels 221,178 = compiled run
+native_mismatch, whole runs                       0: 6987M (448), 6781M, 4735M (342); allbugsF ran with HUD edges
+Xvfb, OpenGL 16:9 and opengl = 0 21:9, --dump-window   wide picture, HUD at the edges, looked at
+Xvfb + XTest: Esc, Graphics, Widescreen 16:9 -> 21:9    applied live, window resized, "Saved", ini widescreen = 21:9
+contact sheet allbugsF every 1500 f, 16:9 HUD edges     looked at: levels wide, Stampede/bonus 4:3
+```
+
+Not run: the MinGW/Windows build, macOS, the owner's desktop, the release packages. One 21:9 SDL screenshot after
+changing the setting in the menu lacked the roar box; headless 21:9 runs always showed it. Not reproduced.
+
+### WIDE, part 2: enemies out of view (opt-in, changes the game)
+
+The owner tried it and called it glitchy: enemies popping at the old screen edges ("can we preload enemies double the
+distance so they appear off camera?"). Two game rules cause it, both found from the object allocator `$C0AAFD`
+(called by the spawn helper `$C0AC33` from `$C0CC22`):
+
+- **Spawn window**, `FN_C0B8EA` (run by the camera object): tile columns from 12 (96 px) left of the camera to 42
+  (336 px, 80 past the native right edge) right of it, 16-pixel aligned, clamped to the map (`$D0`). Despawn bounds
+  `$B1FF..$B205` derive from the same columns.
+- **Draw test**, `FN_C0A5BA`: an object is drawn only if its box overlaps camera..camera+256. Off-screen objects
+  submit no piece at all, so the recorder never sees them: an enemy alive in a margin is invisible, and vanishes at
+  x = 0 / appears at x = 256 inside a wide picture. This is the larger effect.
+
+Graphics > Widescreen enemies (as the game / out of view; `widescreen_enemies`, `--wide-spawn`) widens both by the
+picture's margin: `$C0B915` (a CLC after `$46/$14` are stored, before use) moves the columns out by the margin
+rounded to 16 px; `$C0A5C2` raises the right limit in `$14`; `$C0A5CF` (an LDY between `LDA $9C` and the ADC of the
+width, so A is the same before and after it) adds the margin to the box's left edge. The compiled hook runs after the
+instruction and the interpreter's before it; at these three points that is the same state, so compiled and `--lle`
+agree with it on. Every piece of a newly drawn off-screen object still fails the game's OAM test, so OAM is unchanged;
+the drawing work (tile uploads, CPU time) and the enemies' earlier wake-up are not. Off is the default.
+
+`TLK_WIDE_OBJLOG=<path>` logs each drawn object's box per frame; `scripts/wide_popin.py LOG EXTRA` counts objects
+whose first or last box is inside the view without touching its outer edge.
+
+Evidence (2026-10-19):
+
+```
+first count (6987M 48,000 f, 16:9, before the fix)   28 appear / 73 vanish in the margins alone
+visible pops, 9 run-right level tapes x 5,000 f      16:9: 170 -> 59;  21:9: 329 -> 91 (+300 in l09, see below)
+  remaining: Simba blinking after hits (l09, he is hit more in the changed run), objects at the bottom edge with
+  ~3 px showing (vertical culling, unchanged)
+option on, compiled vs --lle, l01/l07 3000 f          same WRAM (52016cf4 / 26a232b9)
+tlk_sdl 21:9 (522 wide) vs headless --wide 522        same WRAM cf211af0 (option on)
+option off: compare_modes, check_all_tapes -s         MATCH (57ccb8d5, c897f389, dd861e16, 946033bd), 71 MATCH
+contact sheets l01/l02 21:9 option on                 looked at: monkeys, rhino, giraffes, hyenas in the margins, no garbage
+6987M with the option on                              desyncs at frame ~980 (RNG follows spawns): expected
+```
+
+Not checked: object-slot exhaustion or lag in crowded late levels with the option on at the widest views; a whole
+playthrough with it on.

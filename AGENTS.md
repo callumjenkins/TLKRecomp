@@ -74,7 +74,11 @@ set `APPIMAGELAUNCHER_DISABLE=1` (and `APPIMAGE_EXTRACT_AND_RUN=1` with no FUSE)
 ## Hosts
 
 - `build/tlk_headless`: test host. `--rom --frames --lle --input TAPE --input-polled TAPE --ram-log OUT
-  --dump-png --dump-every --save-at --load --log --interp-targets --coverage-log`.
+  --dump-png --dump-every --save-at --load --log --interp-targets --coverage-log`. `--wide W [--wide-hud]
+  [--wide-png P] [--wide-spawn]` runs the widescreen compositor (`runner/tlk_wide.c`) every frame and reports
+  `native_mismatch`: centre pixels that differ from the PPU's picture, 0 when it is right. `--wide-spawn` widens
+  the game's spawn window and object draw test (changes the game; hashes differ). `TLK_WIDE_OBJLOG` +
+  `scripts/wide_popin.py` count enemies popping in or out inside the view.
 - `build/tlk_sdl`: the player. Same emulation path plus `--hash-at`, `--no-pace`, `--no-audio`, `--record`,
   `--input-raw`, `--selftest-remap`, `--list-drivers`, `--wav`.
 - Diagnostics are env vars, all in `runner/*.c`: `TLK_HWLOG` (hardware accesses with master clock), `TLK_ROMMAP`
