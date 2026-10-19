@@ -9,6 +9,7 @@
 #include "tlk_menu_imgui.h"
 
 #include "imgui.h"
+#include "launcher_theme.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl3.h"
 
@@ -103,7 +104,64 @@ extern "C" void TlkMenuImguiOpened(void) {
     if (s_ready) UseMouse(false);
 }
 
-extern "C" void TlkMenuImguiDraw(RecompRuntimeUi *ui) {
+static ImVec4 Col(const LngColor &c) { return ImVec4(c.r, c.g, c.b, c.a); }
+
+/* The About window: why this port exists, by whom, and where the source is.
+ * Centred over the menu in the menu's own theme; the links open the browser
+ * (mouse); the About section's rows do the same from the keyboard or a pad. */
+static void DrawAbout(int *about) {
+    static const LauncherTheme t = launcher_theme_by_name("snes");
+    ImGuiIO &io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
+                            ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowFocus();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, t.radius_lg);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(t.spacing_lg * 1.5f, t.spacing_lg * 1.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(t.spacing_sm, t.spacing_md));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, Col(t.panel));
+    ImGui::PushStyleColor(ImGuiCol_Border, Col(t.accent2));
+    ImGui::PushStyleColor(ImGuiCol_Separator, Col(t.border));
+    ImGui::PushStyleColor(ImGuiCol_Text, Col(t.text));
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled, Col(t.text_muted));
+    ImGui::PushStyleColor(ImGuiCol_TextLink, Col(t.accent2));
+    ImGui::PushStyleColor(ImGuiCol_Button, Col(t.control));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Col(t.control_hovered));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, Col(t.accent_dim));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNavInputs |
+                                   ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::Begin("##tlk-about", nullptr, flags)) {
+        ImGui::PushStyleColor(ImGuiCol_Text, Col(t.accent2));
+        ImGui::TextUnformatted("About");
+        ImGui::PopStyleColor();
+        ImGui::Separator();
+        ImGui::TextWrapped("When I was around 8 years old, my family and I would gather around the kitchen TV to "
+                           "try to beat this game. We still love it, and it's an important part of our family "
+                           "lore.");
+        ImGui::TextWrapped("This effort is a tribute: to my family, to my kid self, and to the community, which "
+                           "I'm sure will enjoy it.");
+        ImGui::TextUnformatted("Alejandro AR");
+        ImGui::SameLine();
+        ImGui::TextLinkOpenURL("kinduff.com", "https://kinduff.com");
+        ImGui::TextDisabled("Source:");
+        ImGui::SameLine();
+        ImGui::TextLinkOpenURL("github.com/kinduff/TLKRecomp", "https://github.com/kinduff/TLKRecomp");
+        ImGui::Separator();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("Esc/B  Close");
+        const char *close = "Close";
+        const float close_w = ImGui::CalcTextSize(close).x + t.spacing_lg * 2.0f;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - close_w);
+        if (ImGui::Button(close, ImVec2(close_w, 0.0f))) *about = 0;
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(9);
+    ImGui::PopStyleVar(4);
+}
+
+extern "C" void TlkMenuImguiDraw(RecompRuntimeUi *ui, int *about) {
     if (!s_ready) return;
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
@@ -117,6 +175,7 @@ extern "C" void TlkMenuImguiDraw(RecompRuntimeUi *ui) {
     }
     ImGui::NewFrame();
     recomp_runtime_ui_render_imgui(ui);
+    if (*about) DrawAbout(about);
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }

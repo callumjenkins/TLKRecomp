@@ -37,7 +37,7 @@
  *   --load state          start from a savestate (frame count continues)
  *   --load-at N state     load a savestate after frame N, in process (proof runs)
  *   --menu-at N           open the settings menu after frame N (screenshots)
- *   --menu-page controls|level  with --menu-at: open the Controls (remap) or Level select section
+ *   --menu-page controls|level|about  with --menu-at: open the Controls (remap) or Level select section, or the About window
  *   --speedrun off|practice  practice mode on or off (overrides the ini)
  *   --practice-level N    level select N (0-13) after frame 1 (proof runs)
  *   --invul N             with --practice-level: debug-menu INVUL 0 off, 1 health, 2 lives
@@ -474,6 +474,7 @@ static int s_sel_level, s_sel_invul;
  * is drawn with Dear ImGui over the OpenGL presenter, else into s_screen. */
 static RecompRuntimeUi *s_ui;
 static int s_menu_open, s_menu_gl, s_key_sel, s_key_wait;
+static int s_about;   /* the About window is over the menu; any back/accept closes it */
 
 /* Short on-screen names by position; the ini keeps SDL's names. */
 static const char *PadName(SDL_GamepadButton b) {
@@ -875,7 +876,7 @@ static void ReadBackWindow(int w, int h) {
 /* The presenter's overlay hook: the menu, drawn after the game picture (and
  * its shader) over the whole window, just before the swap. */
 static void DrawOverlay(int w, int h) {
-    if (s_menu_open && s_menu_gl) TlkMenuImguiDraw(s_ui);
+    if (s_menu_open && s_menu_gl) TlkMenuImguiDraw(s_ui, &s_about);
     if (s_dump_req) ReadBackWindow(w, h);
 }
 
@@ -1073,7 +1074,8 @@ enum {
     R_AUDIO, R_VOLUME,
     R_LEVEL, R_INVUL, R_START, R_PRACTICE,
     R_BIND0, R_RESET = R_BIND0 + kBindings,
-    R_RESUME, R_QUIT, R_COUNT };
+    R_RESUME, R_QUIT,
+    R_ABOUT, R_AUTHOR, R_SOURCE, R_COUNT };
 
 static const char *const kAspectChoices[] = { "4:3 TV", "8:7 pixel", "1:1" };
 static const char *const kBindNames[kBindings] = {
@@ -1085,6 +1087,10 @@ static char s_shader_custom[1024];
 static char s_bind_label[kBindings][64];
 /* The level select's action row names the level it goes to. */
 static char s_start_label[48];
+/* About: the first row opens tlk_menu_imgui.cpp's About window (OpenGL menu
+ * only); the author and source rows open their page in the browser. */
+#define AUTHOR_URL "https://kinduff.com"
+#define SOURCE_URL "https://github.com/kinduff/TLKRecomp"
 
 #define MENU_ROW(key, sec, label, desc, type, lo, hi, step, ch, n) \
     { key, sec, label, desc, RECOMP_RUNTIME_UI_##type, lo, hi, step, ch, n, NULL }
@@ -1138,6 +1144,12 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
                           "Back to the game.", ACTION, 0, 0, 0, NULL, 0),
     [R_QUIT] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_QUIT, "System", "Quit",
                         "Close the game. Press twice.", ACTION, 0, 0, 0, NULL, 0),
+    [R_ABOUT] = MENU_ROW("tlk.about", "About", "Why this port exists",
+                         "Enter/A to read.", ACTION, 0, 0, 0, NULL, 0),
+    [R_AUTHOR] = MENU_ROW("tlk.author", "About", "By Alejandro AR",
+                          "kinduff.com", ACTION, 0, 0, 0, NULL, 0),
+    [R_SOURCE] = MENU_ROW("tlk.source", "About", "Source code",
+                          "github.com/kinduff/TLKRecomp", ACTION, 0, 0, 0, NULL, 0),
 };
 
 static void StartLabel(void) {
@@ -1231,6 +1243,7 @@ static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
     (void)ctx;
     switch ((int)(item - s_rows)) {
     case R_SHADER: return s_gl_on;
+    case R_ABOUT: return s_menu_gl;
     default: return 1;
     }
 }
@@ -1248,6 +1261,7 @@ static void MenuShown(void *ctx, int open) {
     (void)ctx;
     s_menu_open = open;
     s_key_wait = 0;
+    s_about = 0;
     BindLabels();
     if (open) { s_kbd_pad = 0; s_turbo_held = 0; TlkMenuImguiOpened(); }
     else s_pad_hold = 1;
@@ -1264,6 +1278,7 @@ static int MenuRun(void *ctx, const RecompRuntimeUiItem *item) {
     }
     switch (r) {
     case R_START: PrStartLevel(s_sel_level); return 1;
+    case R_ABOUT: s_about = 1; return 0;
     case R_RESET:
         ResetBindings();
         BindLabels();
@@ -1274,6 +1289,10 @@ static int MenuRun(void *ctx, const RecompRuntimeUiItem *item) {
         if (!recomp_runtime_ui_confirm(s_ui, item, "Press again to quit")) return 0;
         running = 0;
         return 1;
+    case R_AUTHOR: case R_SOURCE:
+        if (SDL_OpenURL(r == R_AUTHOR ? AUTHOR_URL : SOURCE_URL)) return 1;
+        recomp_runtime_ui_set_status(s_ui, "Cannot open the browser");
+        return 0;
     default: return 0;
     }
 }
@@ -1325,7 +1344,7 @@ static void MenuOpenSection(int section) {
     for (int i = 0; i < section; i++) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_DOWN, 1, 0);
     recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
 }
-enum { kSectionLevel = 3, kSectionControls = 5 };   /* Display, Graphics, Audio, Level select, Practice, Controls, System */
+enum { kSectionLevel = 3, kSectionControls = 5, kSectionAbout = 7 };   /* Display, Graphics, Audio, Level select, Practice, Controls, System, About */
 
 /* Load a savestate during play (F5-F8, F9). */
 static int LoadStateLive(const char *path) {
@@ -1346,6 +1365,10 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
         if (s_key_wait) {          /* rebinding: next key wins, Esc cancels */
             if (k != SDLK_ESCAPE) s_keys[s_key_sel] = k;
             BindDone(k != SDLK_ESCAPE);
+            return;
+        }
+        if (s_about && k != SDLK_TAB) {   /* Tab still closes the whole menu */
+            if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE || k == SDLK_RETURN || k == SDLK_KP_ENTER) s_about = 0;
             return;
         }
         RecompRuntimeUiInput in;
@@ -1415,6 +1438,10 @@ static void HandlePadButton(const SDL_GamepadButtonEvent *ge) {
     if (s_key_wait) {   /* rebinding: next gamepad button wins, Guide cancels */
         if (b != SDL_GAMEPAD_BUTTON_GUIDE) s_pad_btn[s_key_sel] = b;
         BindDone(b != SDL_GAMEPAD_BUTTON_GUIDE);
+        return;
+    }
+    if (s_about && b != SDL_GAMEPAD_BUTTON_START && b != SDL_GAMEPAD_BUTTON_GUIDE) {
+        if (b == SDL_GAMEPAD_BUTTON_EAST || b == SDL_GAMEPAD_BUTTON_SOUTH) s_about = 0;
         return;
     }
     RecompRuntimeUiInput in;
@@ -1696,7 +1723,7 @@ static void Usage(void) {
         "               [--frames N] [--hash-at a,b,..] [--dump-png path] [--no-pace]\n"
         "               [--no-audio] [--wav path [--wav-seconds S]]\n"
         "               [--save-at N state] [--load state] [--load-at N state]\n"
-        "               [--menu-at N [--menu-page controls|level]] [--selftest-remap]\n"
+        "               [--menu-at N [--menu-page controls|level|about]] [--selftest-remap]\n"
         "               [--speedrun off|practice] [--practice-level N [--invul N]] [--dump-window path]\n"
         "               [--list-drivers]\n"
         "Without --rom (or rom= in the ini) the .sfc/.smc files next to the binary and in the\n"
@@ -1904,7 +1931,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--menu-at") && v) { menu_at = atol(v); i++; }
         else if (!strcmp(a, "--menu-page") && v) {
             menu_page = !strcmp(v, "controls") || !strcmp(v, "keys") ? kSectionControls
-                      : !strcmp(v, "level") ? kSectionLevel : -1;
+                      : !strcmp(v, "level") ? kSectionLevel
+                      : !strcmp(v, "about") ? kSectionAbout : -1;
             i++;
         }
         else if (!strcmp(a, "--selftest-remap")) selftest = 1;
@@ -2074,6 +2102,7 @@ int main(int argc, char **argv) {
         if (practice_level >= 0) { PrStartLevel(practice_level % 14); practice_level = -1; }
         if (menu_at >= 0 && frame == menu_at) {
             if (menu_page >= 0) MenuOpenSection(menu_page);
+            if (menu_page == kSectionAbout) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
             else OpenMenu();
             menu_shown = 1;
             menu_at = -1;

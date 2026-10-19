@@ -15,8 +15,9 @@ int TlkMenuImguiInit(SDL_Window *win, const char *font_path, float font_px);
 void TlkMenuImguiEvent(const SDL_Event *ev);
 /* The menu was opened: ignore the mouse until it moves. */
 void TlkMenuImguiOpened(void);
-/* One ImGui frame holding the menu, drawn into the bound framebuffer. */
-void TlkMenuImguiDraw(RecompRuntimeUi *ui);
+/* One ImGui frame holding the menu, drawn into the bound framebuffer. With
+ * *about set, the About window is drawn over it; its Close button clears *about. */
+void TlkMenuImguiDraw(RecompRuntimeUi *ui, int *about);
 void TlkMenuImguiShutdown(void);
 
 #ifdef __cplusplus
