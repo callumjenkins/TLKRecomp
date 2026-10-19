@@ -4,6 +4,10 @@
 
 ![Six scenes from the game running in tlk_sdl: the ostrich ride, the stampede, Hakuna Matata, Simba's Destiny, Be Prepared and the fight with Scar](docs/img/gallery.png)
 
+> When I was around 8 years old, my family and I would gather around the kitchen TV to try to beat this game. We still
+> love it, and it's an important part of our family lore. This effort is a tribute: to my family, to my kid self, and
+> to the community, which I'm sure will enjoy it. - [Alejandro AR](https://kinduff.com)
+
 TLKRecomp is a static recompilation of the US release, built with
 [snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp). The game's 65816 program is translated to C and
 compiled for your CPU; graphics, sound and timing run on snesrecomp's emulated PPU and SPC, so it plays like the
@@ -140,6 +144,7 @@ back.
 | Practice | practice mode on/off |
 | Controls | pick a SNES button, press Enter (or pad A), then the new key *or* pad button. Esc or Guide cancels; "Reset defaults" restores the tables above |
 | System | Resume, Quit (press twice) |
+| About | why this port exists (a short note, OpenGL menu only), the author's site and this repository (open in the browser) |
 
 Every change is saved to `tlk_sdl.ini` (the file is rewritten, so comments are dropped). Without OpenGL 3.3 the menu
 is drawn small inside the game picture.
