@@ -232,8 +232,8 @@ game data). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` 
 ## How it works
 
 The ROM's code is found and translated to C ahead of time, then compiled like any other program: 1,305 of 1,305
-known routines are compiled. About 4% of non-idle CPU time on the test tapes still runs in snesrecomp's interpreter,
-for code the game enters in a CPU mode the compiler can't handle yet. The interpreter (`--lle`) is also the
+known routines are compiled. About 5.5% of the instructions on a whole-game run (idle loops excluded) still run in
+snesrecomp's interpreter, for code the game enters in a CPU mode the compiler can't handle yet. The interpreter (`--lle`) is also the
 reference: the compiled build must produce the same frames and RAM as it for the same input. `docs/HOW_IT_WORKS.md`
 explains the pipeline, and `docs/devlog.md` has every fix with its evidence.
 

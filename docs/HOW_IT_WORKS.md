@@ -45,7 +45,8 @@ by hand, and changes the CPU's register widths at run time. So the build carries
 mode is the reference: the compiled build must produce the same frames and RAM as `--lle` for the same input
 (see `VERIFYING.md`).
 
-What still runs on the interpreter is about 4% of non-idle CPU time on the test tapes: known routines entered
+What still runs on the interpreter is about 5.5% of non-idle instructions on a whole-game run (allbugsF; 3.8% on
+the level-1 benchmark, `scripts/interp_share.py`, 2026-10-18): known routines entered
 through two dispatch sites (`$C0B5A9`, `$C0D7F3`) in a mode the compiler can't yet handle safely, because some
 targets never return. Details in `devlog.md`, task FF.
 

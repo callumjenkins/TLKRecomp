@@ -133,7 +133,7 @@ not cfg typos.
 
 ## Open threads (2026-10-13)
 
-- ~4% of non-idle CPU still interpreted: known routines entered via `$C0B5A9` / `$C0D7F3` at M0X1 into M0X0-only
+- ~5.5% of non-idle instructions still interpreted (allbugsF whole game, 2026-10-18): known routines entered via `$C0B5A9` / `$C0D7F3` at M0X1 into M0X0-only
   bodies; some targets never return (stack reset in the level loader, demo exit). Needs "may not return" tail
   dispatch in codegen. Undecided whether to accept or attempt. Devlog task FF.
 - `$7E2006` MVN RAM routine stays interpreted by choice (~1% of run time).
