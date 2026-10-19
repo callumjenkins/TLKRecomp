@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
-# Build the Windows player zip: dist/TLKRecomp-windows-x86_64.zip
+# Build the Windows player zip: dist/TLKRecomp-windows-x86_64.zip, and the
+# same tlk_sdl.exe alone: dist/TLKRecomp-windows-x86_64.exe (its shader
+# presets and font are compiled in and unpacked to %APPDATA%\TLKRecomp).
 #
 # usage: scripts/package_win.sh [-b builddir]
 # Cross-compiles with MinGW-w64 (cmake/mingw-w64-x86_64.cmake) into builddir
@@ -13,7 +15,7 @@ BUILD="$ROOT/build-win"
 while getopts "b:" opt; do
     case $opt in
         b) BUILD=$OPTARG ;;
-        *) sed -n '2,8p' "$0"; exit 2 ;;
+        *) sed -n '2,10p' "$0"; exit 2 ;;
     esac
 done
 NAME=TLKRecomp-windows-x86_64
@@ -53,6 +55,8 @@ fi
 
 rm -f "$DIST/$NAME.zip"
 (cd "$DIST" && zip -qr "$NAME.zip" "$NAME")
+cp "$PKG/tlk_sdl.exe" "$DIST/$NAME.exe"
 rm -rf "$PKG"
 echo "$DIST/$NAME.zip"
 unzip -l "$DIST/$NAME.zip"
+echo "$DIST/$NAME.exe"
