@@ -28,7 +28,7 @@ ROWS = [
 ]
 
 SCALE = 3
-W, H = 272, 244
+W, H = 432, 243   # 16:9
 # From the game: sky bands, HUD meter frame / stripe / zigzag, health-meter red.
 SKY = ["#de4a00", "#ff3900", "#ff7300", "#ff8c00", "#ffad00"]
 PINK, PURPLE, STRIPE, ZIG, ZIG_SHADE = "#ff7bbd", "#390039", "#ff3900", "#ffff00", "#ff8c00"
@@ -84,22 +84,23 @@ def sky(d):
         if i:   # dithered seam between bands
             for x in range(0, W, 2):
                 d.point((x + (i % 2), i * band), fill=SKY[i - 1])
-    for y0, x0, n in ((59, -20, 120), (92, 150, 140), (125, -40, 150), (158, 170, 120)):   # pink streaks, between rows
+    for y0, x0, n in ((59, -20, 190), (92, 240, 220), (125, -40, 240), (158, 270, 190)):   # pink streaks, between rows
         for x in range(x0, x0 + n):
             y = y0 + (x // 8) % 4 if (x // 32) % 2 else y0 + 3 - (x // 8) % 4
             d.line([x, y, x, y + 1], fill=PINK)
 
 
 def savanna(d):
-    d.ellipse([168, 206, 208, 246], fill=SUN)   # setting sun, half under the hills
+    d.ellipse([W - 104, 206, W - 64, 246], fill=SUN)   # setting sun, half under the hills
     for x in range(W):
         top = 228 - round(3 * math.sin(x / 23) + 2 * math.sin(x / 9 + 1))
         d.line([x, top, x, H], fill=PURPLE)
     # Acacia: trunk, two branches and a flat crown.
-    d.line([229, 230, 231, 214], fill=PURPLE, width=2)
-    d.line([231, 216, 222, 210], fill=PURPLE)
-    d.line([231, 216, 240, 209], fill=PURPLE)
-    d.ellipse([208, 202, 256, 212], fill=PURPLE)
+    t = W - 41
+    d.line([t - 2, 230, t, 214], fill=PURPLE, width=2)
+    d.line([t, 216, t - 9, 210], fill=PURPLE)
+    d.line([t, 216, t + 9, 209], fill=PURPLE)
+    d.ellipse([t - 23, 202, t + 25, 212], fill=PURPLE)
 
 
 def meter(d, x, y, w, pct):
@@ -122,7 +123,7 @@ def card():
     savanna(d)
     title = "RECOMPILATION STATUS"
     text(d, (W - text_width(title, 2)) // 2, 8, title, size=2)
-    mx, mw = 10, 206
+    mx, mw = 10, W - 66
     for i, (label, done, total, count) in enumerate(ROWS):
         y = 34 + i * 33
         pct = 100.0 * done / total
