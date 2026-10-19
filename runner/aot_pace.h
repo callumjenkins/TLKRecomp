@@ -79,13 +79,20 @@ static inline uint8_t aot_peek(CpuState *cpu, uint32_t adr24) {
 #ifdef AOT_PACE_TRACE
 void aot_pace_trace(uint32_t pc24, uint32_t cyc, uint32_t mc);
 #endif
+/* Widescreen (tlk_wide.c) watches six instructions, just after they run: the
+ * first of each sprite piece writer and of the NMI's OAM upload, and three
+ * in the spawn window and object cull routines. pc24 is a constant at every
+ * call site, so the test folds away everywhere else. The interpreter side is
+ * an interp_bridge pre-opcode hook. */
+extern void (*g_tlk_wide_pc_hook)(CpuState *cpu, uint32_t pc24);
 static inline int aot_pace_point(CpuState *cpu, uint32_t cyc, uint32_t mc,
                                  uint32_t pc24) {
 #ifdef AOT_PACE_TRACE
     aot_pace_trace(pc24, cyc, mc);
-#else
-    (void)pc24;
 #endif
+    if ((pc24 == 0xC0A727u || pc24 == 0xC0A7AEu || pc24 == 0xC0A033u || pc24 == 0xC0B915u ||
+         pc24 == 0xC0A5C2u || pc24 == 0xC0A5CFu) && g_tlk_wide_pc_hook)
+        g_tlk_wide_pc_hook(cpu, pc24);
     cpu->cycles += cyc;
     cpu->master_cycles += mc;
     s_apu_pending_master += mc;

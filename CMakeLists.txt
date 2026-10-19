@@ -108,6 +108,7 @@ if(TLK_BUILD_HOSTS)
         ${TLK_RUNNER_DIR}/aot_pace.c
         ${TLK_RUNNER_DIR}/tlk_fiber.c
         ${TLK_RUNNER_DIR}/tlk_savestate.c
+        ${TLK_RUNNER_DIR}/tlk_wide.c
         ${TLK_RUNNER_DIR}/host_contract.c)
 
     function(tlk_configure_target target)

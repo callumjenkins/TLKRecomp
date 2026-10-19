@@ -11,7 +11,9 @@
 
 void aot_pace_diag_frame(void);  /* aot_pace.c (TLK_HWLOG) */
 static void TlkRunOneFrame(void) { aot_pace_diag_frame(); snes_beam_frame_driver_run_frame(); }
-static void TlkDrawPpuFrame(void) { snes_beam_frame_driver_draw_ppu_frame(); }
+/* Set by tlk_wide.c while widescreen is on: sees each visible line's PPU state. */
+SnesBeamRasterObserver *g_tlk_raster_observer;
+static void TlkDrawPpuFrame(void) { snes_beam_frame_driver_draw_ppu_frame_observed(g_tlk_raster_observer, NULL); }
 static void TlkSessionReset(void) { snes_beam_frame_driver_reset(); }
 
 void TlkDecompInstall(void);  /* tlk_decomp.c */
