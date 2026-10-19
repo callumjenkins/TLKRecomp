@@ -36,13 +36,24 @@ tlk_sdl.exe and double-click it, or run it from a terminal with --rom as
 above. tlk_sdl.ini, the save-state slots and last_session.rec go in the
 folder it is started from.
 
-macOS on Apple Silicon (the -macos-arm64 .zip): the same program, with
-SDL3 built in. It is not notarized, so macOS refuses the first start;
-allow it in System Settings > Privacy & Security, or clear the flag in
-Terminal with: xattr -dr com.apple.quarantine TLKRecomp-macos-arm64
-Then run ./tlk_sdl from Terminal in that folder. tlk_sdl.ini, the
-save-state slots and last_session.rec go in the current directory. The
-macOS build has been run on one Mac only.
+The single .exe (TLKRecomp-windows-x86_64.exe) is the same program
+without the folder: put the ROM next to it and double-click it. Its
+shader presets and font unpack to %APPDATA%\TLKRecomp on first start.
+
+Linux AppImage (TLKRecomp-linux-x86_64.AppImage): make it executable
+(chmod +x) and run it. tlk_sdl.ini, saves and recordings go next to
+the .AppImage file, and a ROM put there is found.
+
+macOS on Apple Silicon: the .dmg holds TLKRecomp.app; drag it to
+Applications. It is not notarized, so macOS refuses the first start:
+then open System Settings > Privacy & Security and click Open Anyway
+next to TLKRecomp. Its settings, saves and recordings go to
+~/Library/Application Support/TLKRecomp, and a ROM put there is found;
+otherwise it asks for the ROM and remembers it. The -macos-arm64 .zip
+has the bare tlk_sdl for Terminal use (files go in the current
+directory; clear the download flag first with
+xattr -dr com.apple.quarantine TLKRecomp-macos-arm64). The macOS build
+has been run on one Mac only.
 
 Options: --scale N, --fullscreen, --no-audio, --config file.ini, --help.
 

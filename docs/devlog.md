@@ -2218,3 +2218,41 @@ Mac tlk_sdl 6987M 1500 frames from ssh              59.9 fps, rc 0; window not s
 
 Not run: the full gates (this change touches only the Apple branch of `tlk_fiber.c` and a new option in
 `compare_modes.sh`). Not tested: the macOS build on any other Mac, Gatekeeper on a downloaded zip.
+
+## Task PKG: AppImage, single .exe and macOS .app
+
+Releases now carry one-file downloads next to the folder archives: `TLKRecomp-linux-x86_64.AppImage`,
+`TLKRecomp-windows-x86_64.exe` and `TLKRecomp-macos-arm64.dmg` (TLKRecomp.app). Icon: original art, a paw print
+in front of a sun (`tools/make_icon.py`, outputs in `packaging/icon/`).
+
+- **Assets without a folder.** `tlk_sdl` now has its shader presets and menu font compiled in
+  (`cmake/TlkEmbedAssets.cmake`, read by `runner/tlk_assets.c`). The folder next to the binary still wins; without
+  one (the lone .exe) the files are written to `SDL_GetPrefPath` (`%APPDATA%\TLKRecomp`) and used from there.
+  Bundled shader names in the ini are unchanged (`assets/shaders/...`); `TlkVideoConfig` resolves them.
+- **Where settings go.** Unchanged when the current directory is writable. A .app started from Finder runs in
+  `/`, so when it is not writable the ini (and with it slots, practice files, `last_session.rec`) goes to the
+  per-user folder (`~/Library/Application Support/TLKRecomp`). The AppImage's AppRun sets `TLK_SDL_INI` beside
+  the .AppImage file (snesrecomp's own AppImage convention). The ROM search now also looks next to the ini.
+- **Packing.** `scripts/package_appimage.sh` (pinned appimagetool 1.9.1 and type2 runtime 20251108, SHA-256
+  checked, extract-and-run so no FUSE); `package_win.sh` also writes the lone .exe (icon via `packaging/tlk_sdl.rc`);
+  `package_mac.sh` also builds the .app (assets in `Contents/Resources`, where `SDL_GetBasePath` points in a
+  bundle, `.icns` from the PNG, ad-hoc signed) inside a .dmg with an Applications link.
+
+Evidence (2026-10-18):
+
+```
+scripts/release.sh, ccache warm                          1:57, all checks MATCH (57ccb8d5, c897f389, a07184e1)
+packed AppImage / lone .exe (Wine), dummy video, f600     57ccb8d5, same as the checks
+lone tlk_sdl, no assets/, Xvfb, crt-soft in the ini       files unpacked to $XDG_DATA_HOME/TLKRecomp, scanlines visible
+same, --menu-at                                           menu drawn with Lato from the unpacked font
+same, started in / without --rom, ROM in per-user folder  ROM found there
+AppImage from its folder (real FUSE), ROM + ini beside    ROM found, CRT on, frame 400 1dd76aa3
+lone .exe under Wine, fresh prefix, Xvfb                  ROM beside it found, assets in %APPDATA%\TLKRecomp, CRT on, f400 1dd76aa3
+.dmg on the MacBook: mount, codesign -v --deep            ok; Info.plist 0.2.0; assets in Contents/Resources
+.app binary run from / and /tmp                           60.2 fps; no unpacking (Resources found)
+tlk_sdl --selftest-remap (SDL dummy)                      PASS (0 failed)
+pytest tools/tests                                        23 passed, 4 skipped (TAS folder not reachable from the worktree)
+```
+
+Not tested: Finder double-click of the .app and Gatekeeper on a downloaded .dmg, the .exe on real Windows, the
+AppImage on another distro (built on Arch: it needs a glibc at least as new as this machine's).

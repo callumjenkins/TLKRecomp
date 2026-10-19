@@ -225,19 +225,25 @@ MinGW runtime are linked statically, so the `.exe` files need only system DLLs:
 `build-win/tlk_headless.exe` and `tlk_sdl.exe` run under Wine with the same arguments as the Linux builds
 (`docs/VERIFYING.md`); real Windows has not been tested yet.
 
-`scripts/package.sh` builds `dist/TLKRecomp-linux-x86_64.tar.gz` (binary, README and license notes; no ROM and no
-game data). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` the same way from `build-win/`.
-`cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
+`scripts/package.sh` builds `dist/TLKRecomp-linux-x86_64.tar.gz` (binary, README and license notes; no ROM and no game
+data) and `scripts/package_appimage.sh` the same program as `TLKRecomp-linux-x86_64.AppImage` (settings, saves and a
+ROM go next to the .AppImage file). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` from
+`build-win/`, and the same `tlk_sdl.exe` alone as `TLKRecomp-windows-x86_64.exe`: the shader presets and menu font are
+compiled into `tlk_sdl` and, when no `assets/` folder sits next to it, unpacked to the per-user folder
+(`%APPDATA%\TLKRecomp`). `cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
 
-`scripts/package_mac.sh` builds `dist/TLKRecomp-macos-arm64.zip` on a Mac (Xcode command line tools, cmake, ninja,
-Python 3, Rust for the generator). It has been built and run on one Apple Silicon MacBook; it is not notarized
-and has not been run through the comparison gates.
+`scripts/package_mac.sh` builds `dist/TLKRecomp-macos-arm64.dmg` (TLKRecomp.app) and a `.zip` with the bare binary on
+a Mac (Xcode command line tools, cmake, ninja, Python 3, Rust for the generator). Started from Finder the app runs in
+`/`, so `tlk_sdl` keeps its ini and saves in `~/Library/Application Support/TLKRecomp` (any time the current directory
+is not writable). It has been built and run on one Apple Silicon MacBook; it is not notarized and has not been run
+through the comparison gates. The icon is original art (`tools/make_icon.py`).
 
 `scripts/release.sh -r ROM` builds the Linux and Windows packages and writes `dist/SHA256SUMS`. Before packing, it
 compares compiled mode with `--lle` on each build (Windows under Wine) at attract-mode frames 600 and 3000 and at
-frame 6000 of the 6987M tape, and checks that Linux and Windows give the same hashes. Pushing a `v*` tag runs it in CI
-(`.gitea/workflows/release.yml`), builds the macOS package on a Mac runner, and publishes all three as a release.
-These checks are a quick subset: run the full gates in `docs/VERIFYING.md` before tagging.
+frame 6000 of the 6987M tape, and checks that Linux and Windows give the same hashes; after packing, the AppImage and
+the single .exe must show the same frame 600. Pushing a `v*` tag runs it in CI (`.gitea/workflows/release.yml`),
+builds the macOS packages on a Mac runner, and publishes everything as one release. These checks are a quick subset:
+run the full gates in `docs/VERIFYING.md` before tagging.
 
 ## How it works
 

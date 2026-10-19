@@ -66,7 +66,10 @@ MacBook (2026-10-18), ucontext fibers work there. Never gated: no `--lle` compar
 
 Releases: a `v*` tag runs `.gitea/workflows/release.yml`: Linux and Windows on teresa (`scripts/release.sh`, quick
 `--lle` checks), macOS on the MacBook's repo-scoped runner (`~/tlkrecomp-ci`, launchd agent
-`com.kinduff.tlkrecomp-runner`), then one release on Gitea and on the GitHub mirror. Run the full gates before tagging.
+`com.kinduff.tlkrecomp-runner`), then one release on Gitea and on the GitHub mirror. Run the full gates before tagging. Packages: Linux
+.tar.gz + .AppImage, Windows .zip + single .exe (assets compiled in, `runner/tlk_assets.c`), macOS .dmg (.app) +
+.zip. This workstation has AppImageLauncher: running an .AppImage here pops its integrate dialog on the desktop;
+set `APPIMAGELAUNCHER_DISABLE=1` (and `APPIMAGE_EXTRACT_AND_RUN=1` with no FUSE).
 
 ## Hosts
 
