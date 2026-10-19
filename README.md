@@ -1,49 +1,66 @@
 # TLKRecomp
 
-A native PC port of *The Lion King* (SNES, USA, 1994), made by static recompilation with
+**Disney's *The Lion King* (SNES, 1994), running as a native PC program.**
+
+![Six scenes from the game running in tlk_sdl: the ostrich ride, the stampede, Hakuna Matata, Simba's Destiny, Be Prepared and the fight with Scar](docs/img/gallery.png)
+
+TLKRecomp is a static recompilation of the US release, built with
 [snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp). The game's 65816 program is translated to C and
-compiled; graphics, sound and timing still run on snesrecomp's emulated PPU/SPC, so it plays exactly like the
-cartridge.
+compiled for your CPU; graphics, sound and timing run on snesrecomp's emulated PPU and SPC, so it plays like the
+cartridge, from the Westwood logo to the last hit on Scar. It runs on Linux and Windows.
 
-**No game data is in this repository.** No ROM, no assets, no generated code. You need your own dump
-(`Lion King, The (USA).sfc`, 3 MiB headerless, SHA-256 `457abe63...0f3712`); the build reads it to generate the
-C sources locally.
+**No game data is in this repository.** No ROM, no assets, no generated code. Bring your own dump
+(`Lion King, The (USA).sfc`, 3 MiB headerless, SHA-256 `457abe63...0f3712`); the build reads it and generates the C
+on your machine.
 
-## Status
+## Features
 
-- Playable start to finish, keyboard and gamepad, save states, remappable controls.
-- 1,305 / 1,305 known routines compiled; about 4% of non-idle CPU time on the test tapes still runs in the interpreter (code entered in a CPU
-  mode the compiler can't handle yet, see `docs/HOW_IT_WORKS.md`).
-- Checked frame by frame against the interpreter on 71 hand-made input tapes, an idle run, save/load, and
-  RAM-checked against BizHawk on three published speedruns and a 60,648-frame All Bugs run.
+- **The whole game**, start to finish, bonus stages included, on keyboard or gamepad.
+- **Checked against real emulation.** Game RAM stays in sync with BizHawk (bsnes core) through three published
+  speedruns and a 60,648-frame All Bugs run. Compiled and interpreted code give identical frames and RAM on 71
+  hand-made input tapes.
+- **Settings menu in the game.** Tab or Esc opens it. Every change applies immediately and is saved.
+- **Shaders and scaling.** CRT, LCD grid, Sharpen and Composite presets; 8:7, 4:3 or 1:1 aspect; integer scaling;
+  fullscreen.
+- **Practice mode** for speedrunners: level timer, TAS target, splits, lag counter, input display, best times,
+  one-key level restart.
+- **Level select** with the debug menu's invulnerability (infinite health or infinite lives).
+- **Save states** in four slots, and a **turbo** key that runs the game up to 16x.
+- **Remappable controls**: any key or gamepad button; pads can be plugged in mid-game.
+- **Speedruns included.** Four tool-assisted runs from TASVideos play back in sync to the end.
 
-## How to play
+<table>
+  <tr>
+    <td width="33%"><img src="docs/img/menu.png" alt="The settings menu over the game, Display section"></td>
+    <td width="33%"><img src="docs/img/practice.png" alt="Practice mode: level timer, TAS split and input display over Can't Wait to Be King"></td>
+    <td width="33%"><img src="docs/img/crt.png" alt="The stampede drawn with the CRT shader at 4:3"></td>
+  </tr>
+  <tr>
+    <td align="center">Settings menu</td>
+    <td align="center">Practice mode</td>
+    <td align="center">CRT shader, 4:3</td>
+  </tr>
+</table>
 
-Build (Linux: cmake, ninja, gcc/clang, Python 3, SDL3):
+## Quick start
 
+Linux needs cmake, ninja, gcc or clang, Python 3 and SDL3:
+
+    git clone --recursive https://github.com/kinduff/TLKRecomp
+    cd TLKRecomp
+    cp "/path/to/Lion King, The (USA).sfc" .     # the build and the player find it here
     ./build.sh
+    build/tlk_sdl
 
-The build uses `ccache` when it is installed (`-DTLK_USE_CCACHE=OFF` turns that off; an explicit
-`CMAKE_C_COMPILER_LAUNCHER` wins). `cmake --build build --target tlk_sdl` builds only the player.
+A cold build takes about 7 minutes on 12 threads. `ccache` is used when installed, so later rebuilds are much faster
+(`-DTLK_USE_CCACHE=OFF` turns it off). `cmake --build build --target tlk_sdl` builds only the player.
 
-Windows x86_64, cross-built on Linux with MinGW-w64 (`x86_64-w64-mingw32-gcc`); SDL3 (pinned, fetched) and the MinGW
-runtime are linked statically, so the `.exe` files need only system DLLs:
-
-    python3 scripts/generate_snesrecomp.py   # if generated/ is empty
-    cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DTLK_STATIC_SDL=ON
-    cmake --build build-win --target tlk_headless tlk_sdl
-
-`build-win/tlk_headless.exe` and `tlk_sdl.exe` run under Wine with the same arguments as the Linux builds
-(`docs/VERIFYING.md`).
-
-Run:
-
-    build/tlk_sdl --rom "/path/to/Lion King, The (USA).sfc"
+Without `--rom` (and no `rom =` in the ini), `tlk_sdl` looks for the right ROM next to the binary and in the current
+directory. If it finds none, it opens a file dialog, checks the file you pick, and remembers it.
 
 Options: `--scale N` (window size, default 3), `--fullscreen`, `--no-audio`, `--config file.ini`.
 
-Default keys:
+## Controls
 
 | SNES | Key |
 |---|---|
@@ -53,43 +70,55 @@ Default keys:
 | L / R | Q / W |
 | Start / Select | Enter / Right Shift |
 
-F11 or Alt+Enter toggles fullscreen.
+Everything else:
 
 | Key | Does |
 |---|---|
+| Tab or Esc | settings menu (the game pauses). In the menu, Esc goes back and closes; Tab resumes |
 | F1-F4 | save state to slot 1-4 |
 | F5-F8 (or Shift+F1-F4) | load slot 1-4 |
-| ` (hold) | turbo: the game runs `turbo_speed` times faster (4 by default), sound muted; works on a tape too. Pad: right stick click. Rebind in the menu's Controls |
+| ` (hold) | turbo: the game runs `turbo_speed` times faster (4 by default), sound muted. Pad: right stick click |
 | F9 | practice mode: restart the current level |
-| Tab or Esc | settings menu (game pauses); in the menu Esc goes back and closes, Tab resumes |
+| F11 or Alt+Enter | fullscreen |
 
-Save states are `tlk_slot1.state` .. `tlk_slot4.state` in the same folder as the ini. They only load in the build that
-wrote them. The settings menu is [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui)'s in-game menu (the
-same one other recomps use), drawn with Dear ImGui over the game. Up/Down pick a section (Display, Graphics, Audio,
-Level select, Practice, Controls, System), Enter opens it, Left/Right change a value, Esc goes back. It has window scale,
-fullscreen, vsync, the video options below, how much the menu dims the game, audio on/off, volume, level select and practice mode
-(below) and Controls (pick a SNES button, press Enter or pad A, then press the new key *or* gamepad button; Esc or
-Guide cancels; "Reset defaults" restores the table above). System has Resume and Quit (press twice). Every change
-applies at once and is saved to `tlk_sdl.ini` (the file is rewritten, so comments are dropped). Without OpenGL 3.3
-the menu is drawn small inside the game picture. An SDL gamepad works out of the box and can be plugged in while the
-game runs (buttons by position: bottom = B, right = A, left = Y, top = X; shoulders and triggers = L/R; left stick or
-d-pad moves). Guide, or Back+Start, opens the menu from the pad; in it the d-pad moves, A selects, B goes back, Start
-closes.
+**Gamepads** work out of the box, by button position: bottom = B, right = A, left = Y, top = X; shoulders and
+triggers = L/R; left stick or d-pad moves. Guide, or Back+Start, opens the menu; in it the d-pad moves, A selects,
+B goes back, Start closes.
 
-Without `--rom` (and no `rom =` in the ini), `tlk_sdl` checks the `.sfc`/`.smc` files next to the binary and in the
-current directory and uses the first one that is the right ROM. If none is found, it opens a file dialog to pick
-the ROM, checks it, and saves the path as `rom =` in `tlk_sdl.ini` so it is not asked again.
+Save states are `tlk_slot1.state` .. `tlk_slot4.state`, in the same folder as the ini. They only load in the build
+that wrote them.
 
-Video goes through snesrecomp's OpenGL 3.3 presenter. The menu's Shader row cycles the bundled presets (CRT,
-LCD grid, Sharpen, Composite; CC0, from snesrecomp's `runner/assets/shaders`), which the build copies to
-`build/assets/shaders` and the release packages ship next to the binary. Aspect, Smooth and Integer scaling work with or
-without a shader. Without OpenGL 3.3 (or with `opengl = 0`) the game runs on the plain SDL renderer and the Shader row
-is greyed out. None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU frame.
+## The settings menu
 
-The Graphics section also has HD Mode 7 (off, 2x, 3x, 4x): snesrecomp's opt-in renderer (`docs/HD_MODE7.md` in
-the submodule) draws Mode 7 lines at that multiple of the native resolution and copies every other line pixel for
-pixel. The Lion King never switches to Mode 7 (no Mode 7 line on any speedrun or play tape), so in this game the
-picture is the same with it on; it costs CPU time and hands a shader a 2-4x larger picture.
+The menu is [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui)'s in-game menu, the same one other recomps
+use, drawn with Dear ImGui over the game. Up/Down pick a section, Enter opens it, Left/Right change a value, Esc goes
+back.
+
+| Section | What's in it |
+|---|---|
+| Display | window scale, fullscreen, vsync, aspect, how much the menu dims the game |
+| Graphics | shader, smooth and integer scaling, HD Mode 7 |
+| Audio | sound on/off, volume |
+| Level select | level, invulnerability, start |
+| Practice | practice mode on/off |
+| Controls | pick a SNES button, press Enter (or pad A), then the new key *or* pad button. Esc or Guide cancels; "Reset defaults" restores the tables above |
+| System | Resume, Quit (press twice) |
+
+Every change is saved to `tlk_sdl.ini` (the file is rewritten, so comments are dropped). Without OpenGL 3.3 the menu
+is drawn small inside the game picture.
+
+**Video.** The picture goes through snesrecomp's OpenGL 3.3 presenter. The Shader row cycles the bundled presets
+(CRT, LCD grid, Sharpen, Composite; CC0, from snesrecomp's `runner/assets/shaders`), which the build copies to
+`build/assets/shaders` and the release packages ship next to the binary. Aspect, Smooth and Integer scaling work
+with or without a shader. Without OpenGL 3.3 (or with `opengl = 0`) the game runs on the plain SDL renderer and the
+Shader row is greyed out. None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU
+frame.
+
+**HD Mode 7** (off, 2x, 3x, 4x) is snesrecomp's opt-in renderer (`docs/HD_MODE7.md` in the submodule). It draws Mode
+7 lines at that multiple of the native resolution. The Lion King never uses Mode 7 (no Mode 7 line on any speedrun or
+play tape), so here the picture is the same with it on; it costs CPU time and hands a shader a 2-4x larger picture.
+
+### The settings file
 
 Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_INI`):
 
@@ -120,11 +149,7 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     pad_start = start
     pad_turbo = rightstick
 
-Packaging: `scripts/package.sh` builds `dist/TLKRecomp-linux-x86_64.tar.gz` (binary + README + license notes, no ROM
-and no game data). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` the same way from the MinGW
-cross build (`build-win/`). `cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
-
-### Practice mode
+## Practice mode
 
 "Practice" in the settings menu (or `speedrun = practice` in the ini) is for learning a route, like SBDWolf's
 practice hack. It only reads the game's memory, so the game plays exactly the same with it on or off.
@@ -144,7 +169,7 @@ practice hack. It only reads the game's memory, so the game plays exactly the sa
 - **F9** restarts the level: it loads a save state taken automatically when the level finished loading
   (`tlk_practice_restart.state`).
 
-### Level select
+## Level select
 
 The menu's Level select section works with practice mode on or off. Pick a **Level** and **Invulnerable** (Off,
 Infinite health, Infinite lives) with Left/Right; nothing happens until you press Enter (or pad A) on the third row,
@@ -166,12 +191,39 @@ refills health every frame, infinite lives puts the count back to 3 before each 
 | `allbugsF.read.tape` | [Lion King All Bugs Final WIP](https://tasvideos.org/UserFiles/Info/639031773616833383) by ShgofcTAS, whole game with bonus stages |
 
 Use `--input-polled`, not `--input`: these tapes hold one pad value per game pad read, not one per frame, and
-played with `--input` they desync at once. `--no-pace` fast-forwards. They were converted from the authors' BizHawk movies
-(`tools/bk2_to_tape.py`, `docs/VERIFYING.md`): the button presses, re-timed to the game's pad reads. The movies
-are published on TASVideos under [CC BY 2.0](https://creativecommons.org/licenses/by/2.0/), and so are these
+played with `--input` they desync at once. `--no-pace` fast-forwards. They were converted from the authors' BizHawk
+movies (`tools/bk2_to_tape.py`, `docs/VERIFYING.md`): the button presses, re-timed to the game's pad reads. The
+movies are published on TASVideos under [CC BY 2.0](https://creativecommons.org/licenses/by/2.0/), and so are these
 tapes; credit the authors above when you reuse them.
 
-## Repository layout
+## Windows and packages
+
+Windows x86_64 is cross-built on Linux with MinGW-w64 (`x86_64-w64-mingw32-gcc`). SDL3 (pinned, fetched) and the
+MinGW runtime are linked statically, so the `.exe` files need only system DLLs:
+
+    python3 scripts/generate_snesrecomp.py   # if generated/ is empty
+    cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DTLK_STATIC_SDL=ON
+    cmake --build build-win --target tlk_headless tlk_sdl
+
+`build-win/tlk_headless.exe` and `tlk_sdl.exe` run under Wine with the same arguments as the Linux builds
+(`docs/VERIFYING.md`); real Windows has not been tested yet.
+
+`scripts/package.sh` builds `dist/TLKRecomp-linux-x86_64.tar.gz` (binary, README and license notes; no ROM and no
+game data). `scripts/package_win.sh` builds `dist/TLKRecomp-windows-x86_64.zip` the same way from `build-win/`.
+`cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
+
+## How it works
+
+The ROM's code is found and translated to C ahead of time, then compiled like any other program: 1,305 of 1,305
+known routines are compiled. About 4% of non-idle CPU time on the test tapes still runs in snesrecomp's interpreter,
+for code the game enters in a CPU mode the compiler can't handle yet. The interpreter (`--lle`) is also the
+reference: the compiled build must produce the same frames and RAM as it for the same input. `docs/HOW_IT_WORKS.md`
+explains the pipeline, and `docs/devlog.md` has every fix with its evidence.
+
+`build/tlk_headless` is the windowless test host; `tlk_sdl` runs the same emulation path. With tapes in place
+(`tools/make_play_tapes.py`, `tools/bk2_to_tape.py`), `scripts/compare_modes.sh`, `scripts/check_all_tapes.sh` and
+`scripts/check_allbugs.sh` compare compiled code against the interpreter. Full list: `docs/VERIFYING.md`.
 
 | Path | What |
 |---|---|
@@ -186,23 +238,19 @@ tapes; credit the authors above when you reuse them.
 
 The `snesrecomp` submodule is never edited in place.
 
-## Verifying
-
-`build/tlk_headless` is the windowless test host; `tlk_sdl` runs the same emulation path. With tapes in place
-(`tools/make_play_tapes.py`, `tools/bk2_to_tape.py`), `scripts/compare_modes.sh`, `scripts/check_all_tapes.sh` and
-`scripts/check_allbugs.sh` compare compiled code against the interpreter (`--lle`). Full list: `docs/VERIFYING.md`.
-
 ## Credits
 
 - [snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp) (RetroPortingToolKit); project layout follows
   [DKC3Recomp](https://github.com/elliotttate/DKC3Recomp).
 - Reference runs: TASVideos movies #6987 (EZGames69, SBDWolf, Akiteru, ShgofcTAS), #6781 (EZGames69, SBDWolf, Akiteru),
   #4735 (EZGames69, SBDWolf), #2716 (Tompa), and ShgofcTAS's All Bugs run.
+- Practice mode follows SBDWolf's Lion King practice hack.
 - Prototype and unused-content research: The Cutting Room Floor, Hidden Palace.
 
 ## Legal
 
-The Lion King is (c) Disney / Virgin Interactive. This project is not affiliated with or endorsed by them.
-This repository's own code is MIT (`LICENSE`); the speedrun tapes in `tapes/` are CC BY 2.0 (see above). snesrecomp is under the PolyForm Noncommercial License 1.0.0, so builds of this project may not be sold or used
-commercially. Release binaries contain the game's program code translated to native code and do nothing without
-your own ROM.
+The Lion King is (c) Disney / Virgin Interactive. This project is not affiliated with or endorsed by them. The
+screenshots in `docs/img/` are of the game running in this port and are shown to document it.
+This repository's own code is MIT (`LICENSE`); the speedrun tapes in `tapes/` are CC BY 2.0 (see above). snesrecomp
+is under the PolyForm Noncommercial License 1.0.0, so builds of this project may not be sold or used commercially.
+Release binaries contain the game's program code translated to native code and do nothing without your own ROM.
