@@ -1,7 +1,8 @@
 name: release
 
 # Builds the Linux, Windows and macOS players for a v* tag and publishes them
-# as one release here and on the GitHub mirror.
+# as one release here and on the GitHub mirror: Linux .AppImage and .tar.gz,
+# Windows single .exe and .zip, macOS .dmg (TLKRecomp.app) and .zip.
 #
 # The builds need the ROM, which never leaves the build machines: the repo
 # variables TLK_ROM (teresa) and TLK_ROM_MAC (the MacBook) are its path there
@@ -49,7 +50,9 @@ jobs:
           name: linux-windows
           path: |
             dist/TLKRecomp-linux-x86_64.tar.gz
+            dist/TLKRecomp-linux-x86_64.AppImage
             dist/TLKRecomp-windows-x86_64.zip
+            dist/TLKRecomp-windows-x86_64.exe
 
   macos:
     runs-on: macos-arm64
@@ -60,6 +63,7 @@ jobs:
       CC: /usr/bin/clang
       CXX: /usr/bin/clang++
       CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER: /usr/bin/clang
+      TLK_VERSION: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -81,7 +85,9 @@ jobs:
       - uses: actions/upload-artifact@v3
         with:
           name: macos
-          path: dist/TLKRecomp-macos-arm64.zip
+          path: |
+            dist/TLKRecomp-macos-arm64.dmg
+            dist/TLKRecomp-macos-arm64.zip
 
   publish:
     needs: [linux-windows, macos]
@@ -103,7 +109,7 @@ jobs:
           mkdir -p dist
           mv artifacts/*/TLKRecomp-* dist/
           cd dist
-          sha256sum TLKRecomp-linux-x86_64.tar.gz TLKRecomp-windows-x86_64.zip TLKRecomp-macos-arm64.zip > SHA256SUMS
+          sha256sum TLKRecomp-* > SHA256SUMS
           cd ..
           prev=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)
           {
@@ -111,9 +117,15 @@ jobs:
             echo
             echo "The game is not included. You need your own ROM: \`Lion King, The (USA).sfc\`,"
             echo "SHA-256 \`457abe634e0a8be03e29513a3dca8f3e9d0ddc6bf97d8931f2316094260f3712\`."
-            echo "Unpack, put the ROM next to \`tlk_sdl\` (or pick it in the dialog) and run it. README.txt in the package has the rest."
             echo
-            echo "The macOS build is not notarized: allow it in System Settings > Privacy & Security on first start (README.txt)."
+            echo "| | Download | |"
+            echo "|---|---|---|"
+            echo "| Windows | \`TLKRecomp-windows-x86_64.exe\` | one file: put the ROM next to it and double-click |"
+            echo "| Linux | \`TLKRecomp-linux-x86_64.AppImage\` | \`chmod +x\`, run; settings and a ROM go next to it |"
+            echo "| macOS (Apple Silicon) | \`TLKRecomp-macos-arm64.dmg\` | drag TLKRecomp.app to Applications; first start: System Settings > Privacy & Security > Open Anyway |"
+            echo
+            echo "The \`.zip\` / \`.tar.gz\` files hold the same program as a folder. Without a ROM next to it, the game asks for one and remembers it."
+            echo "Nothing is signed by a known publisher, so Windows SmartScreen and macOS Gatekeeper warn on first start. README.txt in each package has the details."
             echo
             if [ -n "$prev" ]; then
               echo "## Changes since $prev"

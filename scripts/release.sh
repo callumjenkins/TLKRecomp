@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Build, check and pack the release packages into dist/:
-# TLKRecomp-linux-x86_64.tar.gz, TLKRecomp-windows-x86_64.zip and SHA256SUMS.
+# TLKRecomp-linux-x86_64.{tar.gz,AppImage}, TLKRecomp-windows-x86_64.{zip,exe}
+# and SHA256SUMS.
 #
 # usage: scripts/release.sh -r ROM
 # Generates the C from ROM, builds tlk_headless and tlk_sdl for Linux
@@ -8,18 +9,20 @@
 # and scripts/package_win.sh use, and compares compiled mode with --lle on
 # both (Windows under Wine): attract mode at frames 600 and 3000, and the
 # 6987M speedrun tape at frame 6000. Any MISMATCH, WRAM difference or missing
-# hash stops it before anything is packed. .gitea/workflows/release.yml runs
-# this on a v* tag.
+# hash stops it before anything is packed. Then the AppImage and the single
+# .exe (under Wine) are run for 600 frames, with no window, and must show the
+# same frame as the checks did. .gitea/workflows/release.yml runs this on a
+# v* tag.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ROM=""
 while getopts "r:" opt; do
     case $opt in
         r) ROM=$OPTARG ;;
-        *) sed -n '2,12p' "$0"; exit 2 ;;
+        *) sed -n '2,16p' "$0"; exit 2 ;;
     esac
 done
-[ -f "$ROM" ] || { sed -n '2,12p' "$0"; echo "ROM not found: '$ROM'" >&2; exit 2; }
+[ -f "$ROM" ] || { sed -n '2,16p' "$0"; echo "ROM not found: '$ROM'" >&2; exit 2; }
 JOBS=$(nproc 2>/dev/null || echo 4)
 GATE="$ROOT/build-pkg/release-gate"
 DIST="$ROOT/dist"
@@ -63,6 +66,23 @@ for run in "" -6987M; do
 done
 
 "$ROOT/scripts/package.sh" -b "$ROOT/build-pkg"
+"$ROOT/scripts/package_appimage.sh" -b "$ROOT/build-pkg"
 "$ROOT/scripts/package_win.sh" -b "$ROOT/build-win"
-(cd "$DIST" && sha256sum TLKRecomp-linux-x86_64.tar.gz TLKRecomp-windows-x86_64.zip >SHA256SUMS)
+
+# The packed players start and show the frame the checks saw at 600. No
+# window (dummy video), no FUSE (extract-and-run) and no AppImageLauncher
+# (it would ask to integrate the file).
+want=$(awk '$1 == 600 {print $3}' "$GATE/linux.txt")
+run_pkg() { # name command...
+    name=$1; shift
+    got=$(SDL_VIDEO_DRIVER=dummy APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGELAUNCHER_DISABLE=1 WINEDEBUG=-all \
+          "$@" --rom "$ROM" --no-audio --frames 600 2>/dev/null | sed -n 's/^frame_sha256=//p' | cut -c1-16)
+    echo "$name f600: ${got:-none} (want $want)"
+    [ "$got" = "$want" ] || { echo "$name: wrong or no frame" >&2; exit 1; }
+}
+run_pkg AppImage "$DIST/TLKRecomp-linux-x86_64.AppImage"
+run_pkg exe wine "$DIST/TLKRecomp-windows-x86_64.exe"
+
+(cd "$DIST" && sha256sum TLKRecomp-linux-x86_64.tar.gz TLKRecomp-linux-x86_64.AppImage \
+    TLKRecomp-windows-x86_64.zip TLKRecomp-windows-x86_64.exe >SHA256SUMS)
 cat "$DIST/SHA256SUMS"
