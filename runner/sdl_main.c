@@ -1703,17 +1703,31 @@ static void Usage(void) {
         "current directory are tried. Needs The Lion King (USA), CRC32 C8FBFAA8.\n");
 }
 
-/* No --rom: try every .sfc/.smc next to the binary, then in the current
+/* Probe by creating a file: access(W_OK) is unreliable on Windows. */
+static int CwdWritable(void) {
+    FILE *f = fopen(".tlk_write_probe", "wb");
+    if (!f) return 0;
+    fclose(f);
+    remove(".tlk_write_probe");
+    return 1;
+}
+
+/* No --rom: try every .sfc/.smc next to the binary, then next to the ini
+ * (beside the .AppImage, or the per-user folder), then in the current
  * directory, and take the first that verifies. Prints what was rejected. */
 static uint8_t *FindRom(size_t *size, char *found, size_t found_n) {
     const char *base = SDL_GetBasePath();
     char *cwd = SDL_GetCurrentDirectory();
-    const char *dirs[2] = { base ? base : "./", "./" };
-    int same = base && cwd && !strcmp(base, cwd);   /* both end in a separator */
-    SDL_free(cwd);
+    char ini_dir[1100] = "";
+    const char *sl = LastSep(s_cfg_path);
+    if (sl) snprintf(ini_dir, sizeof ini_dir, "%.*s/", (int)(sl - s_cfg_path), s_cfg_path);
+    const char *dirs[3] = { base ? base : "./", ini_dir, "./" };
+    const char *real[3] = { dirs[0], ini_dir, cwd ? cwd : "./" };  /* to skip repeats */
     int tried = 0;
-    for (int d = 0; d < 2; d++) {
-        if (d == 1 && (same || !base)) break;
+    for (int d = 0; d < 3; d++) {
+        int repeat = !real[d][0];
+        for (int e = 0; e < d && !repeat; e++) repeat = !strcmp(real[d], real[e]);
+        if (repeat) continue;
         for (int pat = 0; pat < 2; pat++) {
             int n = 0;
             char **names = SDL_GlobDirectory(dirs[d], pat ? "*.smc" : "*.sfc", SDL_GLOB_CASEINSENSITIVE, &n);
@@ -1726,6 +1740,7 @@ static uint8_t *FindRom(size_t *size, char *found, size_t found_n) {
                 if (rom) {
                     snprintf(found, found_n, "%s", path);
                     SDL_free(names);
+                    SDL_free(cwd);
                     return rom;
                 }
                 uint32_t crc = 0;
@@ -1743,9 +1758,10 @@ static uint8_t *FindRom(size_t *size, char *found, size_t found_n) {
             SDL_free(names);
         }
     }
+    SDL_free(cwd);
     fprintf(stderr,
         "No ROM given and no matching ROM found (%d candidate%s checked) next to the binary\n"
-        "(%s) or in the current directory.\n"
+        "(%s), next to the ini or in the current directory.\n"
         "Run: tlk_sdl --rom \"/path/to/Lion King, The (USA).sfc\"\n"
         "The ROM is not included. It must be The Lion King (USA), CRC32 C8FBFAA8\n"
         "(headered copies are accepted).\n", tried, tried == 1 ? "" : "s", dirs[0]);
@@ -1848,6 +1864,17 @@ int main(int argc, char **argv) {
     ResetBindings();
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--config") && i + 1 < argc) cfg_path = argv[i + 1];
+    /* A .app started from Finder runs in /: no ini (or saves) can go there,
+     * so they go to the per-user folder (~/Library/Application Support/TLKRecomp). */
+    static char pref_ini[1100];
+    if (!strcmp(cfg_path, "tlk_sdl.ini") && !getenv("TLK_SDL_INI") && !CwdWritable()) {
+        char *pref = SDL_GetPrefPath("", "TLKRecomp");
+        if (pref) {
+            snprintf(pref_ini, sizeof pref_ini, "%stlk_sdl.ini", pref);
+            cfg_path = pref_ini;
+            SDL_free(pref);
+        }
+    }
     LoadConfig(cfg_path);
     s_cfg_path = cfg_path;
 
