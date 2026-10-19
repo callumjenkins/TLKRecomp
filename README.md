@@ -13,6 +13,22 @@ cartridge, from the Westwood logo to the last hit on Scar. It runs on Linux and 
 (`Lion King, The (USA).sfc`, 3 MiB headerless, SHA-256 `457abe63...0f3712`); the build reads it and generates the C
 on your machine.
 
+## Status
+
+![Recompilation status: routines compiled 100%, game code run compiled 94.5%, functions found 93.9%, tapes matching the interpreter 100%, speedruns in sync 100%](docs/img/status.png)
+
+- **Routines compiled**: every entry point the recompiler knows about has a compiled C body.
+- **Game code run compiled**: share of the instructions on a whole-game run (All Bugs, idle loops excluded) that
+  run as compiled C. The rest still runs in snesrecomp's interpreter: a few routines the game enters in a CPU mode
+  the compiler can't handle yet.
+- **Functions found**: entry points known to the recompiler, out of about 1,390 known to exist. The real total is
+  probably 1,450-1,550; the rest are reached only through pointers (`docs/function_count.md`).
+- **Tapes match interpreter**: 71 hand-made input tapes give the same frame and RAM compiled and interpreted.
+- **Speedruns in sync**: three TASVideos runs and All Bugs, game RAM checked against BizHawk (bsnes).
+
+The card is drawn by `tools/status_card.py`, in the colours of the game's HUD; each number in it names the command
+that measured it.
+
 ## Features
 
 - **The whole game**, start to finish, bonus stages included, on keyboard or gamepad.
