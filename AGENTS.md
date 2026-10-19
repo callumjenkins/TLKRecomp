@@ -61,7 +61,12 @@ changed.
 
 Windows: MinGW-w64 cross build into `build-win/` (commands in README), run and gate it under Wine
 (`scripts/compare_modes.sh -b <wrapper that execs wine build-win/tlk_headless.exe>`). Never tested on real
-Windows. macOS: not attempted; needs a Mac or CI runner, and ucontext fibers on arm64 are unproven.
+Windows. macOS (Apple Silicon): `scripts/package_mac.sh` on a Mac with Xcode, cmake and ninja; built and run on one
+MacBook (2026-10-18), ucontext fibers work there. Never gated: no `--lle` comparison has been run on macOS.
+
+Releases: a `v*` tag runs `.gitea/workflows/release.yml`: Linux and Windows on teresa (`scripts/release.sh`, quick
+`--lle` checks), macOS on the MacBook's repo-scoped runner (`~/tlkrecomp-ci`, launchd agent
+`com.kinduff.tlkrecomp-runner`), then one release on Gitea and on the GitHub mirror. Run the full gates before tagging.
 
 ## Hosts
 

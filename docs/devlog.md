@@ -2187,3 +2187,34 @@ tlk_sdl, Xvfb, 6987M f6000 --dump-window          level 1, Simba on the ledge, l
 Not run: the setup-host configuration (`-DSNESRECOMP_SETUP_HOST=ON` with an empty `generated/`), which now
 compiles `setup_host_dispatch.c` in the game library; TLK does not ship one. Not tested: real Windows, the release
 packages, the owner's desktop.
+
+## Task REL: release builds for Linux, Windows and macOS
+
+A `v*` tag now builds and publishes the players (`.gitea/workflows/release.yml`). The ROM never leaves the build
+machines; repo variables `TLK_ROM` / `TLK_ROM_MAC` give its path on each.
+
+- teresa (host runner, `docker-build`): `scripts/release.sh` generates, builds Linux and MinGW, compares compiled
+  mode with `--lle` on both (Windows under Wine) at attract 600/3000 and 6987M f6000, requires Linux and Windows
+  hashes to agree, then packs. `compare_modes.sh -p TAPE` (new) feeds `*.read.tape` with `--input-polled`.
+- macOS arm64: `scripts/package_mac.sh` (static SDL3, only system frameworks linked, ad-hoc re-signed after strip).
+  `runner/tlk_fiber.c` needed `_XOPEN_SOURCE`/`_DARWIN_C_SOURCE` for ucontext and a `MAP_STACK` fallback; the
+  fibers work on arm64. Built on the MacBook's own runner (repo-scoped, `~/tlkrecomp-ci`, launchd agent
+  `com.kinduff.tlkrecomp-runner`, cmake/ninja/node as nix out-links in `~/tlkrecomp-ci/tools`). By the owner's call
+  the Mac build is only built and run, not compared.
+- publish (teresa): one release with all three packages and SHA256SUMS on Gitea, then on the GitHub mirror with
+  the `GH_RELEASE_TOKEN` secret once the hook has pushed the tag.
+
+Evidence (2026-10-18):
+
+```
+scripts/release.sh, worktree, cold (no ccache hits)   14:20
+linux / windows (Wine) attract 600, 3000            MATCH, WRAM same (57ccb8d5, c897f389)
+linux / windows (Wine) -p 6987M.read.tape 6000      MATCH, WRAM same (a07184e1)
+Mac generate + build (8 threads, cold)              ~15 s + ~60 s
+Mac tlk_headless attract 3000 / 6987M polled 6000   result=completed, pictures right (title, level 2)
+Mac packed zip, ROM beside tlk_sdl, 600 frames      found the ROM, 60.2 fps, codesign -v ok
+Mac tlk_sdl 6987M 1500 frames from ssh              59.9 fps, rc 0; window not seen (screencapture denied)
+```
+
+Not run: the full gates (this change touches only the Apple branch of `tlk_fiber.c` and a new option in
+`compare_modes.sh`). Not tested: the macOS build on any other Mac, Gatekeeper on a downloaded zip.
