@@ -40,6 +40,7 @@
 #include "tlk_game.h"
 #include "verified_rom.h"
 #include "tlk_savestate.h"
+#include "tlk_wide.h"
 
 #include "common_cpu_infra.h"
 #include "common_rtl.h"
@@ -311,7 +312,8 @@ static void Usage(void) {
         "                    [--dump-every K] [--input tape | --input-polled tape]\n"
         "                    [--ram-log path] [--log path]\n"
         "                    [--interp-targets file] [--lle]\n"
-        "                    [--save-at N state] [--load state]\n");
+        "                    [--save-at N state] [--load state]\n"
+        "                    [--wide W [--wide-hud] [--wide-png path] [--wide-spawn]]\n");
 }
 
 int main(int argc, char **argv) {
@@ -319,6 +321,10 @@ int main(int argc, char **argv) {
     const char *ram_log_path = NULL;
     long frames = 600, dump_every = 0, save_at = -1;
     const char *save_path = NULL, *load_path = NULL;
+    /* --wide W: run tlk_wide.c's compositor every frame at width W and report
+     * how its centre compares with the PPU's picture (presentation only). */
+    int wide = 0, wide_hud = 0, wide_spawn = 0;
+    const char *wide_png = NULL;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -334,10 +340,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--save-at") && v && i + 2 < argc) { save_at = strtol(v, NULL, 10); save_path = argv[i + 2]; i += 2; }
         else if (!strcmp(a, "--load") && v) { load_path = v; i++; }
         else if (!strcmp(a, "--lle")) setenv("SNESRECOMP_LLE_BOUNCE", "0", 1);
+        else if (!strcmp(a, "--wide") && v) { wide = atoi(v); i++; }
+        else if (!strcmp(a, "--wide-hud")) wide_hud = 1;
+        else if (!strcmp(a, "--wide-spawn")) wide_spawn = 1;   /* changes the game: hashes differ */
+        else if (!strcmp(a, "--wide-png") && v) { wide_png = v; i++; }
         else if ((!strcmp(a, "--log") || !strcmp(a, "--coverage-log")) && v) { log_path = v; i++; }
         else { Usage(); return 2; }
     }
     if (!rom_path) { Usage(); return 2; }
+    if (wide && (wide < 256 || wide > TLK_WIDE_MAX_WIDTH || (wide & 1))) { fprintf(stderr, "bad --wide (even, 256-%d)\n", TLK_WIDE_MAX_WIDTH); return 2; }
     if (frames < 1 || frames > 10000000) { fprintf(stderr, "bad --frames\n"); return 2; }
 
     size_t rom_size = 0;
@@ -377,6 +388,12 @@ int main(int argc, char **argv) {
         interp_bridge_add_pre_opcode_hook(0x00A07C, PollHook);
         g_tlk_aot_pad_read_hook = PollHookCompiled; /* task CC: compiled $C0A05D / $C0A073 */
     }
+    static uint32_t wide_px[TLK_WIDE_MAX_WIDTH * TLK_WIDE_HEIGHT];
+    unsigned long wide_frames = 0, wide_stage = 0, wide_custom = 0, wide_bad_frames = 0;
+    unsigned long long wide_mismatch = 0, wide_margin_obj = 0;
+    long wide_first_bad = -1;
+    if (wide) { TlkWideSetRom(rom, rom_size); TlkWideEnable(true); }
+    if (wide && wide_spawn) TlkWideSetSpawnLead((wide - 256) / 2);
     /* Logs are opened "wb" so a Windows build writes the same bytes (no CRLF). */
     FILE *ram_log = ram_log_path ? fopen(ram_log_path, "wb") : NULL;
     if (ram_log_path && !ram_log) { fprintf(stderr, "cannot write %s\n", ram_log_path); return 7; }
@@ -442,6 +459,20 @@ int main(int argc, char **argv) {
         }
         PpuBeginDrawing(g_ppu, s_pixels, kWidth * kBpp, kPpuRenderFlags_NewRenderer);
         kTlkGameInfo.draw_ppu_frame();
+        if (wide && TlkWideEndFrame(s_pixels) && TlkWideDraw(wide_px, wide, wide_hud != 0)) {
+            TlkWideStats ws = TlkWideGetStats();
+            wide_frames++;
+            wide_stage += ws.stage;
+            wide_custom += ws.custom_lines;
+            wide_mismatch += ws.native_mismatch;
+            wide_margin_obj += ws.margin_sprite_pixels;
+            if (ws.native_mismatch) { wide_bad_frames++; if (wide_first_bad < 0) wide_first_bad = frame + 1; }
+            if (wide_png && dump_every > 0 && (frame + 1) % dump_every == 0) {
+                char p[1024];
+                StemPath(p, sizeof p, wide_png, frame + 1);
+                WritePng(p, (const uint8_t *)wide_px, wide, kHeight, wide * kBpp);
+            }
+        }
         if (g_fail) { fprintf(stderr, "runtime failure (g_fail) at frame %ld\n", frame); break; }
         if (save_path && frame + 1 == save_at) {
             if (!tlk_state_save(save_path, (uint32_t)(frame + 1))) { fprintf(stderr, "cannot save state %s\n", save_path); return 8; }
@@ -492,6 +523,15 @@ int main(int argc, char **argv) {
     printf("\n");
 
     int rc = g_fail ? 6 : 0;
+    if (wide) {
+        printf("wide=%d frames=%lu stage_frames=%lu custom_lines=%lu native_mismatch=%llu mismatch_frames=%lu "
+               "first_mismatch_frame=%ld margin_sprite_pixels=%llu\n", wide, wide_frames, wide_stage, wide_custom,
+               wide_mismatch, wide_bad_frames, wide_first_bad, wide_margin_obj);
+        if (wide_png) {
+            if (WritePng(wide_png, (const uint8_t *)wide_px, wide, kHeight, wide * kBpp)) printf("wide_png=%s\n", wide_png);
+            else { fprintf(stderr, "cannot write %s\n", wide_png); rc = 7; }
+        }
+    }
     if (dump_png) {
         if (WritePng(dump_png, s_pixels, kWidth, kHeight, kWidth * kBpp))
             printf("dump_png=%s\n", dump_png);
