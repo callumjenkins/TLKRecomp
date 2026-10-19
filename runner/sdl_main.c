@@ -106,6 +106,7 @@
 void snesrecomp_opengl_set_overlay(void (*draw)(int, int));   /* cmake/runtime-patches/opengl.hunks */
 void OpenGLRenderer_Create(struct RendererFuncs *funcs);
 void TlkVideoConfig(const char *shader, int aspect, int smooth);   /* tlk_video.c */
+void TlkAssetPath(const char *rel, char *out, size_t n);           /* tlk_assets.c */
 
 #include <ctype.h>
 #include <math.h>
@@ -991,9 +992,8 @@ static int OpenVideo(void) {
             s_gl_on = s_gl.Initialize(win);
         }
         if (s_gl_on) {   /* the presenter's context is current here */
-            char font[1100];
-            const char *base = SDL_GetBasePath();
-            snprintf(font, sizeof font, "%sassets/fonts/LatoLatin-Regular.ttf", base ? base : "");
+            char font[1200];
+            TlkAssetPath("assets/fonts/LatoLatin-Regular.ttf", font, sizeof font);
             s_menu_gl = TlkMenuImguiInit(win, font, 18.0f);   /* recomp-ui's theme size */
             if (!s_menu_gl) fprintf(stderr, "menu: Dear ImGui did not start; drawing it in the game picture\n");
             snesrecomp_opengl_set_overlay(DrawOverlay);

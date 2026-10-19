@@ -141,6 +141,7 @@ if(TLK_BUILD_HOSTS)
     add_executable(tlk_sdl ${TLK_COMMON_SOURCES}
         ${TLK_RUNNER_DIR}/sdl_main.c
         ${TLK_RUNNER_DIR}/tlk_video.c
+        ${TLK_RUNNER_DIR}/tlk_assets.c
         ${TLK_RUNNER_DIR}/headless_host.c
         ${TLK_RUNNER_DIR}/verified_rom.c)
     tlk_configure_target(tlk_sdl)
@@ -159,6 +160,23 @@ if(TLK_BUILD_HOSTS)
     include("${RECOMP_UI_ROOT}/recomp_ui.cmake")
     target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_menu_imgui.cpp)
     recomp_target_launcher_ui(tlk_sdl CONSOLE snes)
+    # The font and shader presets, compiled in for the single Windows .exe
+    # (runner/tlk_assets.c). The font comes first: it is the file probed.
+    include(cmake/TlkEmbedAssets.cmake)
+    set(tlk_shader_dir "${SNESRECOMP_ROOT}/runner/assets/shaders")
+    file(GLOB_RECURSE tlk_shader_files RELATIVE "${tlk_shader_dir}" CONFIGURE_DEPENDS
+         "${tlk_shader_dir}/*.glslp" "${tlk_shader_dir}/*.glsl")
+    set(tlk_embedded
+        "assets/fonts/LatoLatin-Regular.ttf=${RECOMP_UI_ROOT}/assets/common/fonts/LatoLatin-Regular.ttf")
+    foreach(f IN LISTS tlk_shader_files)
+        list(APPEND tlk_embedded "assets/shaders/${f}=${tlk_shader_dir}/${f}")
+    endforeach()
+    tlk_embed_assets(tlk_sdl "${CMAKE_CURRENT_BINARY_DIR}/tlk_assets_data.c" ${tlk_embedded})
+    # Windows: the app icon (packaging/icon, tools/make_icon.py).
+    if(WIN32)
+        enable_language(RC)
+        target_sources(tlk_sdl PRIVATE packaging/tlk_sdl.rc)
+    endif()
 else()
     target_sources(snesrecomp_game PRIVATE ${GENERATED_SOURCES})
 endif()
