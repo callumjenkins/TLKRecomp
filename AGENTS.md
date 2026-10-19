@@ -25,6 +25,8 @@ heading.
 - **No game data in git.** No ROMs, extracted assets, generated C (`generated/`) or BizHawk movies. The `.gitignore` covers ROMs, `build*/`, `generated/`. The four `tapes/*.read.tape` files are
   the only input data committed: CC BY 2.0, converted from TASVideos movies (`LICENSE`, README
   "Watching a speedrun"). Any new tape needs the same credit line and license check before it is committed.
+  The one exception for pictures: the README screenshots in `docs/img/` (owner's call, 2026-10-18). Keep them few,
+  small and taken from this port; add new ones only when asked.
 - **Never edit the `recomp-ui/` submodule** (MIT): it is `tlk_sdl`'s settings menu. TLK supplies the rows and
   callbacks (`runner/sdl_main.c`) and the Dear ImGui glue (`runner/tlk_menu_imgui.cpp`).
 - **Never edit the `snesrecomp/` submodule.** Codegen changes go in `patches/snesrecomp/NNNN-*.patch` (applied to a
