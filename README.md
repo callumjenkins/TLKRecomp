@@ -7,11 +7,11 @@
 TLKRecomp is a static recompilation of the US release, built with
 [snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp). The game's 65816 program is translated to C and
 compiled for your CPU; graphics, sound and timing run on snesrecomp's emulated PPU and SPC, so it plays like the
-cartridge, from the Westwood logo to the last hit on Scar. It runs on Linux and Windows.
+cartridge, from the Westwood logo to the last hit on Scar. It runs on Linux, Windows and macOS (Apple Silicon).
 
 **No game data is in this repository.** No ROM, no assets, no generated code. Bring your own dump
 (`Lion King, The (USA).sfc`, 3 MiB headerless, SHA-256 `457abe63...0f3712`); the build reads it and generates the C
-on your machine.
+on your machine, and the [release builds](#download) need it to start.
 
 ## Status
 
@@ -58,7 +58,28 @@ that measured it.
   </tr>
 </table>
 
-## Quick start
+## Download
+
+Ready-to-run builds are on the [releases page](https://github.com/kinduff/TLKRecomp/releases/latest). Pick one file:
+
+| System | File | How to start it |
+|---|---|---|
+| Windows x86_64 | `TLKRecomp-windows-x86_64.exe` | Put the ROM next to it and double-click it. |
+| Linux x86_64 | `TLKRecomp-linux-x86_64.AppImage` | `chmod +x` it and run it. Settings, saves and a ROM go next to it. |
+| macOS, Apple Silicon | `TLKRecomp-macos-arm64.dmg` | Drag TLKRecomp.app to Applications. |
+
+The `.zip` and `.tar.gz` files hold the same program as a folder. If no ROM is next to the program, it asks for one
+with a file dialog and remembers it. `SHA256SUMS` lists the checksums.
+
+The builds aren't signed by a known publisher, so the first start brings a warning. On Windows, SmartScreen: click
+More info, then Run anyway. On macOS, Gatekeeper refuses it: open System Settings > Privacy & Security and click Open
+Anyway. The Linux builds are made on Arch and need glibc 2.43 or newer, so they won't run on older distributions
+such as Ubuntu 24.04 or Debian 12; build from source there. The Windows build has only been run under Wine and the
+macOS build on one Mac.
+
+`README.txt` in each download covers controls, settings and where files go.
+
+## Building from source
 
 Linux needs cmake, ninja, gcc or clang, Python 3 and SDL3:
 
