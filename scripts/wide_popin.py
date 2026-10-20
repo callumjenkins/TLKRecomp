@@ -4,7 +4,9 @@
 usage: wide_popin.py OBJLOG EXTRA
 
 OBJLOG comes from TLK_WIDE_OBJLOG=<path> tlk_headless --wide W ...; EXTRA is the
-margin, (W - 256) / 2. An object whose first (or last) box is inside the view
+margin, (W - 256) / 2. At a level's end the view stops with the camera and the
+margins differ; the log's last two fields give each frame's left and right
+margin, and those are used when present. An object whose first (or last) box is inside the view
 without touching its outer edge popped in (or out) where the player can see it:
 "margin" when the box is in the margins only, "edge" when it also covers native
 columns (an enemy appearing at the old screen edge), "native" when it sits fully
@@ -18,18 +20,19 @@ def main():
     path, extra = sys.argv[1], int(sys.argv[2])
     frames = defaultdict(dict)
     for line in open(path):
-        f, obj, x0, x1, y0, y1, fixed, handler = line.split()
+        f, obj, x0, x1, y0, y1, fixed, handler, *margins = line.split()
         if fixed == "1":
             continue
-        frames[int(f)][obj] = (int(x0), int(x1), int(y0), int(y1), handler)
+        ml, mr = (int(margins[0]), int(margins[1])) if len(margins) == 2 else (extra, extra)
+        frames[int(f)][obj] = (int(x0), int(x1), int(y0), int(y1), handler, ml, mr)
 
     def where(box):
-        x0, x1, y0, y1, _ = box
+        x0, x1, y0, y1, _, ml, mr = box
         if y1 <= 0 or y0 >= 224:
             return "off"
-        if x1 <= -extra or x0 >= 256 + extra:
+        if x1 <= -ml or x0 >= 256 + mr:
             return "off"
-        if x0 <= -extra or x1 >= 256 + extra:
+        if x0 <= -ml or x1 >= 256 + mr:
             return "outer"   # crossing the view's edge: entering or leaving normally
         if x0 >= 0 and x1 <= 256:
             return "native"

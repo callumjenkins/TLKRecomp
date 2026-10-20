@@ -166,13 +166,17 @@ play tape), so here the picture is the same with it on; it costs CPU time and ha
 picture stays 256 pixels wide and untouched, and a second renderer draws a wider copy from what the console drew on
 each line. The extra columns come from data the game keeps anyway: the foreground from the level map in RAM, the
 background from its looping tilemap, and sprites from every piece the game submits, including the ones it drops for
-being off its screen. Widescreen HUD puts health and lives at the left edge and roar at the right; "in place" keeps
-them where the game draws them. The title, menus, the Stampede and the bonus stages stay 4:3 with black sides.
-Like the other video options, it changes nothing in the game: hashes and `--dump-png` are the same with it on.
+being off its screen. At a level's ends the view stops where the game's camera stops, so Simba walks towards the
+picture's edge instead of the picture showing past the level. Widescreen HUD puts health and lives at the left edge
+and roar at the right; "in place" keeps them where the game draws them. The title, menus, the Stampede and the bonus
+stages stay 4:3 with black sides. Like the other video options, it changes nothing in the game: hashes and
+`--dump-png` are the same with it on.
 
 The game only creates enemies a little beyond its own screen, and draws only those overlapping it, so in a wide
 picture they pop in and out at the old screen edges. **Widescreen enemies: out of view** widens both by the margin,
-so they appear and leave beyond the picture's edge. That one does change the game (enemies wake earlier, more are
+so they appear and leave beyond the picture's edge. The ostrich ride's obstacles come from their own script; with
+this on it runs ahead by the margin and places each obstacle that much further right, so they come into view from the
+edge and still reach Simba where and when they would. That one does change the game (enemies wake earlier, more are
 alive at once): recordings, tapes and the speedruns made without it do not replay with it on.
 
 ### The settings file

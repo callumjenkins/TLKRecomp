@@ -2387,3 +2387,55 @@ contact sheets l01/l02 21:9 option on                 looked at: monkeys, rhino,
 
 Not checked: object-slot exhaustion or lag in crowded late levels with the option on at the widest views; a whole
 playthrough with it on.
+
+### WIDE, part 3: level ends, the ostrich ride, a flying HUD bug
+
+The owner played the tapes in widescreen and reported three things: at the ends of a level (Pride Lands left and
+right, Can't Wait to Be King left) the margin showed the level mirrored instead of stopping where the camera stops;
+obstacles in "the sequences with obstacles" popped in; and the HUD glitched at the edges.
+
+**Level ends.** The margins past a level's end came from `MapTile`, which reflects the map there. The game clamps its
+camera x at `$C0B273..$C0B284` between `$A6EC` (min) and `$D8` (max); on every stage frame of the All Bugs run both
+are fixed per level, 0 and the map width - 256 (logged per frame, levels 0, 1, 2, 4, 13, 15). `ViewColumn` now places
+the view the same way: its left edge is the camera minus the margin, kept inside `[$A6EC, $D8 + 256]`, so at an end
+the native picture moves off centre (towards the end) and the margin on the other side doubles. A level narrower
+than the view (level 10, 256 wide) is centred, and columns outside the camera's range are black. The HUD pass places
+health, roar and lives by the view, not by the camera: at the edges, or where a centred picture has them ("in
+place"). Overlays in tlk_sdl stay over the frame's centre. With the option on, the spawn window and draw test take
+each side's own margin from the live camera (`LiveMargins`), so the doubled margin also gets its enemies.
+
+**Ostrich ride.** Its obstacles do not come from the spawn window: while `$0A56` is set, `$C0B5FD` compares the
+distance ridden `$0A40` (the camera's x travel, added at `$C0B36C`) with the next entry of a table at `[$BA]` and,
+once reached, `$C0BB80` (only called from there, 4 sites) creates them at x + `$140` of the object at `$AA`. Even with
+"out of view" they appeared 270-290 px into the view. The obstacles stand still in the world (-4 px per frame on
+screen, the camera's speed; the only movers after f9355 are not from the script), so with the option on the script
+runs ahead by the right margin (rounded to 16, the script's step) and places each obstacle that much further right:
+`$C0B618` (LDA `$0A56`) adds it to `$0A40`, `$C0B69F` (PLA, the common exit) takes it off, `$C0BB98` (LDY after STA
+`$88`) adds it to the new x. None of the three instructions touches what its hook changes, so compiled and `--lle`
+agree.
+
+**HUD.** A screen-fixed object went to an edge only when all of it was on one side of the middle, so one crossing
+the screen jumped by the margin twice: the bug that flies to the health box after Simba eats it (All Bugs f1781 and
+f1786, the only two side changes in 20,000 frames). `HudSide` now moves an object by its centre: all the way within
+64 px of an edge (health, roar, lives), not at all within 16 of the middle (titles), in proportion between.
+
+Evidence (2026-10-20, worktree `widescreen`):
+
+```
+All Bugs, 21:9 HUD in place, 9000 f              native_mismatch=0, edge_frames=841 (not checked against the PPU)
+6987M / 6781M / 4735M 48,000 f, 342 and 522 wide native_mismatch=0 on all six; edge_frames 3178-7212 per run
+view off centre (All Bugs, TLK_WIDE_OBJLOG margins)  level 1 start f943-983, its right end f2214-2530 and
+                                                 f3701-4107 (native picture fully right from f3872), level 2 start
+                                                 f4897-4938; pictures f980, f1000, f3880-3960 looked at: no mirrored margin
+tlk_sdl under Xvfb, 21:9, All Bugs f1000         window 1568x672, level start stops at the left edge, HUD at the edges
+ride from a f8000 state, 1500 f, 21:9            obstacles appear: as the game 25 at the native edge;
+                                                 out of view before: 24 inside the right margin; now 25 at the outer edge
+  same run, f8100-8362 (before its first extra lag frame)  every object box in the native 256 identical to as-the-game
+  both end the ride with health 6, lives 8; compiled vs --lle (option on, f8700): same frame c15e3fcc, WRAM d8219e1d
+flying bug f1774-1790, edges                     moves 4-19 px per frame towards the health box, no 133 px jump
+option off: compare_modes MATCH (57ccb8d5, c897f389, dd861e16, 946033bd), 71/71 tapes, idle, native decomp,
+  save/load 946033bd, TAS sync 36904 / 37093 / 38870, ALLBUGS PASS, exit_mx 0 WRONG, remap, pytest 23 passed
+```
+
+Not checked: "in place" HUD frames at a level's end against anything but the eye; obstacles in the stampede-like
+script path (`$DF = $041D`, `$C0BBBC`, a fixed spawn point, left alone); MinGW build.

@@ -28,6 +28,9 @@ enum {
     kPcSpawnWindow = 0x00B915, /* FN_C0B8EA: its left/right tile columns $46/$14 are set, not yet used */
     kPcCullRight = 0x00A5C2, /* FN_C0A5BA: right limit camera+256 in $14, about to be compared */
     kPcCullLeft = 0x00A5CF,  /* FN_C0A5BA: LDY between LDA $9C (box left) and ADC width; compare with camera */
+    kPcRideScript = 0x00B618, /* $C0B5FD: LDA $0A56 before the obstacle script reads distance $0A40 */
+    kPcRideScriptEnd = 0x00B69F, /* its common exit (PLA) */
+    kPcRideSpawnX = 0x00BB98,  /* $C0BB80: LDY after STA $88, the new obstacle's x */
     kMaxPieces = 512,
     kVramCopies = 4,
     kHudSlotsMax = 16,
@@ -40,7 +43,7 @@ typedef struct Piece {
     uint8_t size, slot;      /* 16 or 8; the OAM slot it gets if the game keeps it */
     bool kept;               /* the game wrote it to OAM (inside its screen test) */
     bool fixed;              /* a screen-fixed object (HUD): obj+9 bit 6, drawn with no camera */
-    int8_t side;             /* HUD at the edges: -1 left, +1 right, 0 stays (set at latch) */
+    int8_t side;             /* HUD at the edges: -64 (left edge) .. 64 (right edge), 0 stays (set at latch) */
 } Piece;
 
 /* One visible line as the PPU drew it. */
@@ -71,6 +74,8 @@ static const uint8_t *s_rom;
 static size_t s_rom_size;
 static bool s_enabled;
 static int s_spawn_lead;   /* pixels added to each side of the game's spawn window; 0 = the game's own */
+static int s_ride_lead;    /* pixels the ride script runs ahead this call (kPcRideScript..End), 0 outside */
+static int s_draw_extra;   /* the last drawn view's (width - 256) / 2, for ObjLog */
 
 static Piece s_build[kMaxPieces], s_latched[kMaxPieces];
 static unsigned s_build_count, s_latched_count;
@@ -98,6 +103,47 @@ static TlkWideStats s_stats;
 
 static unsigned rd16(const uint8_t *p) { return p[0] | p[1] << 8; }
 static uint32_t rd24(const uint8_t *p) { return p[0] | p[1] << 8 | (uint32_t)p[2] << 16; }
+
+/* Where the wide view sits. The game clamps its camera x between $A6EC and
+ * $D8 ($C0B273..$C0B284; in every level 0 and the map width - 256), and the
+ * wide view stops where the camera stops: its left edge is the camera minus
+ * the margin, kept inside [$A6EC, $D8 + 256]. A level narrower than the view
+ * is centred. Returns the native picture's column in a view width wide;
+ * *lo/*hi get the view columns that lie inside the camera's range. */
+static int ViewColumn(const uint8_t *ram, int camera, int width, int *lo, int *hi) {
+    int extra = (width - 256) / 2, min = (int)rd16(ram + 0xA6EC), max = (int)rd16(ram + 0xD8);
+    *lo = 0;
+    *hi = width;
+    if (min > max) return extra;
+    int left = camera - extra, last = max + 256 - width;
+    if (last < min) left = (min + last) / 2;
+    else left = left < min ? min : left > last ? last : left;
+    int column = camera - left;
+    column = column < 0 ? 0 : column > width - 256 ? width - 256 : column;
+    left = camera - column;
+    if (min - left > 0) *lo = min - left;
+    if (max + 256 - left < width) *hi = max + 256 - left;
+    return column;
+}
+
+/* How far towards an edge a HUD sprite centred at native column c goes, in
+ * 64ths: all the way within 64 pixels of the native edge (health, roar,
+ * lives), not at all within 16 of the middle (titles, centred text), and in
+ * between in proportion, so one that flies across the screen (a bug on its
+ * way to the health box) moves smoothly instead of jumping by the margin. */
+static int8_t HudSide(int c) {
+    int d = c - 128, a = d < 0 ? -d : d;
+    int w = a <= 16 ? 0 : a >= 64 ? 64 : (a - 16) * 64 / 48;
+    return (int8_t)(d < 0 ? -w : w);
+}
+
+/* The view's margins left and right of the native picture, from the live
+ * camera ($B29B), for the spawn and draw tests. */
+static void LiveMargins(int lead, int *left, int *right) {
+    int lo, hi, width = 256 + 2 * lead;
+    *left = ViewColumn(g_ram, (int)rd16(g_ram + 0xB29B), width, &lo, &hi);
+    *right = width - 256 - *left;
+}
 
 /* ── Piece recorder ────────────────────────────────────────────────────── */
 
@@ -164,18 +210,21 @@ static void RecordPiece(const CpuState *cpu, bool big) {
 static void WidenSpawn(CpuState *cpu) {
     const uint32_t d = cpu->D;
     if (s_spawn_lead <= 0 || ((d + 0xD1) & 0xFFFF) >= 0x2000) return;
-    unsigned k = (unsigned)(s_spawn_lead + 15) / 16 * 2;
+    int ml, mr;
+    LiveMargins(s_spawn_lead, &ml, &mr);
+    unsigned kl = (unsigned)(ml + 15) / 16 * 2, kr = (unsigned)(mr + 15) / 16 * 2;
     uint8_t *left = &g_ram[(d + 0x46) & 0xFFFF], *right = &g_ram[(d + 0x14) & 0xFFFF];
     unsigned l = left[0] | left[1] << 8, r = right[0] | right[1] << 8;
     unsigned cap = (unsigned)(g_ram[(d + 0xD0) & 0xFFFF] | g_ram[(d + 0xD1) & 0xFFFF] << 8) - 2;
-    l = l > k ? l - k : 0;
-    r = r + k < cap ? r + k : (cap > r ? cap : r);
+    l = l > kl ? l - kl : 0;
+    r = r + kr < cap ? r + kr : (cap > r ? cap : r);
     left[0] = (uint8_t)l; left[1] = (uint8_t)(l >> 8);
     right[0] = (uint8_t)r; right[1] = (uint8_t)(r >> 8);
 }
 
 /* Diagnostics: TLK_WIDE_OBJLOG=<path> writes, at each latch, one line per
- * drawn object: frame, object, x0 x1 y0 y1 of its pieces, fixed, handler. Pop-in
+ * drawn object: frame, object, x0 x1 y0 y1 of its pieces, fixed, obj+4, and
+ * the view's left and right margins (from the camera, as drawn). Pop-in
  * shows as an object whose first box is already inside the view
  * (scripts/wide_popin.py). */
 static void ObjLog(void) {
@@ -193,8 +242,10 @@ static void ObjLog(void) {
             if (q->y + q->size > y1) y1 = q->y + q->size;
         }
         unsigned o = s_latched[i].obj;
-        fprintf(f, "%d %04x %d %d %d %d %d %u\n", snes_frame_counter, o, x0, x1, y0, y1, s_latched[i].fixed,
-                (unsigned)(g_ram[(o + 4) & 0xFFFF] | g_ram[(o + 5) & 0xFFFF] << 8));
+        int ml = s_draw_extra, mr = s_draw_extra;
+        if (s_draw_extra) LiveMargins(s_draw_extra, &ml, &mr);
+        fprintf(f, "%d %04x %d %d %d %d %d %u %d %d\n", snes_frame_counter, o, x0, x1, y0, y1, s_latched[i].fixed,
+                (unsigned)(g_ram[(o + 4) & 0xFFFF] | g_ram[(o + 5) & 0xFFFF] << 8), ml, mr);
     }
 }
 
@@ -207,13 +258,47 @@ static void ObjLog(void) {
  * same; what changes is the drawing work itself (tile uploads, CPU time). */
 static void WidenCull(CpuState *cpu, bool right) {
     if (s_spawn_lead <= 0 || cpu->m_flag) return;
+    int ml, mr;
+    LiveMargins(s_spawn_lead, &ml, &mr);
     if (right) {
         uint8_t *lim = &g_ram[(cpu->D + 0x14) & 0x1FFF];
-        unsigned v = (unsigned)(lim[0] | lim[1] << 8) + (unsigned)s_spawn_lead;
+        unsigned v = (unsigned)(lim[0] | lim[1] << 8) + (unsigned)mr;
         lim[0] = (uint8_t)v; lim[1] = (uint8_t)(v >> 8);
     } else {
-        cpu->A = (uint16_t)(cpu->A + s_spawn_lead);
+        cpu->A = (uint16_t)(cpu->A + ml);
     }
+}
+
+/* The ostrich ride's obstacles come from a script, not the spawn window:
+ * while $0A56 is set, $C0B5FD compares the distance ridden ($0A40, the
+ * camera's x travel) with the next entry of a table at [$BA] and, once
+ * reached, $C0BB80 creates the obstacles at x + $140 of the object at $AA,
+ * some 30-90 pixels past the native right edge; the draw test then shows them
+ * only on reaching it. The obstacles stand still in the world, so running the script ahead by
+ * the view's right margin and placing each one that much further right
+ * leaves every obstacle where and when the game puts it, but created beyond
+ * the wider view. All three hook points leave alone what they change ($0A40,
+ * $88): an LDA of $0A56, a PLA, an LDY. This changes the game. */
+static void RideScript(CpuState *cpu, int stage) {
+    uint8_t *dist = &g_ram[0x0A40];
+    if (stage == 0) {
+        if (s_spawn_lead <= 0 || s_ride_lead || cpu->DB != 0x7E || !(g_ram[0x0A56] | g_ram[0x0A57])) return;
+        int ml, mr;
+        LiveMargins(s_spawn_lead, &ml, &mr);
+        s_ride_lead = (mr + 15) & ~15;   /* the script places on 16-pixel steps */
+    } else if (stage == 2) {
+        if (s_ride_lead) {
+            unsigned x = (unsigned)(g_ram[(cpu->D + 0x88) & 0xFFFF] | g_ram[(cpu->D + 0x89) & 0xFFFF] << 8) + (unsigned)s_ride_lead;
+            g_ram[(cpu->D + 0x88) & 0xFFFF] = (uint8_t)x;
+            g_ram[(cpu->D + 0x89) & 0xFFFF] = (uint8_t)(x >> 8);
+        }
+        return;
+    }
+    if (!s_ride_lead) return;
+    unsigned v = (unsigned)(dist[0] | dist[1] << 8) + (unsigned)(stage == 0 ? s_ride_lead : -s_ride_lead);
+    dist[0] = (uint8_t)v;
+    dist[1] = (uint8_t)(v >> 8);
+    if (stage == 1) s_ride_lead = 0;
 }
 
 static void Observe(CpuState *cpu, uint32_t pc24) {
@@ -221,6 +306,9 @@ static void Observe(CpuState *cpu, uint32_t pc24) {
     case kPcSpawnWindow: WidenSpawn(cpu); return;
     case kPcCullRight: WidenCull(cpu, true); return;
     case kPcCullLeft: WidenCull(cpu, false); return;
+    case kPcRideScript: RideScript(cpu, 0); return;
+    case kPcRideScriptEnd: RideScript(cpu, 1); return;
+    case kPcRideSpawnX: RideScript(cpu, 2); return;
     }
     if (!s_enabled) return;
     switch (pc24 & 0x3FFFFF) {
@@ -231,9 +319,9 @@ static void Observe(CpuState *cpu, uint32_t pc24) {
         s_latched_count = s_build_count;
         s_build_count = 0;
         ObjLog();
-        /* A screen-fixed object goes to the edge it sits nearer, when all of
-         * it is on one side of the centre; one across the middle (a title,
-         * centred text) stays where the game put it. */
+        /* A screen-fixed object goes towards the edge it sits nearer, by
+         * HudSide of its centre: the HUD boxes all the way, a title or text
+         * across the middle not at all. */
         for (unsigned i = 0, j; i < s_latched_count; i = j) {
             int lo = 1 << 15, hi = -(1 << 15);
             for (j = i; j < s_latched_count && s_latched[j].obj == s_latched[i].obj &&
@@ -242,7 +330,7 @@ static void Observe(CpuState *cpu, uint32_t pc24) {
                     if (s_latched[j].x < lo) lo = s_latched[j].x;
                     if (s_latched[j].x + s_latched[j].size > hi) hi = s_latched[j].x + s_latched[j].size;
                 }
-            int8_t side = !s_latched[i].fixed || lo > hi ? 0 : hi <= 128 ? -1 : lo >= 128 ? 1 : 0;
+            int8_t side = !s_latched[i].fixed || lo > hi ? 0 : HudSide((lo + hi) / 2);
             for (unsigned k = i; k < j; k++) s_latched[k].side = side;
         }
         break;
@@ -251,7 +339,8 @@ static void Observe(CpuState *cpu, uint32_t pc24) {
 
 static void ArmInterpreterHooks(void) {
     static const uint32_t pcs[] = { 0xC0A727, 0x00A727, 0xC0A7AE, 0x00A7AE, 0xC0A033, 0x00A033,
-                                    0xC0B915, 0x00B915, 0xC0A5C2, 0x00A5C2, 0xC0A5CF, 0x00A5CF };
+                                    0xC0B915, 0x00B915, 0xC0A5C2, 0x00A5C2, 0xC0A5CF, 0x00A5CF,
+                                    0xC0B618, 0x00B618, 0xC0B69F, 0x00B69F, 0xC0BB98, 0x00BB98 };
     for (size_t i = 0; i < sizeof pcs / sizeof pcs[0]; i++) interp_bridge_add_pre_opcode_hook(pcs[i], Observe);
 }
 
@@ -435,10 +524,10 @@ static uint16_t BgPixel(const Line *l, const uint16_t *vram, unsigned layer, int
 static const uint8_t kSpriteSizes[8][2] = {
     { 8, 16 }, { 8, 32 }, { 8, 64 }, { 16, 32 }, { 16, 64 }, { 32, 64 }, { 16, 32 }, { 16, 32 } };
 
-/* One row of a sprite into obj (indexed by screen x + extra), screen columns
- * [lo, hi) only. Later calls overwrite, so callers go from the lowest
+/* One row of a sprite into obj (indexed by screen x + column), screen
+ * columns [lo, hi) only. Later calls overwrite, so callers go from the lowest
  * priority sprite to the highest. Returns pixels drawn. */
-static unsigned SpriteRow(uint16_t *obj, int width, int extra, const Line *l, const uint16_t *vram, int x,
+static unsigned SpriteRow(uint16_t *obj, int width, int column, const Line *l, const uint16_t *vram, int x,
                           int row, int size, uint16_t attr, int lo, int hi) {
     if (attr & 0x8000) row = size - 1 - row;
     unsigned base = (l->obsel & 7u) << 13;
@@ -447,7 +536,7 @@ static unsigned SpriteRow(uint16_t *obj, int width, int extra, const Line *l, co
                  (0x80 + 16 * ((attr >> 9) & 7u));
     unsigned drawn = 0;
     for (int c = 0; c < size; c++) {
-        int sx = x + c, dest = sx + extra;
+        int sx = x + c, dest = sx + column;
         if (sx < lo || sx >= hi || dest < 0 || dest >= width) continue;
         int uc = (attr & 0x4000) ? size - 1 - c : c;
         unsigned t = ((((attr & 0xFFu) >> 4) + ((unsigned)row >> 3)) << 4) | (((attr & 0xFu) + ((unsigned)uc >> 3)) & 0xF);
@@ -468,7 +557,7 @@ static int OamSize(const Line *l, unsigned index) {
 /* The PPU's sprites for one line (ppu_evaluateSprites: 32 in range, 34 slivers
  * fetched backwards), inside the native columns. Slots marked in skip (HUD
  * moved to the edges) are counted but left for the caller to place. */
-static void NativeSprites(uint16_t *obj, int width, int extra, const Line *l, const uint16_t *vram, int y0,
+static void NativeSprites(uint16_t *obj, int width, int column, const Line *l, const uint16_t *vram, int y0,
                           const bool *skip) {
     uint8_t found[32];
     int count = 0, tiles = 0;
@@ -491,20 +580,20 @@ static void NativeSprites(uint16_t *obj, int width, int extra, const Line *l, co
             if (skip[idx >> 1]) continue;
             int lo = col + x < 0 ? 0 : col + x, hi = col + x + 8 > 256 ? 256 : col + x + 8;
             /* One sliver: draw the whole sprite row clipped to it. */
-            SpriteRow(obj, width, extra, l, vram, x, row, size, attr, lo, hi);
+            SpriteRow(obj, width, column, l, vram, x, row, size, attr, lo, hi);
         }
         if (tiles > 34) break;
     }
 }
 
-static bool Window(const Line *l, unsigned layer, int x, int extra) {
+static bool Window(const Line *l, unsigned layer, int x, int column, int width) {
     unsigned f = (l->windowsel >> (layer * 4)) & 15;
     int w1l = l->w1l, w1r = l->w1r, w2l = l->w2l, w2r = l->w2r;
     /* A hardware edge pinned to 0/255 means the screen edge (ppu.c). */
-    if (w1l == 0) w1l = -extra;
-    if (w1r == 255) w1r = 255 + extra;
-    if (w2l == 0) w2l = -extra;
-    if (w2r == 255) w2r = 255 + extra;
+    if (w1l == 0) w1l = -column;
+    if (w1r == 255) w1r = width - 1 - column;
+    if (w2l == 0) w2l = -column;
+    if (w2r == 255) w2r = width - 1 - column;
     bool a = (f & 2) && w1l <= w1r && x >= w1l && x <= w1r;
     bool b = (f & 8) && w2l <= w2r && x >= w2l && x <= w2r;
     if ((f & 3) == 3) a = !a;
@@ -529,19 +618,28 @@ static bool SeamAgrees(const Line *l, const uint16_t *vram, int y0, int ox, int 
                                ((unsigned)y0 + 1 + l->vofs[0]) & 1023, 8);
 }
 
-static bool s_hud_skip[128];   /* OAM slots the HUD-at-the-edges pass places itself */
+static bool s_hud_skip[128];   /* OAM slots the HUD pass places itself */
+static int8_t s_hud_side[128];  /* where it places them, as Piece.side (64ths of the way to an edge) */
+static bool s_hud_edges;
 static bool s_map_left, s_map_right;   /* margins from the level map this frame, per side */
+static int s_vis_lo, s_vis_hi;         /* view columns inside the camera's range */
 
-static void ComposeLine(uint32_t *out, int width, int extra, int y0, bool hud_edges) {
+/* How far the HUD pass moves a HUD sprite, in screen pixels: from where it
+ * sits in a centred native picture, side 64ths of the margin towards an edge. */
+static int HudShift(int side, int width, int column) {
+    int extra = (width - 256) / 2;
+    return extra + extra * side / 64 - column;
+}
+
+static void ComposeLine(uint32_t *out, int width, int column, int y0) {
     const Line *l = &s_frame.lines[y0];
     const uint16_t *vram = s_vram[l->vram];
     if (l->inidisp & 0x80) { memset(out, 0, (size_t)width * 4); return; }
 
     uint16_t obj[TLK_WIDE_MAX_WIDTH];
     memset(obj, 0, (size_t)width * sizeof obj[0]);
-    int hud_end = hud_edges ? s_frame.hud_end : 0;
     if (l->tm & 0x10 || l->ts & 0x10) {
-        NativeSprites(obj, width, extra, l, vram, y0, s_hud_skip);
+        NativeSprites(obj, width, column, l, vram, y0, s_hud_skip);
         /* Margins: every piece the game submitted, last first (OAM order).
          * Screen-fixed pieces belong to the native picture only. */
         for (int i = (int)s_frame.piece_count - 1; i >= 0; i--) {
@@ -549,25 +647,26 @@ static void ComposeLine(uint32_t *out, int width, int extra, int y0, bool hud_ed
             int row = y0 - pc->y;
             if (pc->fixed || row < 0 || row >= pc->size) continue;
             s_stats.margin_sprite_pixels +=
-                SpriteRow(obj, width, extra, l, vram, pc->x, row, pc->size, pc->attr, -extra, 0) +
-                SpriteRow(obj, width, extra, l, vram, pc->x, row, pc->size, pc->attr, 256, 256 + extra);
+                SpriteRow(obj, width, column, l, vram, pc->x, row, pc->size, pc->attr, -column, 0) +
+                SpriteRow(obj, width, column, l, vram, pc->x, row, pc->size, pc->attr, 256, width - column);
         }
-        /* HUD at the edges: screen-fixed objects, then the slots reserved
-         * before the object pass (lives), moved out by the margin. */
-        for (int i = hud_edges ? (int)s_frame.piece_count - 1 : -1; i >= 0; i--) {
+        /* The HUD: screen-fixed objects, then the slots reserved before the
+         * object pass (lives), placed by the view, not by the camera. */
+        for (int i = (int)s_frame.piece_count - 1; i >= 0; i--) {
             const Piece *pc = &s_frame.pieces[i];
             int row = y0 - pc->y;
-            if (!pc->fixed || !pc->kept || !pc->side || row < 0 || row >= pc->size) continue;
-            SpriteRow(obj, width, extra, l, vram, pc->x + pc->side * extra, row, pc->size, pc->attr, -extra,
-                      256 + extra);
+            if (!pc->fixed || !pc->kept || !s_hud_skip[pc->slot & 127] || row < 0 || row >= pc->size) continue;
+            SpriteRow(obj, width, column, l, vram, pc->x + HudShift(s_hud_side[pc->slot & 127], width, column), row,
+                      pc->size, pc->attr, -column, width - column);
         }
-        for (int s = hud_end - 1; s >= 0; s--) {
+        for (int s = s_frame.hud_end - 1; s >= 0; s--) {
             unsigned idx = (unsigned)s * 2;
             int size = OamSize(l, idx), x = OamX(l, idx);
             int row = (uint8_t)(y0 - (l->oam[idx] >> 8));
-            if (row >= size) continue;
-            x += x + size / 2 < 128 ? -extra : extra;
-            SpriteRow(obj, width, extra, l, vram, x, row, size, l->oam[idx + 1], -extra, 256 + extra);
+            if (!s_hud_skip[s] || row >= size) continue;
+            int side = s_hud_edges ? HudSide(x + size / 2) : 0;
+            SpriteRow(obj, width, column, l, vram, x + HudShift(side, width, column), row, size, l->oam[idx + 1],
+                      -column, width - column);
         }
     }
 
@@ -585,28 +684,31 @@ static void ComposeLine(uint32_t *out, int width, int extra, int y0, bool hud_ed
     const bool map_left = s_map_left, map_right = s_map_right;
 
     for (int i = 0; i < width; i++) {
-        int x = i - extra;
+        int x = i - column;
         uint16_t main = 0x0500, sub = 0x0500;   /* backdrop: layer 5, colour 0 */
-        for (unsigned layer = 0; layer < 3; layer++) {
+        /* Past where the camera stops: nothing of the level, black. */
+        bool outside = i < s_vis_lo || i >= s_vis_hi;
+        if (outside && !obj[i]) { out[i] = 0; continue; }
+        for (unsigned layer = 0; layer < 3 && !outside; layer++) {
             unsigned bit = 1u << layer;
             if (!((l->tm | (need_sub ? l->ts : 0)) & bit)) continue;
             uint16_t px = BgPixel(l, vram, layer, x, y0, x < 0 ? map_left : x >= 256 && map_right, ox, oy);
             if (!px) continue;
-            if ((l->tm & bit) && (px >> 12) > (main >> 12) && !((l->tmw & bit) && Window(l, layer, x, extra)))
+            if ((l->tm & bit) && (px >> 12) > (main >> 12) && !((l->tmw & bit) && Window(l, layer, x, column, width)))
                 main = px;
             if (need_sub && (l->ts & bit) && (px >> 12) > (sub >> 12) &&
-                !((l->tsw & bit) && Window(l, layer, x, extra)))
+                !((l->tsw & bit) && Window(l, layer, x, column, width)))
                 sub = px;
         }
         uint16_t o = obj[i];
         if (o) {
-            if ((l->tm & 0x10) && (o >> 12) > (main >> 12) && !((l->tmw & 0x10) && Window(l, 4, x, extra)))
+            if ((l->tm & 0x10) && (o >> 12) > (main >> 12) && !((l->tmw & 0x10) && Window(l, 4, x, column, width)))
                 main = o;
             if (need_sub && (l->ts & 0x10) && (o >> 12) > (sub >> 12) &&
-                !((l->tsw & 0x10) && Window(l, 4, x, extra)))
+                !((l->tsw & 0x10) && Window(l, 4, x, column, width)))
                 sub = o;
         }
-        bool inside = (clip_mode == 1 || clip_mode == 2 || prevent == 1 || prevent == 2) && Window(l, 5, x, extra);
+        bool inside = (clip_mode == 1 || clip_mode == 2 || prevent == 1 || prevent == 2) && Window(l, 5, x, column, width);
         bool keep = clip_mode == 0 || (clip_mode == 1 && inside) || (clip_mode == 2 && !inside);
         bool math_ok = prevent == 0 || (prevent == 1 && inside) || (prevent == 2 && !inside);
         unsigned mask = keep ? 31 : 0, c = l->cgram[main & 255], layer = (main >> 8) & 15;
@@ -669,6 +771,7 @@ bool TlkWideEndFrame(const uint8_t *stock) {
 bool TlkWideDraw(uint32_t *out, int width, bool hud_edges) {
     if (!out || !s_frame.valid || width < 256 || width > TLK_WIDE_MAX_WIDTH || (width & 1)) return false;
     int extra = (width - 256) / 2;
+    s_draw_extra = extra;
     memset(&s_stats, 0, sizeof s_stats);
     s_stats.stage = s_frame.stage;
     s_stats.pieces = s_frame.piece_count;
@@ -685,26 +788,49 @@ bool TlkWideDraw(uint32_t *out, int width, bool hud_edges) {
         s_map_left = s_map_left && SeamAgrees(l, vram, y, ox, oy, 0) && SeamAgrees(l, vram, y, ox, oy, 8);
         s_map_right = s_map_right && SeamAgrees(l, vram, y, ox, oy, 247) && SeamAgrees(l, vram, y, ox, oy, 255);
     }
+    /* The view stops where the camera stops: at a level's ends the native
+     * picture moves off centre instead of the margin showing past the end. */
+    int column = extra;
+    s_vis_lo = 0;
+    s_vis_hi = width;
+    for (int y = 0; y < TLK_WIDE_HEIGHT && s_frame.stage; y++) {
+        const Line *l = &s_frame.lines[y];
+        if (!LineHasStage(l) || (l->inidisp & 0x80)) continue;
+        int ox, oy;
+        Bg1Origin(l, y, &ox, &oy);
+        column = ViewColumn(s_frame.ram, ox, width, &s_vis_lo, &s_vis_hi);
+        break;
+    }
+    s_stats.column = column;
+    /* HUD sprites the HUD pass places: at the edges, or where they sit in a
+     * centred picture when the native one is off centre. */
     memset(s_hud_skip, 0, sizeof s_hud_skip);
-    if (hud_edges) {
-        for (int i = 0; i < s_frame.hud_end; i++) s_hud_skip[i] = true;
-        for (unsigned i = 0; i < s_frame.piece_count; i++)
-            if (s_frame.pieces[i].fixed && s_frame.pieces[i].kept && s_frame.pieces[i].side)
-                s_hud_skip[s_frame.pieces[i].slot & 127] = true;
+    memset(s_hud_side, 0, sizeof s_hud_side);
+    s_hud_edges = hud_edges;   /* the reserved slots' side comes from each sprite's x, per line */
+    for (int i = 0; i < s_frame.hud_end; i++) s_hud_skip[i] = hud_edges || column != extra;
+    for (unsigned i = 0; i < s_frame.piece_count; i++) {
+        const Piece *pc = &s_frame.pieces[i];
+        int side = hud_edges ? pc->side : 0;
+        if (pc->fixed && pc->kept && HudShift(side, width, column)) {
+            s_hud_skip[pc->slot & 127] = true;
+            s_hud_side[pc->slot & 127] = (int8_t)side;
+        }
     }
     for (int y = 0; y < TLK_WIDE_HEIGHT; y++) {
         uint32_t *row = out + (size_t)y * width;
         const uint32_t *stock = s_frame.stock + y * 256;
         if (!s_frame.stage || !LineHasStage(&s_frame.lines[y])) {
             memset(row, 0, (size_t)width * 4);
-            memcpy(row + extra, stock, 256 * 4);
+            memcpy(row + column, stock, 256 * 4);
             s_stats.fallback_lines++;
             continue;
         }
-        ComposeLine(row, width, extra, y, hud_edges);
+        ComposeLine(row, width, column, y);
         s_stats.custom_lines++;
-        if (!hud_edges)
-            for (int x = 0; x < 256; x++) s_stats.native_mismatch += (row[extra + x] & 0xFFFFFF) != (stock[x] & 0xFFFFFF);
+        /* The oracle: with the HUD where the game put it, the native columns
+         * are the PPU's picture. */
+        if (!hud_edges && column == extra)
+            for (int x = 0; x < 256; x++) s_stats.native_mismatch += (row[column + x] & 0xFFFFFF) != (stock[x] & 0xFFFFFF);
     }
     return true;
 }

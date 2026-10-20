@@ -389,7 +389,7 @@ int main(int argc, char **argv) {
         g_tlk_aot_pad_read_hook = PollHookCompiled; /* task CC: compiled $C0A05D / $C0A073 */
     }
     static uint32_t wide_px[TLK_WIDE_MAX_WIDTH * TLK_WIDE_HEIGHT];
-    unsigned long wide_frames = 0, wide_stage = 0, wide_custom = 0, wide_bad_frames = 0;
+    unsigned long wide_frames = 0, wide_stage = 0, wide_custom = 0, wide_bad_frames = 0, wide_edge = 0;
     unsigned long long wide_mismatch = 0, wide_margin_obj = 0;
     long wide_first_bad = -1;
     if (wide) { TlkWideSetRom(rom, rom_size); TlkWideEnable(true); }
@@ -466,6 +466,7 @@ int main(int argc, char **argv) {
             wide_custom += ws.custom_lines;
             wide_mismatch += ws.native_mismatch;
             wide_margin_obj += ws.margin_sprite_pixels;
+            wide_edge += ws.column != (wide - 256) / 2;   /* at a level's end: not checked against the PPU */
             if (ws.native_mismatch) { wide_bad_frames++; if (wide_first_bad < 0) wide_first_bad = frame + 1; }
             if (wide_png && dump_every > 0 && (frame + 1) % dump_every == 0) {
                 char p[1024];
@@ -525,8 +526,8 @@ int main(int argc, char **argv) {
     int rc = g_fail ? 6 : 0;
     if (wide) {
         printf("wide=%d frames=%lu stage_frames=%lu custom_lines=%lu native_mismatch=%llu mismatch_frames=%lu "
-               "first_mismatch_frame=%ld margin_sprite_pixels=%llu\n", wide, wide_frames, wide_stage, wide_custom,
-               wide_mismatch, wide_bad_frames, wide_first_bad, wide_margin_obj);
+               "first_mismatch_frame=%ld margin_sprite_pixels=%llu edge_frames=%lu\n", wide, wide_frames, wide_stage,
+               wide_custom, wide_mismatch, wide_bad_frames, wide_first_bad, wide_margin_obj, wide_edge);
         if (wide_png) {
             if (WritePng(wide_png, (const uint8_t *)wide_px, wide, kHeight, wide * kBpp)) printf("wide_png=%s\n", wide_png);
             else { fprintf(stderr, "cannot write %s\n", wide_png); rc = 7; }

@@ -30,7 +30,8 @@ enum { TLK_WIDE_HEIGHT = 224, TLK_WIDE_MAX_WIDTH = 1024 };
 typedef struct TlkWideStats {
     unsigned custom_lines, fallback_lines;
     unsigned pieces, margin_sprite_pixels;
-    unsigned native_mismatch;   /* centre pixels that differ from the PPU's (HUD at native place only) */
+    unsigned native_mismatch;   /* centre pixels that differ from the PPU's (HUD in place, view centred) */
+    int column;                 /* the native picture's column: (width - 256) / 2 unless at a level's end */
     bool stage;                 /* BG1 matched the level map this frame */
 } TlkWideStats;
 
@@ -44,8 +45,10 @@ void TlkWideReset(void);
  * whether every visible line was captured. */
 bool TlkWideEndFrame(const uint8_t *stock);
 /* Draws width x 224 XRGB8888 into out. width is even, 256..TLK_WIDE_MAX_WIDTH;
- * the native picture sits at (width - 256) / 2. hud_edges moves the HUD
- * sprites (OAM slots before the object pass) out to the picture's edges. */
+ * the native picture sits at (width - 256) / 2, or nearer a side where the
+ * game's camera stops (stats.column), so the view never shows past a level's
+ * end. hud_edges moves the HUD sprites out to the picture's edges; otherwise
+ * they stay where a centred native picture has them. */
 bool TlkWideDraw(uint32_t *out, int width, bool hud_edges);
 TlkWideStats TlkWideGetStats(void);
 /* Opt-in, and it changes the game: widen the game's enemy spawn/despawn
