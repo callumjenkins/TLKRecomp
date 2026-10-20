@@ -1207,7 +1207,7 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
                             "Mode 7 scenes drawn at a finer resolution.", CHOICE, 0, 3, 1,
                             kHdMode7Choices, 4),
     [R_WIDE] = MENU_ROW("tlk.widescreen", "Graphics", "Widescreen",
-                        "Levels drawn wider. Other screens stay 4:3.", CHOICE, 0, 3, 1, kWideChoices, 4),
+                        "Experimental. Levels drawn wider; other screens stay 4:3.", CHOICE, 0, 3, 1, kWideChoices, 4),
     [R_WIDE_HUD] = MENU_ROW("tlk.widescreen_hud", "Graphics", "Widescreen HUD",
                             "Health, roar and lives in widescreen.", CHOICE, 0, 1, 1, kWideHudChoices, 2),
     [R_WIDE_SPAWN] = MENU_ROW("tlk.widescreen_enemies", "Graphics", "Widescreen enemies",
