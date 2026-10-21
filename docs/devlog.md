@@ -2439,3 +2439,45 @@ option off: compare_modes MATCH (57ccb8d5, c897f389, dd861e16, 946033bd), 71/71 
 
 Not checked: "in place" HUD frames at a level's end against anything but the eye; obstacles in the stampede-like
 script path (`$DF = $041D`, `$C0BBBC`, a fixed spawn point, left alone); MinGW build.
+
+### WIDE, part 4: Bug Hunt and closing scenes stay wide, the sunset's sky
+
+After v0.3.0 two glitches were known: the Bug Hunts switched between wide and 4:3, and in the sunset level (level 4)
+the sky stopped at the native edges with black above the rocks in both margins.
+
+**Switching.** A frame is drawn wide when the level map in RAM (`$7F0000`, read with the record of level `$7FFF9E`)
+agrees with the native BG1 tilemap. That map can stop describing the screen while the level is still shown: a Bug Hunt
+changes the level number 14 frames before its fade (l11_random f1796-1809, then another level's record reads the
+bonus map wrongly) and zeroes the camera's right limit `$D8` 2 frames before it (All Bugs f13007); the
+closing scenes of levels 4 and 6 overwrite the map (camera still, agreement 56/56 -> 12/56 at All Bugs f26028; level 6
+keeps 34/56 and the live map's overwritten cells showed as a strip of odd tiles past the right edge). Now a copy of
+the last map that agreed everywhere is kept with its level record and camera limits, and when the live map does not
+agree fully the one that agrees more is used. The copy only bridges an unbroken run of level frames: after a fade to
+black it matched the title screen's mostly blank tilemap (attract f4252-5000, drawn off centre before the rule). On
+a Bug Hunt's last frame the game turns the screen off below line 30, so the reference line is the first one shown
+and, inside a run, 8 cells that all agree will do.
+
+**Sky.** The sunset's sky is BG2, not scrolled (`hofs` 0 on the top lines) in a 64-tile tilemap (`$2109` = `$49`)
+whose other half the game leaves empty but for a few stray tiles (4 of 72 margin samples at l04_random f1705). The
+margins read that half. A layer that fills at least 90% of the native line and at most 10% of the margins on a line
+now shows the native columns mirrored there (`Reflect`, as BG1 past a level's ends). Over All Bugs it fires on level
+4, its closing scene, the Scar scene `$0F` (whose left margin had a black block before) and Bug Toss (one screen
+wide, margins outside the camera's range, so not drawn).
+
+Evidence (2026-10-20, worktree `widescreen`):
+
+```
+l11_random 16:9 f1790-1811                       wide through f1810 (before: 4:3 from f1796, 14 frames)
+All Bugs closing scenes, 16:9                    level 4 f26028-26245 and level 6 f42240-42662 wide to the fade
+                                                 (before: 4:3 from f26029 / f42242); level 6 right margin jungle, no strip
+kept-copy runs over 71 play tapes + All Bugs     24 runs of 8+ frames: level ends, Bug Hunt ends, attract demo end;
+                                                 end frames rendered: a level picture or black, no title
+l04_random f1705, 16:9 and 21:9                  sky in both margins (before: black above the rocks)
+6987M / 6781M / 4735M 48,000 f, 342 and 522 wide native_mismatch=0 on all six
+tlk_sdl under Xvfb, 16:9 and 21:9                sunset f1705, Bug Hunt f1827/f1830, level 4 and 6 closing scenes: wide
+option off: compare_modes MATCH (57ccb8d5, c897f389, dd861e16, 946033bd), 71/71 tapes, idle, native decomp,
+  save/load 946033bd, TAS sync 36904 / 37093 / 38870, ALLBUGS PASS, exit_mx 0 WRONG, remap, pytest 23 passed
+```
+
+Not fixed: in level 9 the game moves the camera limits mid-level and the view jumps with them (All Bugs f57144 0 ->
+71, f58932 142 -> 71); it was so before part 4. Not checked: MinGW build.
