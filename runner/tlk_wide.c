@@ -744,6 +744,23 @@ static void ComposeLine(uint32_t *out, int width, int column, int y0) {
     int ox = 0, oy = 0;
     Bg1Origin(l, y0, &ox, &oy);
     const bool map_left = s_map_left, map_right = s_map_right;
+    /* A layer that fills the native line but is nearly empty in the margins
+     * (the sunset's sky: BG2 static, the other half of its 512-wide tilemap
+     * unused but for a few stray tiles) shows the native columns mirrored
+     * there instead. */
+    bool mirror[2] = { false, false };
+    for (unsigned layer = 0; layer < 2; layer++) {
+        if (!((l->tm | (need_sub ? l->ts : 0)) & (1u << layer))) continue;
+        unsigned native = 0, margin = 0, samples = 0;
+        for (int x = 0; x < 256; x += 4) native += BgPixel(l, vram, layer, x, y0, false, ox, oy) != 0;
+        const int sides[2][2] = { { -column, 0 }, { 256, width - column } };
+        for (int side = 0; side < 2; side++) {
+            if (layer == 0 && (side ? map_right : map_left)) continue;   /* drawn from the level map */
+            for (int x = sides[side][0]; x < sides[side][1]; x += 2, samples++)
+                margin += BgPixel(l, vram, layer, x, y0, false, ox, oy) != 0;
+        }
+        mirror[layer] = samples && margin * 10 <= samples && native * 10 >= 64 * 9;
+    }
 
     for (int i = 0; i < width; i++) {
         int x = i - column;
@@ -754,7 +771,10 @@ static void ComposeLine(uint32_t *out, int width, int column, int y0) {
         for (unsigned layer = 0; layer < 3 && !outside; layer++) {
             unsigned bit = 1u << layer;
             if (!((l->tm | (need_sub ? l->ts : 0)) & bit)) continue;
-            uint16_t px = BgPixel(l, vram, layer, x, y0, x < 0 ? map_left : x >= 256 && map_right, ox, oy);
+            bool in_margin = x < 0 || x >= 256;
+            uint16_t px = layer < 2 && mirror[layer] && in_margin
+                              ? BgPixel(l, vram, layer, Reflect(x, 256), y0, false, ox, oy)
+                              : BgPixel(l, vram, layer, x, y0, x < 0 ? map_left : x >= 256 && map_right, ox, oy);
             if (!px) continue;
             if ((l->tm & bit) && (px >> 12) > (main >> 12) && !((l->tmw & bit) && Window(l, layer, x, column, width)))
                 main = px;
