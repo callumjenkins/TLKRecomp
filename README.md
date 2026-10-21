@@ -171,8 +171,9 @@ come from data the game keeps anyway: the foreground from the level map in RAM, 
 tilemap, and sprites from every piece the game submits, including the ones it drops for being off its screen. At a
 level's ends the view stops where the game's camera stops, so Simba walks towards the picture's edge instead of the
 picture showing past the level. Widescreen HUD puts health and lives at the left edge and roar at the right; "in
-place" keeps them where the game draws them. The title, menus, the Stampede and the bonus stages stay 4:3 with black
-sides. Like the other video options, it changes nothing in the game: hashes and `--dump-png` are the same with it on.
+place" keeps them where the game draws them. The title, menus and the Stampede stay 4:3 with black sides, and so does
+Bug Toss, which is one screen wide. Like the other video options, it changes nothing in the game: hashes and
+`--dump-png` are the same with it on.
 
 The game only creates enemies a little beyond its own screen, and draws only those overlapping it, so in a wide
 picture they pop in and out at the old screen edges. **Widescreen enemies: out of view** widens both by the margin,

@@ -63,11 +63,12 @@ typedef struct Line {
     uint8_t hoam[32];
 } Line;
 
-/* The level's BG1 source: map at $7F0000, row size and height from the level
- * record, block table in ROM. */
+/* The level's BG1 source: map at $7F0000 (or a copy of it), row size and
+ * height from the level record, block table in ROM. */
 typedef struct Level {
     unsigned rowb, rows;
     uint32_t blk;
+    const uint8_t *map;
 } Level;
 
 static const uint8_t *s_rom;
@@ -402,6 +403,7 @@ static bool LevelOf(const uint8_t *ram, Level *lv) {
     lv->rowb = rd16(s_rom + rec + 0x12);
     lv->rows = rd16(s_rom + rec + 0x14);
     lv->blk = rd24(s_rom + rec + 0x0F) & 0x3FFFFF;
+    lv->map = ram + 0x10000;
     return lv->rowb && !(lv->rowb & 1) && lv->rows && lv->rowb * lv->rows <= 0x10000 && lv->blk < s_rom_size;
 }
 
@@ -413,10 +415,10 @@ static int Reflect(int v, int n) {
 
 /* The BG1 tilemap word at world pixel (*wx, *wy). Past the level's edges the
  * map is reflected, and *wx/*wy become the reflected position. */
-static bool MapTile(const Level *lv, const uint8_t *ram, int *wx, int *wy, uint16_t *word) {
+static bool MapTile(const Level *lv, int *wx, int *wy, uint16_t *word) {
     *wx = Reflect(*wx, (int)lv->rowb * 8);
     *wy = Reflect(*wy, (int)lv->rows * 16);
-    unsigned cell = rd16(ram + 0x10000 + (*wy >> 4) * lv->rowb + (*wx >> 4) * 2) & 0xFFF8;
+    unsigned cell = rd16(lv->map + (*wy >> 4) * lv->rowb + (*wx >> 4) * 2) & 0xFFF8;
     uint32_t a = lv->blk + cell + (((*wx >> 3) & 1) | ((*wy >> 3) & 1) << 1) * 2;
     if (a + 2 > s_rom_size) return false;
     *word = (uint16_t)rd16(s_rom + a);
@@ -450,16 +452,11 @@ static bool LineHasStage(const Line *l) {
            !(l->setini & 0x0B) && l->bgsc[0] == s_frame.stage_sc && l->bgchr == s_frame.stage_chr;
 }
 
-/* A level frame when the native BG1 tilemap mostly agrees with the level map.
- * Not all of it: after the ostrich ride's warp some cells differ for a while
- * (the margins then follow SeamAgrees); a title or menu agrees nowhere. */
-static bool DetectStage(void) {
-    if (!LevelOf(s_frame.ram, &s_frame.level)) return false;
-    const Line *mid = &s_frame.lines[112];
-    if ((mid->bgmode & 7) != 1 || (mid->bgmode & 0x10) || !(mid->tm & 1)) return false;
-    s_frame.stage_sc = mid->bgsc[0];
-    s_frame.stage_chr = mid->bgchr;
+/* How many sampled cells of the native BG1 tilemap agree with s_frame.level's
+ * map (*same of *total). */
+static void MapScore(unsigned *same_out, unsigned *total_out) {
     unsigned total = 0, same = 0;
+    *same_out = *total_out = 0;
     for (int y0 = 8; y0 < TLK_WIDE_HEIGHT; y0 += 32) {
         const Line *l = &s_frame.lines[y0];
         if (!LineHasStage(l) || (l->inidisp & 0x80)) continue;
@@ -468,14 +465,79 @@ static bool DetectStage(void) {
         for (int x = 16; x < 248; x += 32) {
             int wx = ox + x, wy = oy;
             uint16_t word;
-            if (!MapTile(&s_frame.level, s_frame.ram, &wx, &wy, &word)) return false;
+            if (!MapTile(&s_frame.level, &wx, &wy, &word)) return;
             if (wx != ox + x || wy != oy) continue;   /* only inside the level */
             total++;
             same += VramTilemap(s_vram[l->vram], l->bgsc[0], (unsigned)(l->hofs[0] + x) & 1023,
                                 (unsigned)(l->vofs[0] + y0 + 1) & 1023, 8) == word;
         }
     }
-    return total >= 20 && same * 2 >= total;
+    *same_out = same;
+    *total_out = total;
+}
+
+/* A level frame when most of it agrees. Not all of it: after the ostrich
+ * ride's warp some cells differ for a while (the margins then follow
+ * SeamAgrees); a title or menu agrees nowhere. */
+static bool Agrees(unsigned same, unsigned total) { return total >= 20 && same * 2 >= total; }
+
+static Level s_last_level;   /* the last level whose map agreed everywhere, map copied to s_last_map */
+static uint8_t s_last_map[0x10000];
+static uint8_t s_last_limits[4];   /* its camera limits, $A6EC and $D8 */
+static bool s_have_last;
+
+/* A level frame when a map agrees. The map in RAM can stop describing the
+ * screen while the level is still shown: a level's closing scene overwrites
+ * it (levels 4 and 6), and a Bug Hunt changes the level number about 14
+ * frames before its fade (and zeroes the camera's right limit 2 frames
+ * before). Then a copy of the last map that agreed everywhere is tried, and
+ * the one that agrees more is used, with the camera limits it had. */
+static bool StageMap(void) {
+    /* Line 112, or the first line shown when the game has turned the screen
+     * off below the top (a Bug Hunt's last frame: dark from line 30). */
+    const Line *mid = &s_frame.lines[112];
+    for (int y = 0; y < TLK_WIDE_HEIGHT && ((mid->inidisp & 0x80) || !(mid->inidisp & 15)); y++) mid = &s_frame.lines[y];
+    if ((mid->bgmode & 7) != 1 || (mid->bgmode & 0x10) || !(mid->tm & 1)) return false;
+    s_frame.stage_sc = mid->bgsc[0];
+    s_frame.stage_chr = mid->bgchr;
+    unsigned same = 0, total = 0, kept_same = 0, kept_total = 0;
+    Level live;
+    bool have_live = LevelOf(s_frame.ram, &live);
+    if (have_live) {
+        s_frame.level = live;
+        MapScore(&same, &total);
+        if (total >= 20 && same == total) {
+            s_last_level = live;
+            memcpy(s_last_map, live.map, live.rowb * live.rows);
+            s_last_level.map = s_last_map;
+            memcpy(s_last_limits, s_frame.ram + 0xA6EC, 2);
+            memcpy(s_last_limits + 2, s_frame.ram + 0xD8, 2);
+            return s_have_last = true;
+        }
+    }
+    if (s_have_last) {
+        s_frame.level = s_last_level;
+        MapScore(&kept_same, &kept_total);
+        /* Inside the run a few lines that all agree will do (that last frame
+         * leaves one sampled line, 8 cells). */
+        bool kept_ok = Agrees(kept_same, kept_total) || (kept_total >= 8 && kept_same == kept_total);
+        if (kept_ok && (!have_live || !Agrees(same, total) || kept_same * total > same * kept_total)) {
+            memcpy(s_frame.ram + 0xA6EC, s_last_limits, 2);
+            memcpy(s_frame.ram + 0xD8, s_last_limits + 2, 2);
+            return true;
+        }
+    }
+    s_frame.level = live;
+    return have_live && Agrees(same, total);
+}
+
+/* The copy only bridges an unbroken run of level frames: after a frame that
+ * is not one (a fade to black, a title) it could match a mostly blank
+ * tilemap, as the title screen's after the attract demo. */
+static bool DetectStage(void) {
+    if (StageMap()) return true;
+    s_have_last = false;
+    return false;
 }
 
 /* ── Compositor ────────────────────────────────────────────────────────── */
@@ -502,7 +564,7 @@ static uint16_t BgPixel(const Line *l, const uint16_t *vram, unsigned layer, int
     if (layer == 0 && map) {
         px = ox + x;
         py = oy;
-        if (!MapTile(&s_frame.level, s_frame.ram, &px, &py, &tile)) return 0;
+        if (!MapTile(&s_frame.level, &px, &py, &tile)) return 0;
     } else {
         if (layer == 2 && (x < 0 || x >= 256)) return 0;   /* BG3 carries text, not scenery */
         px = (int)(((unsigned)x + l->hofs[layer]) & 1023);
@@ -613,7 +675,7 @@ static bool Window(const Line *l, unsigned layer, int x, int column, int width) 
 static bool SeamAgrees(const Line *l, const uint16_t *vram, int y0, int ox, int oy, int x) {
     int wx = ox + x, wy = oy;
     uint16_t word;
-    if (!MapTile(&s_frame.level, s_frame.ram, &wx, &wy, &word)) return false;
+    if (!MapTile(&s_frame.level, &wx, &wy, &word)) return false;
     return word == VramTilemap(vram, l->bgsc[0], ((unsigned)x + l->hofs[0]) & 1023,
                                ((unsigned)y0 + 1 + l->vofs[0]) & 1023, 8);
 }
@@ -757,6 +819,7 @@ void TlkWideReset(void) {
     s_frame.valid = false;
     s_frame.captured = 0;
     s_vram_have = false;
+    s_have_last = false;
 }
 
 bool TlkWideEndFrame(const uint8_t *stock) {
