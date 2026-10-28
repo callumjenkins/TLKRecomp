@@ -2206,6 +2206,10 @@ int main(int argc, char **argv) {
     const char *hash_at = NULL;
     const char *cfg_path = getenv("TLK_SDL_INI") ? getenv("TLK_SDL_INI") : "tlk_sdl.ini";
     const char *save_path = NULL, *load_path = NULL, *load_at_path = NULL;
+#ifdef __ANDROID__
+    /* The process is killed once main returns, before stdio would flush, so a proof run's hashes need each line written as it ends. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+#endif
     long frames = 0, save_at = -1, load_at = -1, menu_at = -1;
     int practice_level = -1, menu_shown = 0;
     const char *dump_window = NULL;
