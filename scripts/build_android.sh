@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Builds the Android app (arm64) from your own ROM into build-android/, and with --install puts it on the
 # phone adb sees. Needs the Android SDK with NDK $NDK_VERSION, Python 3, cmake and ninja; Gradle runs from
-# android/gradlew on a JDK 17-21 (JAVA_HOME).
+# android/gradlew on a JDK 17 or newer with javac (JAVA_HOME).
 #
 # usage: scripts/build_android.sh [-r ROM] [--native-only] [--release] [--install]
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 OUT="$ROOT/build-android"
-ANDROID_HOME=${ANDROID_HOME:-$HOME/Android/Sdk}
+export ANDROID_HOME=${ANDROID_HOME:-$HOME/Android/Sdk}
 NDK_VERSION=${NDK_VERSION:-30.0.16248370}
 NDK="$ANDROID_HOME/ndk/$NDK_VERSION"
 ABI=arm64-v8a
