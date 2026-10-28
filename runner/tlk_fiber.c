@@ -28,7 +28,10 @@
  *
  * Two backends with the same switch points: ucontext + an mmap'd stack on
  * Linux/macOS, the Win32 fiber API on Windows (ucontext does not exist
- * there). Both give the game the same 64 MB stack. */
+ * there). Both give the game the same 64 MB stack. Android's libc has no
+ * ucontext calls either, so it takes the Win32 path through snesrecomp's
+ * fiber_compat, where each fiber is a parked thread (TLK_FIBER_COMPAT forces
+ * that path elsewhere, to test it). */
 #ifdef __APPLE__
 /* macOS hides the (deprecated) ucontext calls without _XOPEN_SOURCE, and
  * _XOPEN_SOURCE alone would hide MAP_ANONYMOUS. */
@@ -44,8 +47,12 @@
 
 /* After cpu_state.h: windows.h would otherwise clash with types.h over
  * FORCEINLINE. */
-#ifdef _WIN32
+#if defined(_WIN32)
 #include <windows.h>
+#define TLK_FIBER_API 1
+#elif defined(__ANDROID__) || defined(TLK_FIBER_COMPAT)
+#include "fiber_compat.h"
+#define TLK_FIBER_API 1
 #else
 #include <sys/mman.h>
 #include <ucontext.h>
@@ -83,8 +90,8 @@ static int s_no_aot, s_no_interp, s_no_poll;  /* TLK_FIBER_OFF=aot,interp,poll (
 static int s_state = G_IDLE;
 static int s_on_game;
 static int s_created;
-#ifdef _WIN32
-static LPVOID s_main_fiber, s_game_fiber;
+#ifdef TLK_FIBER_API
+static void *s_main_fiber, *s_game_fiber;
 #else
 static ucontext_t s_main_uc, s_game_uc;
 static void *s_stack;
@@ -119,8 +126,8 @@ static int enabled(void) {
             fprintf(stderr, "[tlk_fiber] context too large, fibers off\n");
             s_enabled = 0;
         }
-#ifndef _WIN32
-        /* Windows: CreateFiberEx reserves the stack in enter_game. */
+#ifndef TLK_FIBER_API
+        /* The fiber API reserves the stack itself, in create_game. */
         if (s_enabled) {
             s_stack = mmap(NULL, FIBER_STACK_BYTES, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
@@ -142,7 +149,7 @@ void tlk_fiber_stats(void) {
 
 /* Game side -> driver side (the driver resumes after its own switch). */
 static void to_driver(void) {
-#ifdef _WIN32
+#ifdef TLK_FIBER_API
     SwitchToFiber(s_main_fiber);
 #else
     swapcontext(&s_game_uc, &s_main_uc);
@@ -174,6 +181,17 @@ static void create_game(void) {
         abort();
     }
 }
+#elif defined(TLK_FIBER_API)
+static void game_main(void *unused) { (void)unused; game_loop(); }
+
+static void create_game(void) {
+    s_main_fiber = ConvertThreadToFiber(NULL);
+    s_game_fiber = s_main_fiber ? CreateFiber(FIBER_STACK_BYTES, game_main, NULL) : NULL;
+    if (!s_game_fiber) {
+        fprintf(stderr, "[tlk_fiber] fiber creation failed\n");
+        abort();
+    }
+}
 #else
 static void game_main(void) { game_loop(); }
 
@@ -200,7 +218,7 @@ static void enter_game(int resume) {
         s_created = 1;
     }
     s_on_game = 1;
-#ifdef _WIN32
+#ifdef TLK_FIBER_API
     SwitchToFiber(s_game_fiber);
 #else
     swapcontext(&s_main_uc, &s_game_uc);

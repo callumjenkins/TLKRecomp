@@ -65,6 +65,9 @@ option(TLK_BUILD_HOSTS "Build tlk_headless and tlk_sdl" ON)
 # video/audio/input backends are compiled in and dlopen their system libraries
 # at run time. Default OFF: dev builds keep using the system SDL3.
 option(TLK_STATIC_SDL "Build and statically link the pinned SDL3 release" OFF)
+# TLK_FIBER_COMPAT: run the fibers on snesrecomp's fiber_compat, the backend
+# Android has to use, so the Linux gates can check that path.
+option(TLK_FIBER_COMPAT "Use fiber_compat for TLK's fibers (always on for Android)" OFF)
 if(TLK_STATIC_SDL)
     set(CMAKE_DISABLE_FIND_PACKAGE_SDL3 ON)
     set(SNESRECOMP_SDL3_FETCH ON CACHE BOOL "" FORCE)
@@ -122,6 +125,12 @@ if(TLK_BUILD_HOSTS)
             SNES_GAME_VERSION="dev"
             SNES_GAME_TITLE="The Lion King")
         snesrecomp_rom_identity(${target} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/rom_identity.txt")
+        if(ANDROID OR TLK_FIBER_COMPAT)
+            snesrecomp_target_fiber_compat(${target})
+        endif()
+        if(TLK_FIBER_COMPAT)
+            target_compile_definitions(${target} PRIVATE TLK_FIBER_COMPAT=1)
+        endif()
     endfunction()
 
     add_executable(tlk_headless ${TLK_COMMON_SOURCES}
@@ -139,18 +148,32 @@ if(TLK_BUILD_HOSTS)
     # frame driver and APU timeline), plus a small SDL3 front end for window,
     # audio, pacing and input. Not the framework desktop host: that one turns
     # on extended frame timing, which bypasses TLK's NTSC SPC ratio.
-    add_executable(tlk_sdl ${TLK_COMMON_SOURCES}
+    set(TLK_SDL_SOURCES ${TLK_COMMON_SOURCES}
         ${TLK_RUNNER_DIR}/sdl_main.c
+        ${TLK_RUNNER_DIR}/tlk_touch.c
         ${TLK_RUNNER_DIR}/tlk_video.c
         ${TLK_RUNNER_DIR}/tlk_assets.c
         ${TLK_RUNNER_DIR}/headless_host.c
         ${TLK_RUNNER_DIR}/verified_rom.c)
+    if(ANDROID)
+        # SDLActivity loads the game as libmain.so and calls its SDL_main.
+        add_library(tlk_sdl SHARED ${TLK_SDL_SOURCES})
+        set_target_properties(tlk_sdl PROPERTIES OUTPUT_NAME main)
+        target_link_libraries(tlk_sdl PRIVATE android log)
+        # A missing symbol would otherwise surface only when the phone loads the library.
+        target_link_options(tlk_sdl PRIVATE -Wl,--no-undefined)
+    else()
+        add_executable(tlk_sdl ${TLK_SDL_SOURCES})
+    endif()
     tlk_configure_target(tlk_sdl)
     snesrecomp_target_sdl(tlk_sdl)
     # OpenGL presenter + GLSL presets (CC0), staged to build/assets/shaders.
-    snesrecomp_target_opengl(tlk_sdl)
-    snesrecomp_target_shader_presets(tlk_sdl)
-    tlk_use_patched_target_sources(tlk_sdl)
+    # Android draws through SDL_Renderer on GLES instead.
+    if(NOT ANDROID)
+        snesrecomp_target_opengl(tlk_sdl)
+        snesrecomp_target_shader_presets(tlk_sdl)
+        tlk_use_patched_target_sources(tlk_sdl)
+    endif()
     # In-game settings menu: recomp-ui's runtime menu (MIT, submodule), drawn
     # with Dear ImGui over the OpenGL presenter (runner/tlk_menu_imgui.cpp).
     # Its fonts and images are staged to build/assets/fonts and assets/img.
@@ -161,6 +184,12 @@ if(TLK_BUILD_HOSTS)
     include("${RECOMP_UI_ROOT}/recomp_ui.cmake")
     target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_menu_imgui.cpp)
     recomp_target_launcher_ui(tlk_sdl CONSOLE snes)
+    if(ANDROID)
+        # recomp-ui's Android branch calls SDL_AndroidGetInternalStoragePath, SDL2's name for it.
+        set_source_files_properties(
+            "${RECOMP_UI_ROOT}/src/common/backends/imgui/launcher_imgui.cpp"
+            TARGET_DIRECTORY tlk_sdl PROPERTIES COMPILE_DEFINITIONS SDL_ENABLE_OLD_NAMES=1)
+    endif()
     # The font and shader presets, compiled in for the single Windows .exe
     # (runner/tlk_assets.c). The font comes first: it is the file probed.
     include(cmake/TlkEmbedAssets.cmake)
@@ -180,6 +209,17 @@ if(TLK_BUILD_HOSTS)
     endif()
 else()
     target_sources(snesrecomp_game PRIVATE ${GENERATED_SOURCES})
+endif()
+
+# ── Tests that need no ROM ────────────────────────────────────────────────
+if(NOT ANDROID)
+    enable_testing()
+    add_executable(tlk_touch_test tests/tlk_touch_test.c runner/tlk_touch.c)
+    target_include_directories(tlk_touch_test PRIVATE runner)
+    if(NOT MSVC)
+        target_link_libraries(tlk_touch_test PRIVATE m)
+    endif()
+    add_test(NAME tlk_touch COMMAND tlk_touch_test)
 endif()
 
 # ── Install / packaging ───────────────────────────────────────────────────
