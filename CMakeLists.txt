@@ -167,6 +167,18 @@ if(TLK_BUILD_HOSTS)
     endif()
     tlk_configure_target(tlk_sdl)
     snesrecomp_target_sdl(tlk_sdl)
+    target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_saveinfo.c)
+    # TLK_BUILD_ID, which every savestate's sidecar names. Run on every build: the files it hashes are globbed, so
+    # no DEPENDS list could name them.
+    set(tlk_build_id_dir "${CMAKE_CURRENT_BINARY_DIR}/tlk_build_id")
+    add_custom_target(tlk_build_id
+        COMMAND "${CMAKE_COMMAND}" -DROOT=${CMAKE_CURRENT_SOURCE_DIR} -DGEN=${TLK_SNESRECOMP_GEN_DIR}
+            -DRUNTIME=${CMAKE_CURRENT_SOURCE_DIR}/snesrecomp/runner/src
+            -DOUT=${tlk_build_id_dir}/tlk_build_id.h -DPLATFORM=${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TlkBuildId.cmake
+        BYPRODUCTS "${tlk_build_id_dir}/tlk_build_id.h"
+        VERBATIM)
+    add_dependencies(tlk_sdl tlk_build_id)
+    target_include_directories(tlk_sdl PRIVATE "${tlk_build_id_dir}")
     # OpenGL presenter + GLSL presets (CC0), staged to build/assets/shaders.
     # Android draws through SDL_Renderer on GLES instead.
     if(NOT ANDROID)
@@ -220,6 +232,14 @@ if(NOT ANDROID)
         target_link_libraries(tlk_touch_test PRIVATE m)
     endif()
     add_test(NAME tlk_touch COMMAND tlk_touch_test)
+
+    add_executable(tlk_saveinfo_test tests/tlk_saveinfo_test.c runner/tlk_saveinfo.c)
+    target_include_directories(tlk_saveinfo_test PRIVATE runner)
+    set(tlk_saveinfo_dir "${CMAKE_CURRENT_BINARY_DIR}/tlk_saveinfo_test.d")
+    file(MAKE_DIRECTORY "${tlk_saveinfo_dir}")
+    add_test(NAME tlk_saveinfo COMMAND tlk_saveinfo_test "${tlk_saveinfo_dir}")
+    add_test(NAME tlk_build_id COMMAND "${CMAKE_COMMAND}" -DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/TlkBuildId.cmake
+        -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tlk_build_id_test.d -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/tlk_build_id_test.cmake)
 
     # The fiber switches on each backend: plain ucontext, fiber_compat on ucontext, and fiber_compat's
     # parked threads, which only Android builds otherwise.
