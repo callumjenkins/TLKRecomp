@@ -317,7 +317,7 @@ static const char *const kWideHudChoices[] = { "in place", "at the edges" };
 static uint32_t s_wide_px[TLK_WIDE_MAX_WIDTH * TLK_WIDE_HEIGHT];
 static double s_wide_aspect;   /* aspect of the picture being shown, 0 when native */
 static const char *const kTouchChoices[] = { "auto", "on", "off" };
-static int s_touch_mode, s_touch_size = 100, s_touch_opacity = 40;
+static int s_touch_mode, s_touch_size = 100, s_touch_opacity = 40, s_touch_haptics = 1;
 /* autosave_seconds: seconds of play between autosaves; 0 turns the autosave off. */
 #ifdef __ANDROID__
 static int s_autosave_seconds = 60;
@@ -392,6 +392,7 @@ static void LoadConfig(const char *path) {
         }
         else if (!strcmp(k, "touch_size")) s_touch_size = SDL_clamp(atoi(v), 50, 150);
         else if (!strcmp(k, "touch_opacity")) s_touch_opacity = SDL_clamp(atoi(v), 10, 100);
+        else if (!strcmp(k, "touch_haptics")) s_touch_haptics = atoi(v) != 0;
         else if (!strcmp(k, "autosave_seconds")) s_autosave_seconds = SDL_max(atoi(v), 0);
         else if (!strncmp(k, "pad_", 4)) {
             for (int i = 0; i < kBindings; i++)
@@ -434,9 +435,9 @@ static int SaveConfig(void) {
     fprintf(f, "speedrun = %s\n", s_practice ? "practice" : "off");
     fprintf(f, "; settings menu: game dimming and panel opacity, percent\nmenu_dim = %d\nmenu_opacity = %d\n",
             s_menu_dim, s_menu_opacity);
-    fprintf(f, "; touchscreen pad: auto, on or off; its size and opacity, percent\n"
-               "touch = %s\ntouch_size = %d\ntouch_opacity = %d\n",
-            kTouchChoices[s_touch_mode], s_touch_size, s_touch_opacity);
+    fprintf(f, "; touchscreen pad: auto, on or off; its size and opacity, percent; on a phone, a vibration on each press (1 on, 0 off)\n"
+               "touch = %s\ntouch_size = %d\ntouch_opacity = %d\ntouch_haptics = %d\n",
+            kTouchChoices[s_touch_mode], s_touch_size, s_touch_opacity, s_touch_haptics);
     fprintf(f, "; tlk_autosave.state: every N seconds of play, and on leaving the app or quitting (0 = off)\n"
                "autosave_seconds = %d\n", s_autosave_seconds);
     fprintf(f, "; keys use SDL key names\n");
@@ -1324,6 +1325,31 @@ static void TouchMenuInput(uint16_t before, uint16_t now) {
         if (pressed & kMap[i].bit) recomp_runtime_ui_handle_input(s_ui, kMap[i].in, 1, 0);
 }
 
+static SDL_Haptic *s_haptic;
+static int s_haptic_tried, s_haptic_ticks;
+
+/* The phone's vibrator, SDL's VIBRATOR_SERVICE haptic. Where there is none, as on a desktop, nothing ticks. */
+static void HapticTick(void) {
+    s_haptic_ticks++;
+    if (!s_haptic_tried) {
+        s_haptic_tried = 1;
+        int n = 0;
+        SDL_HapticID *ids = SDL_InitSubSystem(SDL_INIT_HAPTIC) ? SDL_GetHaptics(&n) : NULL;
+        SDL_HapticID pick = 0;
+        for (int i = 0; i < n && !pick; i++) {
+            const char *name = SDL_GetHapticNameForID(ids[i]);
+            if (name && !strcmp(name, "VIBRATOR_SERVICE")) pick = ids[i];
+        }
+        SDL_free(ids);
+        s_haptic = pick ? SDL_OpenHaptic(pick) : NULL;
+        if (s_haptic && !SDL_InitHapticRumble(s_haptic)) {
+            SDL_CloseHaptic(s_haptic);
+            s_haptic = NULL;
+        }
+    }
+    if (s_haptic) SDL_PlayHapticRumble(s_haptic, 0.5f, 10);
+}
+
 static void HandleFinger(const SDL_TouchFingerEvent *te) {
     s_touchscreen = 1;
     int dw, dh;
@@ -1352,6 +1378,7 @@ static void HandleFinger(const SDL_TouchFingerEvent *te) {
     }
     uint16_t now = TouchPadState();
     if (s_menu_open) TouchMenuInput(before, now);
+    else if (s_touch_haptics && !s_touch_hold && (now & (uint16_t)~before)) HapticTick();
 }
 
 /* A convex outline around (cx, cy), filled as a fan: n points, each from point(i). */
@@ -1453,7 +1480,7 @@ enum {
     R_SCALE = R_LOAD0 + kSlots, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
     R_SHADER, R_HD_MODE7, R_WIDE, R_WIDE_HUD, R_WIDE_SPAWN, R_SMOOTH, R_INTEGER,
     R_AUDIO, R_VOLUME,
-    R_TOUCH, R_TOUCH_SIZE, R_TOUCH_OPACITY,
+    R_TOUCH, R_TOUCH_SIZE, R_TOUCH_OPACITY, R_TOUCH_HAPTICS,
     R_LEVEL, R_INVUL, R_START, R_PRACTICE,
     R_BIND0, R_RESET = R_BIND0 + kBindings,
     R_RESUME, R_QUIT,
@@ -1527,6 +1554,8 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
                               "Percent.", INT, 50, 150, 10, NULL, 0),
     [R_TOUCH_OPACITY] = MENU_ROW("tlk.touch_opacity", "Touch", "Opacity",
                                  "Percent.", INT, 10, 100, 10, NULL, 0),
+    [R_TOUCH_HAPTICS] = MENU_ROW("tlk.touch_haptics", "Touch", "Vibrate",
+                                 "On a phone, a short vibration on each press.", BOOL, 0, 1, 1, NULL, 0),
     [R_LEVEL] = MENU_ROW("tlk.level", "Level select", "Level",
                          "Nothing happens until Start below.", CHOICE, 0, 13, 1, kSelectNames, 14),
     [R_INVUL] = MENU_ROW("tlk.invul", "Level select", "Invulnerable",
@@ -1607,6 +1636,7 @@ static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
     case R_TOUCH: *v = s_touch_mode; break;
     case R_TOUCH_SIZE: *v = s_touch_size; break;
     case R_TOUCH_OPACITY: *v = s_touch_opacity; break;
+    case R_TOUCH_HAPTICS: *v = s_touch_haptics; break;
     case R_LEVEL: *v = s_sel_level; break;
     case R_INVUL: *v = s_sel_invul; break;
     default: return 0;
@@ -1646,6 +1676,7 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
     case R_TOUCH: s_touch_mode = v; break;
     case R_TOUCH_SIZE: s_touch_size = v; break;
     case R_TOUCH_OPACITY: s_touch_opacity = v; break;
+    case R_TOUCH_HAPTICS: s_touch_haptics = v; break;
     case R_LEVEL: case R_INVUL:   /* not in the ini; 0 keeps this hint in place of "Saved" */
         if (r == R_LEVEL) s_sel_level = v;
         else s_sel_invul = v;
@@ -2187,7 +2218,7 @@ static int RemapSelfTest(void) {
     StCheck(!s_menu_open, "Esc twice backs out of System and closes");
 
     /* The touch pad, with fingers on its buttons where this window lays them out. */
-    int touch_mode = s_touch_mode, touch_size = s_touch_size, touch_opacity = s_touch_opacity, dw, dh;
+    int touch_mode = s_touch_mode, touch_size = s_touch_size, touch_opacity = s_touch_opacity, touch_haptics = s_touch_haptics, dw, dh;
     s_touch_mode = 1;
     RenderOutputSize(&dw, &dh);
     TlkTouchLayout tl;
@@ -2197,12 +2228,26 @@ static int RemapSelfTest(void) {
         if (tl.buttons[i].bit == TLK_PAD_B) tb = &tl.buttons[i];
         if (tl.buttons[i].bit == TLK_PAD_START) ts = &tl.buttons[i];
     }
+    int ticks = s_haptic_ticks;
     StFinger(SDL_EVENT_FINGER_DOWN, 1, tb->x, tb->y);
     StCheck(TouchGameState() == TLK_PAD_B, "a finger on touch B presses B");
+    StFinger(SDL_EVENT_FINGER_MOTION, 1, tb->x + 1, tb->y);
+    StCheck(s_haptic_ticks == ticks + 1, "pressing B ticks once, and moving on it no more");
     StFinger(SDL_EVENT_FINGER_MOTION, 1, ts->x, ts->y);
     StCheck(TouchGameState() == TLK_PAD_START, "sliding it onto Start presses Start instead");
+    StCheck(s_haptic_ticks == ticks + 2, "sliding onto Start ticks again");
     StFinger(SDL_EVENT_FINGER_UP, 1, ts->x, ts->y);
     StCheck(TouchGameState() == 0, "lifting it presses nothing");
+    s_touch_haptics = 0;
+    StFinger(SDL_EVENT_FINGER_DOWN, 1, tb->x, tb->y);
+    StFinger(SDL_EVENT_FINGER_UP, 1, tb->x, tb->y);
+    StCheck(s_haptic_ticks == ticks + 2, "with touch_haptics off a press does not tick");
+    s_touch_haptics = 1;
+    MenuSet(NULL, &s_rows[R_TOUCH_HAPTICS], 0);
+    int shown_v = -1;
+    MenuGet(NULL, &s_rows[R_TOUCH_HAPTICS], &shown_v);
+    StCheck(!s_touch_haptics && shown_v == 0, "the Vibrate row sets and shows touch_haptics");
+    s_touch_haptics = 1;
     StFinger(SDL_EVENT_FINGER_DOWN, 2, tl.dpad_x + tl.dpad_r, tl.dpad_y);
     StFinger(SDL_EVENT_FINGER_MOTION, 2, tl.dpad_x + 4 * tl.dpad_r, tl.dpad_y);
     StCheck(TouchGameState() == TLK_PAD_RIGHT, "a finger that slides off the d-pad keeps pressing right");
@@ -2229,11 +2274,13 @@ static int RemapSelfTest(void) {
     StFinger(SDL_EVENT_FINGER_UP, 7, tb->x, tb->y);
     s_touch_size = 150;
     s_touch_opacity = 70;
+    s_touch_haptics = 0;
     SaveConfig();
-    s_touch_mode = 0, s_touch_size = 100, s_touch_opacity = 40;
+    s_touch_mode = 0, s_touch_size = 100, s_touch_opacity = 40, s_touch_haptics = 1;
     LoadConfig(s_cfg_path);
-    StCheck(s_touch_mode == 2 && s_touch_size == 150 && s_touch_opacity == 70, "touch settings were saved to the ini");
-    s_touch_mode = touch_mode, s_touch_size = touch_size, s_touch_opacity = touch_opacity;
+    StCheck(s_touch_mode == 2 && s_touch_size == 150 && s_touch_opacity == 70 && !s_touch_haptics,
+            "touch settings were saved to the ini");
+    s_touch_mode = touch_mode, s_touch_size = touch_size, s_touch_opacity = touch_opacity, s_touch_haptics = touch_haptics;
     TouchReset();
 
     /* Save states rows, from sidecars written here: the emulator is not running, so nothing loads. */
@@ -2885,6 +2932,7 @@ int main(int argc, char **argv) {
     }
     if (astream) SDL_DestroyAudioStream(astream);
     if (s_pad) SDL_CloseGamepad(s_pad);
+    if (s_haptic) SDL_CloseHaptic(s_haptic);
     TlkMenuImguiShutdown();
     recomp_runtime_ui_destroy(s_ui);
     if (tex) SDL_DestroyTexture(tex);
