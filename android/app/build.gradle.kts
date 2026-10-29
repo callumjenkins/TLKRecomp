@@ -4,11 +4,17 @@
 //   -Ptlk.buildId=ID       libmain.so's TLK_BUILD_ID, which its savestates' sidecars name
 //   -Ptlk.version=TEXT     libmain.so's TLK_BUILD_VERSION, the git version
 //   -Ptlk.romIdentity=FILE cmake/rom_identity.txt, the dump the launcher accepts
+//   -Ptlk.signing=FILE     optional: a properties file naming the keystore every build is signed with
+import java.util.Properties
+
 plugins {
     id("com.android.application")
 }
 
 fun prop(name: String): String = providers.gradleProperty(name).orNull ?: error("-P$name is required")
+val signing = providers.gradleProperty("tlk.signing").orNull?.let { path ->
+    Properties().apply { file(path).inputStream().use { load(it) } } to file(path).parentFile
+}
 fun romKey(key: String): String =
     file(prop("tlk.romIdentity")).readLines().first { it.substringBefore('=').trim() == key }.substringAfter('=').trim()
 
@@ -32,7 +38,20 @@ android {
         jniLibs.srcDir(prop("tlk.native"))
     }
     buildFeatures { buildConfig = true }
+    signing?.let { (p, dir) ->
+        signingConfigs.create("tlk") {
+            storeFile = dir.resolve(p.getProperty("storeFile"))
+            storePassword = p.getProperty("storePassword")
+            keyAlias = p.getProperty("keyAlias")
+            keyPassword = p.getProperty("keyPassword")
+        }
+    }
     buildTypes {
+        // One key for both, so either installs over the other and keeps the app's files.
+        signing?.let {
+            debug { signingConfig = signingConfigs.getByName("tlk") }
+            release { signingConfig = signingConfigs.getByName("tlk") }
+        }
         release {
             isMinifyEnabled = false
         }

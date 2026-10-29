@@ -71,12 +71,17 @@ build_id=$(sed -n 's/^#define TLK_BUILD_ID "\(.*\)"$/\1/p' "$id_h")
 version=$(sed -n 's/^#define TLK_BUILD_VERSION "\(.*\)"$/\1/p' "$id_h")
 [ -n "$build_id" ] || { echo "no TLK_BUILD_ID in $OUT/native-$ABI" >&2; exit 1; }
 variant=$([ $release = 1 ] && echo Release || echo Debug)
+# The signing key lives outside the repository, named by $TLK_SIGNING or this default. Without it a release build
+# is unsigned and a debug build takes ~/.android/debug.keystore.
+signing="${TLK_SIGNING:-$HOME/.local/share/tlk-recomp/release.properties}"
+[ -f "$signing" ] || { echo "no $signing: signing with the debug key, or not at all for --release" >&2; signing=; }
 "$ROOT/android/gradlew" -p "$ROOT/android" --no-daemon "test${variant}UnitTest" "assemble$variant" \
     -Ptlk.native="$OUT/jniLibs" \
     -Psdl.java="$sdl_src/android-project/app/src/main/java" \
     -Ptlk.buildId="$build_id" \
     -Ptlk.version="$version" \
-    -Ptlk.romIdentity="$ROOT/cmake/rom_identity.txt"
+    -Ptlk.romIdentity="$ROOT/cmake/rom_identity.txt" \
+    ${signing:+-Ptlk.signing="$signing"}
 apk=$(ls "$ROOT"/android/app/build/outputs/apk/"${variant,,}"/*.apk | head -n1)
 cp "$apk" "$OUT/TLKRecomp-android-$ABI.apk"
 echo "apk: $OUT/TLKRecomp-android-$ABI.apk"
