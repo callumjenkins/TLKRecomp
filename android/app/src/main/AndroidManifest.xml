@@ -13,6 +13,20 @@
         android:allowBackup="false"
         android:theme="@android:style/Theme.DeviceDefault"
         android:hardwareAccelerated="true">
+        <activity
+            android:name=".LauncherActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".SlotsActivity" android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout" />
+        <activity android:name=".SettingsActivity" android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout" />
         <!-- A process of its own, which GameActivity ends on exit: SDL and the runtime keep their state in globals.
              GameActivity takes Back as a key event, which predictive back would replace. -->
         <activity
@@ -23,11 +37,6 @@
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
             android:screenOrientation="sensorLandscape"
             android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|density|keyboard|keyboardHidden|navigation|touchscreen|colorMode"
-            android:preferMinimalPostProcessing="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:preferMinimalPostProcessing="true" />
     </application>
 </manifest>

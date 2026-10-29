@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Builds the Android app (arm64) from your own ROM into build-android/, and with --install puts it on the
-# phone adb sees. Needs the Android SDK with NDK $NDK_VERSION, Python 3, cmake and ninja; Gradle runs from
-# android/gradlew on a JDK 17 or newer with javac (JAVA_HOME).
+# Builds the Android app (arm64) from your own ROM into build-android/, after the launcher's Kotlin unit tests,
+# and with --install puts it on the phone adb sees. Needs the Android SDK with NDK $NDK_VERSION, Python 3,
+# cmake and ninja; Gradle runs from android/gradlew on a JDK 17 or newer with javac (JAVA_HOME).
 #
 # usage: scripts/build_android.sh [-r ROM] [--native-only] [--release] [--install]
 set -euo pipefail
@@ -66,10 +66,17 @@ strip="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
 echo "native libraries in $libs"
 [ $native_only = 1 ] && exit 0
 
+id_h="$OUT/native-$ABI/tlk_build_id/tlk_build_id.h"
+build_id=$(sed -n 's/^#define TLK_BUILD_ID "\(.*\)"$/\1/p' "$id_h")
+version=$(sed -n 's/^#define TLK_BUILD_VERSION "\(.*\)"$/\1/p' "$id_h")
+[ -n "$build_id" ] || { echo "no TLK_BUILD_ID in $OUT/native-$ABI" >&2; exit 1; }
 variant=$([ $release = 1 ] && echo Release || echo Debug)
-"$ROOT/android/gradlew" -p "$ROOT/android" --no-daemon "assemble$variant" \
+"$ROOT/android/gradlew" -p "$ROOT/android" --no-daemon "test${variant}UnitTest" "assemble$variant" \
     -Ptlk.native="$OUT/jniLibs" \
-    -Psdl.java="$sdl_src/android-project/app/src/main/java"
+    -Psdl.java="$sdl_src/android-project/app/src/main/java" \
+    -Ptlk.buildId="$build_id" \
+    -Ptlk.version="$version" \
+    -Ptlk.romIdentity="$ROOT/cmake/rom_identity.txt"
 apk=$(ls "$ROOT"/android/app/build/outputs/apk/"${variant,,}"/*.apk | head -n1)
 cp "$apk" "$OUT/TLKRecomp-android-$ABI.apk"
 echo "apk: $OUT/TLKRecomp-android-$ABI.apk"
