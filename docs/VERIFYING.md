@@ -37,6 +37,9 @@ The level tapes start from the debug-menu level select (`tools/re/level_select.m
 | Idle | `scripts/check_idle_lle.sh` | `IDLE MATCH frames=12000 every=5` |
 | Native decompressor | `scripts/check_native_decomp.sh 3000` | `IDENTICAL` |
 | Save / load | `tlk_headless --frames 3000 --save-at 3000 s.state`, then `--load s.state --frames 6000` in a new process | same hash as an uninterrupted run |
+| Unit tests | `(cd build && ctest --output-on-failure)` | `100% tests passed` |
+| Save / resume | `scripts/check_state_resume.sh build/playtapes/l05_random.tape 9000 600=Title,2 1450=Hakuna,8 4000=Hakuna,6`: saves, resumes in new processes, the autosave and the build-id guard | `RESUME MATCH` |
+| Android unit tests | `scripts/build_android.sh` runs them before it packages | `BUILD SUCCESSFUL` |
 | Speedruns vs BizHawk | `tools/ram_sync_compare.py <headless ram log> <BizHawk ram log>` | in sync to the last poll (6987M 36,904, 6781M 37,093, 4735M 38,870) |
 | All Bugs | `scripts/check_allbugs.sh` | `ALLBUGS PASS` |
 | Remap / menu | `SDL_VIDEO_DRIVER=dummy build/tlk_sdl --rom <rom> --no-audio --selftest-remap` (under Xvfb the virtual pad's events don't arrive) | `PASS (0 failed)` |

@@ -2481,3 +2481,61 @@ option off: compare_modes MATCH (57ccb8d5, c897f389, dd861e16, 946033bd), 71/71 
 
 Not fixed: in level 9 the game moves the camera limits mid-level and the view jumps with them (All Bugs f57144 0 ->
 71, f58932 142 -> 71); it was so before part 4. Not checked: MinGW build.
+
+## Task SAVE: save states with a build id, the Save states menu, and an autosave
+
+The fork's Android launcher needs to tell which states it can load and to resume a game Android ended in the
+background. Every state write (slots, practice restart, level-select power-on, `--save-at`, autosave) now goes
+through `SaveStateFiles`: the json beside it is deleted, then the state, a `.png` of the PPU frame, and last the
+json (`runner/tlk_saveinfo.c`, through `.tmp` and a rename). The json names `TLK_BUILD_ID`, which
+`cmake/TlkBuildId.cmake` computes on every build: 12 hex digits of a SHA-256 over `generated/`,
+snesrecomp's runtime sources (`snesrecomp/runner/src`, which defines the snapshot), `cmake/runtime-patches/` and
+`runner/`, then the platform. `git describe` goes in the json as `version`, a label, so a
+commit that changes no code keeps every save; `tlk_build_id` checks that with a commit to a scratch repository. `LoadStateLive`, `--load` and `--load-at`
+refuse a state whose json names another build; a state with no json loads as before. The `TLKSTAT1` format is
+unchanged.
+
+The menu's new first section has Save 1-4 and Load 1-4, each naming the level and time; a load row is greyed out
+when its slot is empty or from another build. The autosave goes to `tlk_autosave.state` (or `--autosave PATH`) on
+`SDL_EVENT_DID_ENTER_BACKGROUND`, on quitting, and every `autosave_seconds` of frames played, but only inside a
+level: from when `$0008` leaves 0 after a load until the next load, and never on the title or in the attract demo
+(`$1E03` bit 15). `$0008` is 6 for long stretches of play, so practice mode's "reaches 4" missed the start of a
+level where Simba stands still (gameover.tape: on at f2740, now f1427). `$7FFF9E` changes on the title before the
+level loads, so a save with no level on or loading is named "Title".
+
+Evidence (2026-10-29, branch `android-launcher`):
+
+```
+scripts/check_state_resume.sh gameover.tape 9000 (11 frames 600-8500) + autosave   RESUME MATCH
+scripts/check_state_resume.sh l05_random.tape 9000 (600, mid-load 1450, 1561,
+  2300, 3000, 4000, 5600, 6000, 6300, 8000) + autosave + guard + json order          RESUME MATCH
+autosave frames, autosave_seconds = 10: attract none; l05_random 2160 2881 3602 4202 ...; gameover 2026 2626 3226 ...
+sidecar at l05_random f4000: level 5 "Hakuna", lives 6 (the HUD shows 6); l09_right "Pride Rock"
+ctest: tlk_touch, tlk_saveinfo, tlk_build_id, tlk_fiber_{ucontext,compat,android}; remap self-test PASS
+```
+
+A test-gaps audit then ran mutants against these checks. `check_state_resume.sh` now also checks the sidecar's level
+and lives where a frame is given as `FRAME=LEVEL,LIVES`, the autosave on quitting, no autosave in 6000 frames with no
+input, and `--load-at` refusing another build. Each fails on its mutant: autosave anywhere (10 autosaves with no
+input), no autosave on quitting, no "Title" name (f600 said Pridelands), and an unguarded `--load-at`. A json cut
+short still names its build, so the game refuses it when the build is another's; the launcher read it as no sidecar
+and offered it, and now reads the build key the same way. A build id longer than the sidecar's 95 characters would
+refuse its own states, so the build fails on one (`_Static_assert`). The self-test drives the Save states rows
+(`SlotRow`), and `tlk_build_id` checks the id covers `runner/` and that an unchanged id leaves the header alone.
+
+```
+scripts/check_state_resume.sh l05_random.tape 9000 600=Title,2 1450=Hakuna,8 4000=Hakuna,6   RESUME MATCH
+scripts/check_state_resume.sh gameover.tape 9000 600 3000 6000                               RESUME MATCH
+ctest 6/6; remap self-test PASS (0 failed); Kotlin unit tests 12/12
+```
+
+The timer counts only frames inside a level. It had counted the title too, so the first autosave came on the frame a
+level began (l05_random f1561, gameover f1427) and now comes 600 level frames in, with each load's frames left out.
+A save whose picture or json can't be written removes its state and reports the failure. `TlkBuildId.cmake` fails
+when a directory it hashes is missing, since an empty path globs from `/`.
+
+On the Fold 7 (2026-10-29, build `...-7597e659b2e4-Android-aarch64`): l05_random.tape to Hakuna Matata, Home, then
+`am kill` left no `uk.callum.tlkrecomp` process; the background autosave was `at_frame=4951` (Hakuna, 6 lives). The
+launcher showed Continue as "Hakuna, just now" with that picture, and Continue opened on the same screen with the same
+lives and health bars. Save 2 in the in-game menu wrote `tlk_slot2.{state,png,json}`, relabelled both rows "Hakuna
+03:48", and the launcher's Save slots showed "Slot 2: Hakuna, just now, 6 lives".

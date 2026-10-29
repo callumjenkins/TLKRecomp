@@ -130,8 +130,12 @@ Everything else:
 triggers = L/R; left stick or d-pad moves. Guide, or Back+Start, opens the menu; in it the d-pad moves, A selects,
 B goes back, Start closes.
 
-Save states are `tlk_slot1.state` .. `tlk_slot4.state`, in the same folder as the ini. They only load in the build
-that wrote them.
+Save states are `tlk_slot1.state` .. `tlk_slot4.state`, in the same folder as the ini, and the menu's first section,
+Save states, saves and loads them too. Each has a `.png` of the screen and a `.json` naming the level, the time
+and the build that wrote it. A state only loads in a build of the same code on the same platform (`tlk_sdl
+--build-id` prints the id, then the git version, which is only a label); one from another build is refused, and one with no `.json`, from an earlier build, loads as before. `autosave_seconds = N` in the ini
+also writes `tlk_autosave.state` every N seconds of play inside a level and on quitting; it is off by default on
+the desktop and every 60 seconds on Android.
 
 ## The settings menu
 
