@@ -258,6 +258,11 @@ if(NOT ANDROID)
     add_test(NAME tlk_saveinfo COMMAND tlk_saveinfo_test "${tlk_saveinfo_dir}")
     add_test(NAME tlk_build_id COMMAND "${CMAKE_COMMAND}" -DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/TlkBuildId.cmake
         -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tlk_build_id_test.d -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/tlk_build_id_test.cmake)
+    if(CMAKE_HOST_UNIX)
+        add_test(NAME install_linux_host
+            COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_linux_host_test.sh
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install_linux_host.sh ${CMAKE_CURRENT_BINARY_DIR}/install_linux_host_test.d)
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|aarch64)$")
         add_test(NAME tlk_build_id_has_layout_tag_not_platform COMMAND tlk_sdl --build-id)
         set_tests_properties(tlk_build_id_has_layout_tag_not_platform PROPERTIES
