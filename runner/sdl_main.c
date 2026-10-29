@@ -1204,8 +1204,10 @@ static bool SDLCALL WatchLifecycle(void *ud, SDL_Event *ev) {
     return true;
 }
 static uint16_t s_touch_held;
+static int s_touch_hold;   /* the menu closed under a finger: send the game no touch button until every finger lifts */
 
 static int TouchShown(void) {
+    if (s_gl_on) return 0;   /* the OpenGL presenter has no pass for it */
     return s_touch_mode == 1 || (s_touch_mode == 0 && s_touchscreen && !s_pad);
 }
 
@@ -1228,6 +1230,21 @@ static uint16_t TouchPadState(void) {
     TlkTouchFinger f[kMaxFingers];
     for (int i = 0; i < s_finger_n; i++) f[i] = s_fingers[i].f;
     return s_touch_held = tlk_touch_buttons(&l, f, s_finger_n);
+}
+
+/* What the game reads from the touch pad. */
+static uint16_t TouchGameState(void) {
+    uint16_t w = TouchPadState();
+    if (s_touch_hold) {
+        if (s_finger_n) return 0;
+        s_touch_hold = 0;
+    }
+    return w;
+}
+
+static void TouchReset(void) {
+    s_finger_n = 0;
+    s_touch_held = 0;
 }
 
 static void OpenMenu(void);
@@ -1432,7 +1449,7 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_VOLUME] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_VOLUME, "Audio", "Volume",
                           "Percent.", INT, 0, 100, 10, NULL, 0),
     [R_TOUCH] = MENU_ROW("tlk.touch", "Touch", "Touch pad",
-                         "Auto: shown on a touchscreen while no gamepad is connected.", CHOICE, 0, 2, 1, kTouchChoices, 3),
+                         "Auto: shown on a touchscreen while no gamepad is connected. Needs OpenGL off.", CHOICE, 0, 2, 1, kTouchChoices, 3),
     [R_TOUCH_SIZE] = MENU_ROW("tlk.touch_size", "Touch", "Size",
                               "Percent.", INT, 50, 150, 10, NULL, 0),
     [R_TOUCH_OPACITY] = MENU_ROW("tlk.touch_opacity", "Touch", "Opacity",
@@ -1592,7 +1609,10 @@ static void MenuShown(void *ctx, int open) {
     s_about = 0;
     BindLabels();
     if (open) { s_kbd_pad = 0; s_turbo_held = 0; TlkMenuImguiOpened(); }
-    else s_pad_hold = 1;
+    else {
+        s_pad_hold = 1;
+        s_touch_hold = s_finger_n > 0;
+    }
 }
 
 static int MenuRun(void *ctx, const RecompRuntimeUiItem *item) {
@@ -1672,7 +1692,16 @@ static void MenuOpenSection(int section) {
     for (int i = 0; i < section; i++) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_DOWN, 1, 0);
     recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
 }
-enum { kSectionLevel = 4, kSectionControls = 6, kSectionAbout = 8 };   /* Display, Graphics, Audio, Touch, Level select, Practice, Controls, System, About */
+/* A section's place in the menu: the menu lists sections in the order their first row comes in s_rows. */
+static int SectionOf(int row) {
+    int n = 0;
+    for (int i = 0; i < row; i++) {
+        int first = 1;
+        for (int j = 0; j < i && first; j++) first = strcmp(s_rows[j].section, s_rows[i].section) != 0;
+        if (first && strcmp(s_rows[i].section, s_rows[row].section)) n++;
+    }
+    return n;
+}
 
 /* Load a savestate during play (F5-F8, F9). */
 static int LoadStateLive(const char *path) {
@@ -1844,6 +1873,19 @@ static void StPadEvent(SDL_GamepadButton b) {   /* button event without a device
     StPump();
 }
 
+/* A finger event at (x, y) in the window's pixels. */
+static void StFinger(SDL_EventType type, SDL_FingerID id, float x, float y) {
+    int dw, dh;
+    RenderOutputSize(&dw, &dh);
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = type;
+    ev.tfinger.fingerID = id;
+    ev.tfinger.x = x / (float)dw;
+    ev.tfinger.y = y / (float)dh;
+    HandleEvent(&ev);
+}
+
 static int RemapSelfTest(void) {
     /* Save/reload goes to a scratch ini so the player's settings are never touched. */
     static char st_ini[512];
@@ -1863,7 +1905,7 @@ static int RemapSelfTest(void) {
     StKey(SDLK_Z, 0);
     StTap(SDLK_TAB);
     StCheck(s_menu_open, "Tab opens the settings menu");
-    for (int i = 0; i < kSectionControls; i++) StTap(SDLK_DOWN);
+    for (int i = 0; i < SectionOf(R_BIND0); i++) StTap(SDLK_DOWN);
     StTap(SDLK_RETURN);
     StTap(SDLK_RETURN);
     StCheck(s_key_wait && s_key_sel == 0, "Controls opens on B, Enter waits for a key");
@@ -1978,6 +2020,56 @@ static int RemapSelfTest(void) {
     StTap(SDLK_ESCAPE);
     StTap(SDLK_ESCAPE);
     StCheck(!s_menu_open, "Esc twice backs out of System and closes");
+
+    /* The touch pad, with fingers on its buttons where this window lays them out. */
+    int touch_mode = s_touch_mode, touch_size = s_touch_size, touch_opacity = s_touch_opacity, dw, dh;
+    s_touch_mode = 1;
+    RenderOutputSize(&dw, &dh);
+    TlkTouchLayout tl;
+    TouchLayoutNow(&tl, dw, dh);
+    const TlkTouchButton *tb = NULL, *ts = NULL;
+    for (int i = 0; i < TLK_TOUCH_BUTTONS; i++) {
+        if (tl.buttons[i].bit == TLK_PAD_B) tb = &tl.buttons[i];
+        if (tl.buttons[i].bit == TLK_PAD_START) ts = &tl.buttons[i];
+    }
+    StFinger(SDL_EVENT_FINGER_DOWN, 1, tb->x, tb->y);
+    StCheck(TouchGameState() == TLK_PAD_B, "a finger on touch B presses B");
+    StFinger(SDL_EVENT_FINGER_MOTION, 1, ts->x, ts->y);
+    StCheck(TouchGameState() == TLK_PAD_START, "sliding it onto Start presses Start instead");
+    StFinger(SDL_EVENT_FINGER_UP, 1, ts->x, ts->y);
+    StCheck(TouchGameState() == 0, "lifting it presses nothing");
+    StFinger(SDL_EVENT_FINGER_DOWN, 2, tl.dpad_x + tl.dpad_r, tl.dpad_y);
+    StFinger(SDL_EVENT_FINGER_MOTION, 2, tl.dpad_x + 4 * tl.dpad_r, tl.dpad_y);
+    StCheck(TouchGameState() == TLK_PAD_RIGHT, "a finger that slides off the d-pad keeps pressing right");
+    StFinger(SDL_EVENT_FINGER_CANCELED, 2, 0, 0);
+    StCheck(TouchGameState() == 0, "a cancelled finger presses nothing");
+    StFinger(SDL_EVENT_FINGER_DOWN, 3, tl.menu_x, tl.menu_y);
+    StFinger(SDL_EVENT_FINGER_UP, 3, tl.menu_x, tl.menu_y);
+    StCheck(s_menu_open, "the touch menu button opens the menu");
+    StFinger(SDL_EVENT_FINGER_DOWN, 4, ts->x, ts->y);
+    StCheck(!s_menu_open, "touch Start closes it");
+    StCheck(TouchGameState() == 0, "touch Start still held after closing is not sent to the game");
+    StFinger(SDL_EVENT_FINGER_UP, 4, ts->x, ts->y);
+    TouchGameState();
+    StFinger(SDL_EVENT_FINGER_DOWN, 5, ts->x, ts->y);
+    StCheck(TouchGameState() == TLK_PAD_START, "after release, touch Start reaches the game again");
+    StFinger(SDL_EVENT_FINGER_UP, 5, ts->x, ts->y);
+    StFinger(SDL_EVENT_FINGER_DOWN, 6, tb->x, tb->y);
+    TouchReset();
+    StCheck(s_finger_n == 0 && s_touch_held == 0 && TouchGameState() == 0,
+            "coming back from the background drops every finger and held button");
+    s_touch_mode = 2;
+    StFinger(SDL_EVENT_FINGER_DOWN, 7, tb->x, tb->y);
+    StCheck(TouchGameState() == 0, "with touch off a finger presses nothing");
+    StFinger(SDL_EVENT_FINGER_UP, 7, tb->x, tb->y);
+    s_touch_size = 150;
+    s_touch_opacity = 70;
+    SaveConfig();
+    s_touch_mode = 0, s_touch_size = 100, s_touch_opacity = 40;
+    LoadConfig(s_cfg_path);
+    StCheck(s_touch_mode == 2 && s_touch_size == 150 && s_touch_opacity == 70, "touch settings were saved to the ini");
+    s_touch_mode = touch_mode, s_touch_size = touch_size, s_touch_opacity = touch_opacity;
+    TouchReset();
 
     /* Hotplug and live state with an SDL virtual gamepad. */
     SDL_VirtualJoystickDesc desc;
@@ -2271,9 +2363,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--load") && v) { load_path = v; i++; }
         else if (!strcmp(a, "--menu-at") && v) { menu_at = atol(v); i++; }
         else if (!strcmp(a, "--menu-page") && v) {
-            menu_page = !strcmp(v, "controls") || !strcmp(v, "keys") ? kSectionControls
-                      : !strcmp(v, "level") ? kSectionLevel
-                      : !strcmp(v, "about") ? kSectionAbout : -1;
+            menu_page = !strcmp(v, "controls") || !strcmp(v, "keys") ? SectionOf(R_BIND0)
+                      : !strcmp(v, "level") ? SectionOf(R_LEVEL)
+                      : !strcmp(v, "about") ? SectionOf(R_ABOUT) : -1;
             i++;
         }
         else if (!strcmp(a, "--selftest-remap")) selftest = 1;
@@ -2421,7 +2513,7 @@ int main(int argc, char **argv) {
             while (running && SDL_GetAtomicInt(&s_background))
                 if (SDL_WaitEventTimeout(&ev, 100)) HandleEvent(&ev);
             if (astream) { SDL_ClearAudioStream(astream); SDL_ResumeAudioStreamDevice(astream); }
-            s_finger_n = 0;
+            TouchReset();
             deadline = SDL_GetTicksNS();
             continue;
         }
@@ -2436,7 +2528,7 @@ int main(int argc, char **argv) {
         int macro = s_macro_i < s_macro_n;   /* level select: fast-forward its input */
         uint32_t pad = macro ? s_macro[s_macro_i++]
                      : input_path ? (s_polled ? TapePolled() : TapeFrame(frame))
-                                  : (uint32_t)(s_kbd_pad | GamepadState() | TouchPadState());
+                                  : (uint32_t)(s_kbd_pad | GamepadState() | TouchGameState());
         if (s_rec) {
             uint8_t b[2] = { (uint8_t)pad, (uint8_t)(pad >> 8) };
             fwrite(b, 1, 2, s_rec);
@@ -2468,7 +2560,7 @@ int main(int argc, char **argv) {
         if (practice_level >= 0) { PrStartLevel(practice_level % 14); practice_level = -1; }
         if (menu_at >= 0 && frame == menu_at) {
             if (menu_page >= 0) MenuOpenSection(menu_page);
-            if (menu_page == kSectionAbout) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
+            if (menu_page == SectionOf(R_ABOUT)) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
             else OpenMenu();
             menu_shown = 1;
             menu_at = -1;
