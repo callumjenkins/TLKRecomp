@@ -1,0 +1,250 @@
+{
+  "decide": [
+    {
+      "id": "nothing anywhere",
+      "local": null,
+      "remote": null,
+      "want": "keep"
+    },
+    {
+      "id": "only local",
+      "local": {
+        "saved_unix": 100,
+        "state_sha256": "aa",
+        "sha_ok": true
+      },
+      "remote": null,
+      "want": "push"
+    },
+    {
+      "id": "only remote",
+      "local": null,
+      "remote": {
+        "saved_unix": 100,
+        "state_sha256": "aa"
+      },
+      "want": "pull"
+    },
+    {
+      "id": "remote newer",
+      "local": {
+        "saved_unix": 100,
+        "state_sha256": "aa",
+        "sha_ok": true
+      },
+      "remote": {
+        "saved_unix": 200,
+        "state_sha256": "bb"
+      },
+      "want": "pull"
+    },
+    {
+      "id": "local newer",
+      "local": {
+        "saved_unix": 200,
+        "state_sha256": "aa",
+        "sha_ok": true
+      },
+      "remote": {
+        "saved_unix": 100,
+        "state_sha256": "bb"
+      },
+      "want": "push"
+    },
+    {
+      "id": "same state",
+      "local": {
+        "saved_unix": 100,
+        "state_sha256": "aa",
+        "sha_ok": true
+      },
+      "remote": {
+        "saved_unix": 300,
+        "state_sha256": "aa"
+      },
+      "want": "keep"
+    },
+    {
+      "id": "equal time keeps local",
+      "local": {
+        "saved_unix": 100,
+        "state_sha256": "aa",
+        "sha_ok": true
+      },
+      "remote": {
+        "saved_unix": 100,
+        "state_sha256": "bb"
+      },
+      "want": "keep"
+    },
+    {
+      "id": "bad local sha is not pushed",
+      "local": {
+        "saved_unix": 200,
+        "state_sha256": "aa",
+        "sha_ok": false
+      },
+      "remote": null,
+      "want": "keep"
+    },
+    {
+      "id": "bad local sha is replaced",
+      "local": {
+        "saved_unix": 200,
+        "state_sha256": "aa",
+        "sha_ok": false
+      },
+      "remote": {
+        "saved_unix": 100,
+        "state_sha256": "bb"
+      },
+      "want": "pull"
+    },
+    {
+      "id": "local from a build before sync has no sha",
+      "local": {
+        "saved_unix": 200,
+        "sha_ok": false
+      },
+      "remote": {
+        "saved_unix": 100,
+        "state_sha256": "bb"
+      },
+      "want": "pull"
+    }
+  ],
+  "continue": [
+    {
+      "id": "none",
+      "build": "b1",
+      "candidates": [],
+      "want": null
+    },
+    {
+      "id": "newest across devices",
+      "build": "b1",
+      "candidates": [
+        {
+          "where": "local",
+          "build": "b1",
+          "saved_unix": 100,
+          "state_sha256": "h1000"
+        },
+        {
+          "where": "tlk_autosave@cj-cos-laptop",
+          "build": "b1",
+          "saved_unix": 300,
+          "state_sha256": "h3001"
+        },
+        {
+          "where": "tlk_autosave@cj-desk-pc",
+          "build": "b1",
+          "saved_unix": 200,
+          "state_sha256": "h2002"
+        }
+      ],
+      "want": "tlk_autosave@cj-cos-laptop"
+    },
+    {
+      "id": "another build is not offered",
+      "build": "b1",
+      "candidates": [
+        {
+          "where": "local",
+          "build": "b1",
+          "saved_unix": 100,
+          "state_sha256": "h1000"
+        },
+        {
+          "where": "tlk_autosave@cj-cos-laptop",
+          "build": "b0",
+          "saved_unix": 300,
+          "state_sha256": "h3001"
+        }
+      ],
+      "want": "local"
+    },
+    {
+      "id": "only another build",
+      "build": "b1",
+      "candidates": [
+        {
+          "where": "tlk_autosave@cj-cos-laptop",
+          "build": "b0",
+          "saved_unix": 300,
+          "state_sha256": "h3000"
+        }
+      ],
+      "want": null
+    },
+    {
+      "id": "a tie goes to local",
+      "build": "b1",
+      "candidates": [
+        {
+          "where": "tlk_autosave@cj-cos-laptop",
+          "build": "b1",
+          "saved_unix": 300,
+          "state_sha256": "h3000"
+        },
+        {
+          "where": "local",
+          "build": "b1",
+          "saved_unix": 300,
+          "state_sha256": "h3001"
+        }
+      ],
+      "want": "local"
+    },
+    {
+      "id": "a candidate without a hash is skipped",
+      "build": "b1",
+      "candidates": [
+        {
+          "where": "local",
+          "build": "b1",
+          "saved_unix": 100,
+          "state_sha256": "aa"
+        },
+        {
+          "where": "tlk_autosave@x",
+          "build": "b1",
+          "saved_unix": 900
+        }
+      ],
+      "want": "local"
+    }
+  ],
+  "device_name": [
+    {
+      "id": "spaces become dashes",
+      "raw": "Galaxy Z Fold7",
+      "want": "Galaxy-Z-Fold7"
+    },
+    {
+      "id": "apostrophe",
+      "raw": "Callum's Z Fold7",
+      "want": "Callum-s-Z-Fold7"
+    },
+    {
+      "id": "nothing usable",
+      "raw": "  ✨ ",
+      "want": "device"
+    },
+    {
+      "id": "hostname kept",
+      "raw": "cj-cos-laptop",
+      "want": "cj-cos-laptop"
+    },
+    {
+      "id": "newline",
+      "raw": "my\nlaptop",
+      "want": "my-laptop"
+    },
+    {
+      "id": "capped at 63",
+      "raw": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "want": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+  ]
+}
