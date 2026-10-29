@@ -2539,3 +2539,62 @@ On the Fold 7 (2026-10-29, build `...-7597e659b2e4-Android-aarch64`): l05_random
 launcher showed Continue as "Hakuna, just now" with that picture, and Continue opened on the same screen with the same
 lives and health bars. Save 2 in the in-game menu wrote `tlk_slot2.{state,png,json}`, relabelled both rows "Hakuna
 03:48", and the launcher's Save slots showed "Slot 2: Hakuna, just now, 6 lives".
+
+## Task FOLD: the menu on a phone, the touch pad's size, haptics, signing, and saves outside the app
+
+On Android the settings menu was recomp-ui's software menu drawn into the 256x224 picture: its footer was cut off
+at "ENT", taps on its rows did nothing, and the touch pad was drawn over it. `tlk_menu_imgui.cpp` now also draws
+through an `SDL_Renderer`, with Dear ImGui's `imgui_impl_sdlrenderer3` from v1.91.9b, the release recomp-ui vendors
+(`runner/third_party/imgui/`; recomp-ui has only the SDL2 one). Android asks for recomp-ui's touch-friendly layout,
+which sizes rows and text from the screen's short side. The touch pad hides while that menu is open, since the menu takes
+taps itself; with the software menu (ImGui failed to start) the pad still drives it. The desktop with `opengl = 0`
+gets the same ImGui menu.
+
+The touch pad was sized by the screen's short side, so on the Fold's inner screen in landscape (2184x1968) its unit
+was 1968 px.
+saturn-recomp and megadrive-recomp size theirs at 480 density-independent pixels; `tlk_touch_unit` does the same
+(`480 x SDL_GetWindowDisplayScale x touch_size%`, 1260 px on the Fold at 420 dpi), and the layout sits inside
+`SDL_GetWindowSafeArea`, clear of the system bars and the cutout. Each new touch button press plays a 10 ms rumble
+on the phone's vibrator, which SDL lists as the haptic device `VIBRATOR_SERVICE` (`touch_haptics`).
+
+`scripts/build_android.sh` signs both build types with the key named in
+`~/.local/share/tlk-recomp/release.properties` when it exists. That keystore is a copy of the debug key the phone's
+install was signed with, so the first build signed with it installed over the old one and kept the app's files.
+The launcher's "Export saves" writes the states, pictures, sidecars, and ini to a zip through the system's file
+picker, and "Import saves" restores them, json last per slot, taking only the names it knows. Widescreen defaults
+to "Fit the screen" on Android: on the inner screen, narrower than the picture, it widens nothing, and on a
+2520x1080 screen it fills the width.
+
+Evidence (2026-10-29, branch `android-fold`):
+
+```
+ctest 6/6 (tlk_touch: the 480 dp unit, the same pad size on both Fold screens, every control inside a safe area,
+  the safe area in pixels, every control shifted with the area's origin)
+remap self-test PASS (0 failed): ImGui starts on the SDL renderer and hides the pad; a finger that closed it is not
+  sent to the game and doesn't tick; a press ticks once, a slide onto another button ticks again, touch_haptics = 0
+  and the Vibrate row turn it off
+Kotlin unit tests 20/20 (SaveArchiveTest: every name byte for byte, only the archive's slots replaced, no old json
+  left beside a new state, ../ and unknown names skipped, an archive cut short changes nothing, an ini-only archive)
+mutants: the short-side unit, each axis of the safe area's offset, and four in SaveArchive (no json, old json kept,
+  .import files kept, no name filter) each fail a test
+scripts/check_state_resume.sh l05_random.tape 9000 600=Title,2 1450=Hakuna,8 4000=Hakuna,6   RESUME MATCH
+scripts/compare_modes.sh 600 3000; -p tapes/6987M.read.tape 1200 6000                        MATCH (57ccb8d5, c897f389, d8e93da4, a07184e1)
+scripts/check_all_tapes.sh -s                                                                 45 MATCH, 0 MISMATCH
+(this worktree has no build/tapes/, so 6987M ran from the committed polled tape, and the 45 are all its play tapes)
+```
+
+A test-gaps audit found the desktop's renderer menu drawn full size and cut off in a window smaller than 768x672:
+the vendored backend scales only clip rects by FramebufferScale, so `SDL_SetRenderScale` now applies it. On the
+phone the menu font fell back to ImGui's own after the first launch: `SDL_GetBasePath` is `./` there, and SDL
+resolves a relative path against internal storage where `fopen` does not, so the font now loads through
+`SDL_LoadFile`. The haptic tick uses only `VIBRATOR_SERVICE`, the one haptic SDL lists on Android, and export refuses
+while the game is running, as import does.
+
+On the Fold 7's inner screen: the pad's unit is 1260 px where it was 1968. The menu button opened the ImGui menu
+with no pad over it and no F-key hints. A tap on "Save 1" wrote `tlk_slot1.{state,png,json}`, and the status
+"Saved slot 1" showed in the footer. Resume closed it and the pad came back. A tap on B played a 10 ms effect at
+amplitude 0.5 from `uk.callum.tlkrecomp` (`dumpsys vibrator_manager`, usage TOUCH). Export saved `tlk-saves.zip`
+with three states and their files. After `tlk_slot2.*` was deleted, Import put all three back ("Imported 3 saves.").
+`wm size 1080x2520` while the game ran redrew it at the new size without a restart, with the pad under the picture,
+and `wm size 2520x1080` in the first level showed the level 21:9 wide with the HUD at its edges and the pad at the same
+1260 px unit. A real fold to the outer screen has not been tried.

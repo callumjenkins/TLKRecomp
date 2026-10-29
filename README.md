@@ -300,6 +300,28 @@ the single .exe must show the same frame 600. Pushing a `v*` tag runs it in CI (
 builds the macOS packages on a Mac runner, and publishes everything as one release. These checks are a quick subset:
 run the full gates in `docs/VERIFYING.md` before tagging.
 
+## Android
+
+`scripts/build_android.sh -r ROM --install` builds an arm64 APK from your own ROM and installs it on the phone `adb`
+sees. It needs the Android SDK with the NDK the script names, and a JDK 17 or newer in `JAVA_HOME`. Nothing is
+published: the APK is for your own phone. It has been played on a Galaxy Z Fold 7.
+
+The app opens on a launcher: choose the ROM once (it is checked against the USA dump), then Continue from the
+autosave, start a new game, or pick a save slot. Settings holds the picture, the touch pad, the volume, and the
+autosave interval. "Export saves" writes the states, their pictures, and the ini to one zip, and "Import saves" puts
+them back. The zip is the only copy that survives an uninstall.
+
+In the game a touch pad is drawn while no controller is connected. Its buttons are sized by the screen's density,
+so they are the same size on any screen with room for them. The pad stays clear of the system bars and the camera
+cutout, and each press gives a short vibration (`touch_haptics = 0` turns that off). The menu button at the top, or
+Back, opens the settings menu, and you tap its rows to pick them. Widescreen starts at "Fit the screen", which
+fills the outer screen in landscape and leaves the near-square inner one as it is.
+
+The script signs every build with the key named in `~/.local/share/tlk-recomp/release.properties` when that file
+exists (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`, with `storeFile` relative to the file). Android only
+installs a build over another signed with the same key, so keep that folder backed up: a new key means uninstalling,
+which deletes the saves.
+
 ## How it works
 
 The ROM's code is found and translated to C ahead of time, then compiled like any other program: 1,305 of 1,305
