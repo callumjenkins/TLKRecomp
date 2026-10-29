@@ -6,7 +6,17 @@
 static float MinF(float a, float b) { return a < b ? a : b; }
 static float MaxF(float a, float b) { return a > b ? a : b; }
 
-void tlk_touch_layout(TlkTouchLayout *l, int w, int h, float unit) {
+float tlk_touch_unit(float display_scale, int size_percent) {
+    return 480.0f * (display_scale > 0 ? display_scale : 1.0f) * (float)size_percent / 100.0f;
+}
+
+TlkTouchRect tlk_touch_area(int dw, int dh, int ww, int wh, int sx, int sy, int sw, int sh) {
+    if (ww <= 0 || wh <= 0 || sw <= 0 || sh <= 0) return (TlkTouchRect){ 0, 0, (float)dw, (float)dh };
+    float kx = (float)dw / (float)ww, ky = (float)dh / (float)wh;
+    return (TlkTouchRect){ (float)sx * kx, (float)sy * ky, (float)sw * kx, (float)sh * ky };
+}
+
+void tlk_touch_layout(TlkTouchLayout *l, float x, float y, float w, float h, float unit) {
     float u = MinF(unit, MinF(w / 1.1f, h / 0.56f)), m = 0.05f * u;
     l->dpad_r = 0.17f * u;
     l->dpad_x = m + l->dpad_r;
@@ -31,6 +41,9 @@ void tlk_touch_layout(TlkTouchLayout *l, int w, int h, float unit) {
     *b++ = (TlkTouchButton){ "L", TLK_PAD_L, TLK_TOUCH_PILL, l->dpad_x, l->dpad_y - l->dpad_r - above - sh / 2, sw, sh };
     float top = cy - spread - r;
     *b++ = (TlkTouchButton){ "R", TLK_PAD_R, TLK_TOUCH_PILL, w - m - sw / 2, top - above - sh / 2, sw, sh };
+
+    l->dpad_x += x, l->dpad_y += y, l->menu_x += x, l->menu_y += y;
+    for (int i = 0; i < TLK_TOUCH_BUTTONS; i++) l->buttons[i].x += x, l->buttons[i].y += y;
 }
 
 int tlk_touch_on_dpad(const TlkTouchLayout *l, float x, float y) {

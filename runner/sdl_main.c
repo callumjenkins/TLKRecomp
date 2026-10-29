@@ -1269,8 +1269,13 @@ static int TouchShown(void) {
     return s_touch_mode == 1 || (s_touch_mode == 0 && s_touchscreen && !s_pad);
 }
 
+/* Laid out clear of the system bars and the cutout. */
 static void TouchLayoutNow(TlkTouchLayout *l, int dw, int dh) {
-    tlk_touch_layout(l, dw, dh, (float)SDL_min(dw, dh) * (float)s_touch_size / 100.0f);
+    SDL_Rect safe = { 0, 0, 0, 0 };
+    int ww = 0, wh = 0;
+    if (win && !(SDL_GetWindowSafeArea(win, &safe) && SDL_GetWindowSize(win, &ww, &wh))) ww = wh = 0;
+    TlkTouchRect a = tlk_touch_area(dw, dh, ww, wh, safe.x, safe.y, safe.w, safe.h);
+    tlk_touch_layout(l, a.x, a.y, a.w, a.h, tlk_touch_unit(win ? SDL_GetWindowDisplayScale(win) : 1.0f, s_touch_size));
 }
 
 static void RenderOutputSize(int *dw, int *dh) {

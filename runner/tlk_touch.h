@@ -40,7 +40,16 @@ typedef struct {
     int on_dpad;
 } TlkTouchFinger;
 
-void tlk_touch_layout(TlkTouchLayout *l, int w, int h, float unit);
+/* The unit for 480 density-independent pixels. display_scale is SDL's: pixels per density-independent pixel. */
+float tlk_touch_unit(float display_scale, int size_percent);
+typedef struct { float x, y, w, h; } TlkTouchRect;
+
+/* The window's safe area (sx, sy, sw, sh, in window coordinates, ww by wh) in the pixels of a dw by dh
+ * output. The whole output when the window's size or its safe area is unknown (0). */
+TlkTouchRect tlk_touch_area(int dw, int dh, int ww, int wh, int sx, int sy, int sw, int sh);
+/* Lays the pad out in the rectangle at (x, y), w by h pixels, with `unit` shrunk to fit it: no more than
+ * w / 1.1 and h / 0.56. */
+void tlk_touch_layout(TlkTouchLayout *l, float x, float y, float w, float h, float unit);
 /* The d-pad takes a finger a little outside its arms, but never one on a button. */
 int tlk_touch_on_dpad(const TlkTouchLayout *l, float x, float y);
 int tlk_touch_on_menu(const TlkTouchLayout *l, float x, float y);

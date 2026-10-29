@@ -15,8 +15,10 @@ static int s_failed;
         }                                                                     \
     } while (0)
 
-/* The Fold 7's outer and inner screens in landscape, a small tablet, and a small old phone. */
-static const int kScreens[][2] = { { 2520, 1080 }, { 2184, 1968 }, { 1280, 800 }, { 800, 480 } };
+/* The Fold 7's outer and inner screens in landscape, a small tablet, and a small old phone, each with
+ * its display scale (the Fold's 420 dpi is 2.625). */
+static const struct { int w, h; float scale; } kScreens[] = {
+    { 2520, 1080, 2.625f }, { 2184, 1968, 2.625f }, { 1280, 800, 1.5f }, { 800, 480, 1.5f } };
 enum { kScreenCount = sizeof kScreens / sizeof kScreens[0] };
 /* touch_size at its minimum, default, and maximum, in percent. */
 static const int kSizes[] = { 50, 100, 150 };
@@ -24,8 +26,7 @@ enum { kSizeCount = sizeof kSizes / sizeof kSizes[0] };
 
 static TlkTouchLayout LayoutAt(int s, int size) {
     TlkTouchLayout l;
-    int w = kScreens[s][0], h = kScreens[s][1];
-    tlk_touch_layout(&l, w, h, (float)(w < h ? w : h) * (float)size / 100.0f);
+    tlk_touch_layout(&l, 0, 0, (float)kScreens[s].w, (float)kScreens[s].h, tlk_touch_unit(kScreens[s].scale, size));
     return l;
 }
 static TlkTouchLayout Layout(int s) { return LayoutAt(s, 100); }
@@ -47,12 +48,12 @@ static void touch_finger_on_each_button_gives_its_bit(void) {
         uint16_t all = 0;
         for (int i = 0; i < TLK_TOUCH_BUTTONS; i++) {
             const TlkTouchButton *b = &l.buttons[i];
-            CHECK(Held1(&l, b->x, b->y, 0) == b->bit, "%s on %dx%d", b->label, kScreens[s][0], kScreens[s][1]);
+            CHECK(Held1(&l, b->x, b->y, 0) == b->bit, "%s on %dx%d", b->label, kScreens[s].w, kScreens[s].h);
             all |= b->bit;
         }
         CHECK(all == (TLK_PAD_B | TLK_PAD_Y | TLK_PAD_SELECT | TLK_PAD_START | TLK_PAD_A | TLK_PAD_X |
                       TLK_PAD_L | TLK_PAD_R), "buttons %04x", all);
-        CHECK(Held1(&l, kScreens[s][0] / 2.0f, kScreens[s][1] / 2.0f, 0) == 0, "the middle of the screen");
+        CHECK(Held1(&l, kScreens[s].w / 2.0f, kScreens[s].h / 2.0f, 0) == 0, "the middle of the screen");
     }
 }
 
@@ -77,8 +78,8 @@ static void touch_dpad_and_menu_take_fingers_near_them(void) {
     CHECK(tlk_touch_on_dpad(&l, l.dpad_x + 1.1f * l.dpad_r, l.dpad_y), "just past an arm");
     CHECK(!tlk_touch_on_dpad(&l, l.dpad_x + 1.3f * l.dpad_r, l.dpad_y), "well past an arm");
     CHECK(tlk_touch_on_menu(&l, l.menu_x, l.menu_y), "the menu button");
-    CHECK(tlk_touch_on_menu(&l, kScreens[0][0] / 2.0f, l.menu_y + 1.4f * l.menu_r), "just below the menu button");
-    CHECK(!tlk_touch_on_menu(&l, kScreens[0][0] / 2.0f, kScreens[0][1] / 2.0f), "the middle of the screen");
+    CHECK(tlk_touch_on_menu(&l, kScreens[0].w / 2.0f, l.menu_y + 1.4f * l.menu_r), "just below the menu button");
+    CHECK(!tlk_touch_on_menu(&l, kScreens[0].w / 2.0f, kScreens[0].h / 2.0f), "the middle of the screen");
 }
 
 static void touch_finger_near_a_button_takes_the_nearest(void) {
@@ -125,7 +126,7 @@ static void touch_layout_fits_every_screen_and_size_without_overlap(void) {
     for (int s = 0; s < kScreenCount; s++)
         for (int z = 0; z < kSizeCount; z++) {
             TlkTouchLayout l = LayoutAt(s, kSizes[z]);
-            int w = kScreens[s][0], h = kScreens[s][1];
+            int w = kScreens[s].w, h = kScreens[s].h;
             for (int i = 0; i < TLK_TOUCH_BUTTONS; i++) {
                 const TlkTouchButton *a = &l.buttons[i];
                 float rw = a->shape == TLK_TOUCH_ROUND ? a->w : a->w / 2, rh = a->shape == TLK_TOUCH_ROUND ? a->w : a->h / 2;
@@ -145,7 +146,7 @@ static void touch_layout_fits_every_screen_and_size_without_overlap(void) {
 
 static void touch_pad_too_big_for_the_screen_shrinks_to_fit(void) {
     TlkTouchLayout l;
-    tlk_touch_layout(&l, 800, 480, 10000.0f);
+    tlk_touch_layout(&l, 0, 0, 800, 480, 10000.0f);
     CHECK(l.dpad_x - l.dpad_r >= 0 && l.dpad_y + l.dpad_r <= 480, "the d-pad on screen");
     for (int i = 0; i < TLK_TOUCH_BUTTONS; i++) {
         const TlkTouchButton *b = &l.buttons[i];
@@ -155,7 +156,62 @@ static void touch_pad_too_big_for_the_screen_shrinks_to_fit(void) {
     CHECK(l.menu_x == 400.0f && l.menu_y - l.menu_r >= 0 && l.menu_y < 100, "the menu button top centre");
 }
 
+static void touch_unit_is_480_density_independent_pixels_times_the_size(void) {
+    CHECK(tlk_touch_unit(2.625f, 100) == 1260.0f, "%g", tlk_touch_unit(2.625f, 100));
+    CHECK(tlk_touch_unit(2.625f, 50) == 630.0f, "%g", tlk_touch_unit(2.625f, 50));
+    CHECK(tlk_touch_unit(1.0f, 150) == 720.0f, "%g", tlk_touch_unit(1.0f, 150));
+    CHECK(tlk_touch_unit(0.0f, 100) == 480.0f, "an unknown scale counts as 1: %g", tlk_touch_unit(0.0f, 100));
+}
+
+static void touch_pad_is_the_same_size_on_both_fold_screens(void) {
+    TlkTouchLayout outer = Layout(0), inner = Layout(1);
+    CHECK(outer.dpad_r == inner.dpad_r, "d-pad %g outer, %g inner", outer.dpad_r, inner.dpad_r);
+    CHECK(Find(&outer, TLK_PAD_A)->w == Find(&inner, TLK_PAD_A)->w, "A %g outer, %g inner",
+          Find(&outer, TLK_PAD_A)->w, Find(&inner, TLK_PAD_A)->w);
+}
+
+/* The Fold's outer screen in landscape with the cutout on the left and the navigation bar on the right. */
+static void touch_pad_stays_inside_the_safe_area(void) {
+    const float x = 110, y = 40, w = 2520 - 110 - 130, h = 1080 - 40;
+    TlkTouchLayout l;
+    tlk_touch_layout(&l, x, y, w, h, tlk_touch_unit(2.625f, 150));
+    CHECK(l.dpad_x - l.dpad_r >= x && l.dpad_y + l.dpad_r <= y + h, "the d-pad inside: %g %g", l.dpad_x, l.dpad_y);
+    for (int i = 0; i < TLK_TOUCH_BUTTONS; i++) {
+        const TlkTouchButton *b = &l.buttons[i];
+        float rw = b->shape == TLK_TOUCH_ROUND ? b->w : b->w / 2, rh = b->shape == TLK_TOUCH_ROUND ? b->w : b->h / 2;
+        CHECK(b->x - rw >= x && b->x + rw <= x + w && b->y - rh >= y && b->y + rh <= y + h, "%s inside: %g %g",
+              b->label, b->x, b->y);
+    }
+    CHECK(l.menu_x == x + w / 2 && l.menu_y - l.menu_r >= y, "the menu button top centre of the safe area");
+}
+
+/* A HiDPI window: 1000x500 points drawn at 2000x1000 pixels, with 40 points of bar on the left. */
+static void touch_area_is_the_safe_area_in_pixels_or_the_whole_output(void) {
+    TlkTouchRect a = tlk_touch_area(2000, 1000, 1000, 500, 40, 10, 900, 480);
+    CHECK(a.x == 80 && a.y == 20 && a.w == 1800 && a.h == 960, "%g %g %g %g", a.x, a.y, a.w, a.h);
+    a = tlk_touch_area(2000, 1000, 0, 0, 40, 10, 900, 480);
+    CHECK(a.x == 0 && a.y == 0 && a.w == 2000 && a.h == 1000, "no window size: %g %g %g %g", a.x, a.y, a.w, a.h);
+    a = tlk_touch_area(2000, 1000, 1000, 500, 0, 0, 0, 0);
+    CHECK(a.x == 0 && a.w == 2000 && a.h == 1000, "an empty safe area: %g %g %g %g", a.x, a.y, a.w, a.h);
+}
+
+static void touch_layout_at_an_origin_is_the_one_at_zero_shifted(void) {
+    TlkTouchLayout o, l;
+    tlk_touch_layout(&o, 0, 0, 2000, 900, 1260);
+    tlk_touch_layout(&l, 110, 40, 2000, 900, 1260);
+    CHECK(l.dpad_x == o.dpad_x + 110 && l.dpad_y == o.dpad_y + 40 && l.dpad_r == o.dpad_r, "the d-pad");
+    CHECK(l.menu_x == o.menu_x + 110 && l.menu_y == o.menu_y + 40, "the menu button");
+    for (int i = 0; i < TLK_TOUCH_BUTTONS; i++)
+        CHECK(l.buttons[i].x == o.buttons[i].x + 110 && l.buttons[i].y == o.buttons[i].y + 40 &&
+              l.buttons[i].w == o.buttons[i].w && l.buttons[i].h == o.buttons[i].h, "%s", l.buttons[i].label);
+}
+
 int main(void) {
+    touch_area_is_the_safe_area_in_pixels_or_the_whole_output();
+    touch_layout_at_an_origin_is_the_one_at_zero_shifted();
+    touch_unit_is_480_density_independent_pixels_times_the_size();
+    touch_pad_is_the_same_size_on_both_fold_screens();
+    touch_pad_stays_inside_the_safe_area();
     touch_finger_on_each_button_gives_its_bit();
     touch_dpad_directions_and_dead_centre();
     touch_dpad_and_menu_take_fingers_near_them();
