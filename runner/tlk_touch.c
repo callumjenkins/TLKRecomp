@@ -34,6 +34,8 @@ void tlk_touch_layout(TlkTouchLayout *l, int w, int h, float unit) {
 }
 
 int tlk_touch_on_dpad(const TlkTouchLayout *l, float x, float y) {
+    for (int i = 0; i < TLK_TOUCH_BUTTONS; i++)
+        if (tlk_touch_distance(&l->buttons[i], x, y) <= 0) return 0;
     return hypotf(x - l->dpad_x, y - l->dpad_y) < 1.2f * l->dpad_r;
 }
 

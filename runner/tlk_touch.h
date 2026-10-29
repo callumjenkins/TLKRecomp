@@ -41,6 +41,7 @@ typedef struct {
 } TlkTouchFinger;
 
 void tlk_touch_layout(TlkTouchLayout *l, int w, int h, float unit);
+/* The d-pad takes a finger a little outside its arms, but never one on a button. */
 int tlk_touch_on_dpad(const TlkTouchLayout *l, float x, float y);
 int tlk_touch_on_menu(const TlkTouchLayout *l, float x, float y);
 /* How far a point is outside the button, in pixels: 0 or less is on it. */
