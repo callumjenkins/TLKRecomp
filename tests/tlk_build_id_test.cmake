@@ -1,4 +1,4 @@
-# TlkBuildId.cmake over a scratch tree: the id depends on the contents of the code and on the platform, never on
+# TlkBuildId.cmake over a scratch tree: the id depends on the contents of the code and on the data layout tag, never on
 # mtimes or commits, and the version label follows git.
 #   cmake -DSCRIPT=cmake/TlkBuildId.cmake -DWORK=DIR -P tests/tlk_build_id_test.cmake
 file(REMOVE_RECURSE "${WORK}")
@@ -9,10 +9,10 @@ file(WRITE "${WORK}/src/cmake/runtime-patches/x.hunks" "hunk\n")
 file(WRITE "${WORK}/gen/f1.c" "one\n")
 file(WRITE "${WORK}/gen/f2.c" "two\n")
 
-set(PLATFORM Linux-x86_64)
+set(LAYOUT lp64le)
 function(build_id out_var)
     execute_process(COMMAND "${CMAKE_COMMAND}" -DROOT=${WORK}/src -DGEN=${WORK}/gen -DRUNTIME=${WORK}/rt -DOUT=${WORK}/id.h
-        -DPLATFORM=${PLATFORM} -P "${SCRIPT}" RESULT_VARIABLE rc)
+        -DLAYOUT=${LAYOUT} -P "${SCRIPT}" RESULT_VARIABLE rc)
     if(NOT rc EQUAL 0)
         message(FATAL_ERROR "TlkBuildId.cmake failed")
     endif()
@@ -22,7 +22,7 @@ endfunction()
 
 build_id(first)
 string(REGEX MATCH "TLK_BUILD_ID [^\n]*" first_id "${first}")
-if(NOT first MATCHES "^#define TLK_BUILD_ID \"[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-Linux-x86_64\"")
+if(NOT first MATCHES "^#define TLK_BUILD_ID \"[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-lp64le\"")
     message(FATAL_ERROR "unexpected header: ${first}")
 endif()
 
@@ -71,12 +71,12 @@ if(hunk STREQUAL first)
     message(FATAL_ERROR "a changed runtime hunk kept the id")
 endif()
 file(WRITE "${WORK}/src/cmake/runtime-patches/x.hunks" "hunk\n")
-set(PLATFORM Android-aarch64)
-build_id(arm)
-if(arm STREQUAL first)
-    message(FATAL_ERROR "another platform kept the id")
+set(LAYOUT llp64le)
+build_id(windows)
+if(windows STREQUAL first)
+    message(FATAL_ERROR "another data layout kept the id")
 endif()
-set(PLATFORM Linux-x86_64)
+set(LAYOUT lp64le)
 
 # A commit that changes no code: the version moves, the id doesn't.
 find_package(Git QUIET)

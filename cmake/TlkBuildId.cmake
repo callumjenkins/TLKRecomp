@@ -1,9 +1,10 @@
 # Writes OUT, a header defining TLK_BUILD_ID: 12 hex digits of a SHA-256 over the contents of the generated C,
-# snesrecomp's runtime sources and our hunks to them, and the runner, then PLATFORM. Savestates are snapshots of the runtime's memory, so a state
-# loads only into the build whose id wrote it. TLK_BUILD_VERSION is `git describe --always --dirty` in ROOT, a
-# label that leaves the id alone, so a commit that changes no code keeps every save.
+# snesrecomp's runtime sources and our hunks to them, and the runner, then LAYOUT, the data layout tag such as lp64le.
+# Savestates are snapshots of the runtime's memory, so a state loads only into the build whose id wrote it.
+# TLK_BUILD_VERSION is `git describe --always --dirty` in ROOT, a label that leaves the id alone, so a commit that
+# changes no code keeps every save.
 #
-#   cmake -DROOT=DIR -DGEN=DIR -DRUNTIME=DIR -DOUT=FILE -DPLATFORM=NAME -P TlkBuildId.cmake
+#   cmake -DROOT=DIR -DGEN=DIR -DRUNTIME=DIR -DOUT=FILE -DLAYOUT=TAG -P TlkBuildId.cmake
 #
 # The file is rewritten only when its text changes, so a build with no new code or commit recompiles nothing.
 foreach(dir ROOT GEN RUNTIME)
@@ -41,7 +42,7 @@ endforeach()
 string(SHA256 all "${sums}")
 string(SUBSTRING "${all}" 0 12 short)
 
-set(text "#define TLK_BUILD_ID \"${short}-${PLATFORM}\"\n#define TLK_BUILD_VERSION \"${describe}\"\n")
+set(text "#define TLK_BUILD_ID \"${short}-${LAYOUT}\"\n#define TLK_BUILD_VERSION \"${describe}\"\n")
 set(old "")
 if(EXISTS "${OUT}")
     file(READ "${OUT}" old)

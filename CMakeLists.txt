@@ -170,11 +170,27 @@ if(TLK_BUILD_HOSTS)
     target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_saveinfo.c)
     # TLK_BUILD_ID, which every savestate's sidecar names. Run on every build: the files it hashes are globbed, so
     # no DEPENDS list could name them.
+    # The id names the data layout a state depends on rather than the platform, so Linux, Android, and macOS share states.
+    include(CheckTypeSize)
+    check_type_size(long TLK_SIZEOF_LONG)
+    check_type_size("void *" TLK_SIZEOF_PTR)
+    if(TLK_SIZEOF_PTR EQUAL 8 AND TLK_SIZEOF_LONG EQUAL 8)
+        set(tlk_layout lp64)
+    elseif(TLK_SIZEOF_PTR EQUAL 8 AND TLK_SIZEOF_LONG EQUAL 4)
+        set(tlk_layout llp64)
+    else()
+        set(tlk_layout "l${TLK_SIZEOF_LONG}p${TLK_SIZEOF_PTR}")
+    endif()
+    if(CMAKE_C_BYTE_ORDER STREQUAL "BIG_ENDIAN")
+        string(APPEND tlk_layout be)
+    else()
+        string(APPEND tlk_layout le)
+    endif()
     set(tlk_build_id_dir "${CMAKE_CURRENT_BINARY_DIR}/tlk_build_id")
     add_custom_target(tlk_build_id
         COMMAND "${CMAKE_COMMAND}" -DROOT=${CMAKE_CURRENT_SOURCE_DIR} -DGEN=${TLK_SNESRECOMP_GEN_DIR}
             -DRUNTIME=${CMAKE_CURRENT_SOURCE_DIR}/snesrecomp/runner/src
-            -DOUT=${tlk_build_id_dir}/tlk_build_id.h -DPLATFORM=${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TlkBuildId.cmake
+            -DOUT=${tlk_build_id_dir}/tlk_build_id.h -DLAYOUT=${tlk_layout} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TlkBuildId.cmake
         BYPRODUCTS "${tlk_build_id_dir}/tlk_build_id.h"
         VERBATIM)
     add_dependencies(tlk_sdl tlk_build_id)
@@ -242,6 +258,11 @@ if(NOT ANDROID)
     add_test(NAME tlk_saveinfo COMMAND tlk_saveinfo_test "${tlk_saveinfo_dir}")
     add_test(NAME tlk_build_id COMMAND "${CMAKE_COMMAND}" -DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/TlkBuildId.cmake
         -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tlk_build_id_test.d -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/tlk_build_id_test.cmake)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|aarch64)$")
+        add_test(NAME tlk_build_id_has_layout_tag_not_platform COMMAND tlk_sdl --build-id)
+        set_tests_properties(tlk_build_id_has_layout_tag_not_platform PROPERTIES
+            PASS_REGULAR_EXPRESSION "^[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-lp64le ")
+    endif()
 
     # The fiber switches on each backend: plain ucontext, fiber_compat on ucontext, and fiber_compat's
     # parked threads, which only Android builds otherwise.
