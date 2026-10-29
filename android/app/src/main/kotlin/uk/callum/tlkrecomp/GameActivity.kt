@@ -17,8 +17,13 @@ class GameActivity : SDLActivity() {
     override fun getMainFunction() = "main"
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // A proof run (adb shell am start --es stdout NAME) writes the game's stdout to that file in the files folder.
-        intent.getStringExtra(STDOUT)?.let { FileOutputStream(File(filesDir, it)).use { out -> Os.dup2(out.fd, 1) } }
+        // A proof run (adb shell am start --es stdout NAME) writes the game's stdout and stderr to that file in the files folder.
+        intent.getStringExtra(STDOUT)?.let {
+            FileOutputStream(File(filesDir, it)).use { out ->
+                Os.dup2(out.fd, 1)
+                Os.dup2(out.fd, 2)
+            }
+        }
         super.onCreate(savedInstanceState)
     }
 
