@@ -84,7 +84,7 @@ signing="${TLK_SIGNING:-$HOME/.local/share/tlk-recomp/release.properties}"
     ${signing:+-Ptlk.signing="$signing"}
 apk=$(ls "$ROOT"/android/app/build/outputs/apk/"${variant,,}"/*.apk | head -n1)
 cp "$apk" "$OUT/TLKRecomp-android-$ABI.apk"
-echo "apk: $OUT/TLKRecomp-android-$ABI.apk"
+echo "apk: $OUT/TLKRecomp-android-$ABI.apk (build $build_id)"
 
 if [ $install = 1 ]; then
     "$ANDROID_HOME/platform-tools/adb" install -r "$OUT/TLKRecomp-android-$ABI.apk"

@@ -51,6 +51,19 @@ class GameActivity : SDLActivity() {
     @Deprecated("SDLActivity overrides it")
     override fun onBackPressed() {}
 
+    // The launcher doesn't sync while this process is alive, and it can stay alive in the background long after the game
+    // writes its autosave on leaving, so that autosave is pushed from here. The wait gives the game's loop time to
+    // write it; a push that reads it mid-write is refused and goes next time.
+    override fun onStop() {
+        super.onStop()
+        val prefs = SyncPrefs(this)
+        val server = prefs.server.takeIf { it.isNotEmpty() } ?: return
+        Thread {
+            Thread.sleep(3000)
+            SaveSync(filesDir, HttpSaveStore(server), prefs.device, BuildConfig.BUILD_ID) { true }.run("")
+        }.start()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         Process.killProcess(Process.myPid())

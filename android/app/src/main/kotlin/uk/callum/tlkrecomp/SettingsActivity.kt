@@ -4,9 +4,13 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.graphics.Typeface
 import android.os.Bundle
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -44,6 +48,9 @@ class SettingsActivity : Activity() {
         number("Volume", "volume", 0, 100, 100, "%")
         choice("Autosave", "autosave_seconds", listOf("Every 30 seconds" to "30", "Every minute" to "60",
             "Every 2 minutes" to "120", "Every 5 minutes" to "300", "Off" to "0"), "60")
+        val sync = SyncPrefs(this)
+        field("Save sync server", sync.server, "Empty for no sync, or https://HOST:8450", InputType.TYPE_TEXT_VARIATION_URI) { sync.server = it }
+        field("This device", sync.device, "The name its autosave is kept under", InputType.TYPE_CLASS_TEXT) { sync.device = it }
         status = TextView(this).apply { setPadding(0, pad, 0, 0) }
         column.addView(status)
         setContentView(ScrollView(this).apply {
@@ -68,6 +75,21 @@ class SettingsActivity : Activity() {
         setTypeface(typeface, Typeface.BOLD)
         setPadding(0, (12 * resources.displayMetrics.density).toInt(), 0, 0)
     })
+
+    private fun field(name: String, value: String, hint: String, type: Int, save: (String) -> Unit) {
+        label(name)
+        column.addView(EditText(this).apply {
+            setText(value)
+            this.hint = hint
+            inputType = InputType.TYPE_CLASS_TEXT or type
+            isSingleLine = true
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: Editable?) = save(s.toString())
+            })
+        })
+    }
 
     private fun choice(name: String, key: String, options: List<Pair<String, String>>, default: String) {
         label(name)

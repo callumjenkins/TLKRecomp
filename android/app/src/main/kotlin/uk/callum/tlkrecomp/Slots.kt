@@ -16,6 +16,7 @@ data class Slot(
     val lives: Int?,
     val build: String?,
     val usable: Boolean,
+    val device: String? = null,
 ) {
     val title get() = Slots.title(base)
 }
@@ -46,16 +47,18 @@ object Slots {
             json?.takeIf { it.has("saved_unix") }?.getLong("saved_unix"),
             json?.takeIf { it.has("lives") }?.getInt("lives"),
             theirs, theirs == null || theirs == build,
+            json?.optString("device")?.takeIf { it.isNotEmpty() },
         )
     }
 
     /** The autosave, then slots 1 to 4, each that has a state. */
     fun list(dir: File, build: String): List<Slot> = bases.mapNotNull { read(dir, it, build) }
 
-    /** "Pride Rock, 12 minutes ago"; for another build's state, that it can't load. */
-    fun describe(slot: Slot, nowUnix: Long): String {
+    /** "Pride Rock, 12 minutes ago", with "from DEVICE" when another device saved it; for another build's state, that it can't load. */
+    fun describe(slot: Slot, nowUnix: Long, thisDevice: String? = null): String {
         if (!slot.usable) return "Saved by another build of the game, so this one can't load it"
-        val level = slot.levelName ?: "Saved"
+        val from = slot.device?.takeIf { thisDevice != null && it != thisDevice }?.let { ", from $it" } ?: ""
+        val level = (slot.levelName ?: "Saved") + from
         return slot.savedUnix?.let { "$level, ${ago(it, nowUnix)}" } ?: level
     }
 

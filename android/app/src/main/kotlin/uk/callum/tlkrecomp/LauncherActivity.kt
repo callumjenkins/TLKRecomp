@@ -8,6 +8,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.view.Gravity
 import android.view.View
@@ -25,6 +27,8 @@ class LauncherActivity : Activity() {
     private val rom get() = File(filesDir, GameActivity.ROM)
     private val identity = RomIdentity(BuildConfig.ROM_SHA256, BuildConfig.ROM_SIZE)
     private var busy = false
+    private var sync: SaveSync? = null
+    private val ui = Handler(Looper.getMainLooper())
 
     private lateinit var romLabel: TextView
     private lateinit var chooseRom: Button
@@ -98,6 +102,42 @@ class LauncherActivity : Activity() {
     override fun onResume() {
         super.onResume()
         show()
+        syncSaves(System.currentTimeMillis() + 15_000)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        ui.removeCallbacksAndMessages(null)
+    }
+
+    /** Pushes and pulls saves once the game process is gone, waiting for it until `until`. */
+    private fun syncSaves(until: Long) {
+        val prefs = SyncPrefs(this)
+        val server = prefs.server.takeIf { it.isNotEmpty() } ?: return
+        if (sync != null) return
+        if (gameRunning()) {
+            if (System.currentTimeMillis() < until) ui.postDelayed({ syncSaves(until) }, 500)
+            return
+        }
+        val store = HttpSaveStore(server)
+        val s = SaveSync(filesDir, store, prefs.device, BuildConfig.BUILD_ID) { gameRunning() }
+        sync = s
+        say("Syncing saves with ${store.host}…")
+        work.execute {
+            val r = s.run("Not synced: ${store.host} not reachable. Is Tailscale on?")
+            runOnUiThread {
+                if (sync === s) sync = null
+                show()
+                say(r.problem ?: when {
+                    r.pulled.isEmpty() && r.pushed.isEmpty() && r.kept.isEmpty() -> "Saves are in step with ${store.host}."
+                    else -> "Synced with ${store.host}: " + listOfNotNull(
+                        r.pulled.takeIf { it.isNotEmpty() }?.let { "got ${it.size}" },
+                        r.pushed.takeIf { it.isNotEmpty() }?.let { "sent ${it.size}" },
+                        r.kept.takeIf { it.isNotEmpty() }?.let { "${it.size} not sent, as ${store.host} has one as new" })
+                        .joinToString(", ") + "."
+                })
+            }
+        }
     }
 
     private fun autosave() = Slots.read(filesDir, Slots.AUTOSAVE, BuildConfig.BUILD_ID)
@@ -110,7 +150,7 @@ class LauncherActivity : Activity() {
         val auto = autosave()
         continueRow.visibility = if (have && auto?.usable == true) View.VISIBLE else View.GONE
         if (auto?.usable == true) {
-            continueText.text = Slots.describe(auto, System.currentTimeMillis() / 1000)
+            continueText.text = Slots.describe(auto, System.currentTimeMillis() / 1000, SyncPrefs(this).device)
             continuePicture.setImageBitmap(auto.picture?.let { BitmapFactory.decodeFile(it.path) })
         } else if (auto != null) {
             say("Your autosave is from another build of the game, which this one can't load. Save slots shows it.")
@@ -135,7 +175,9 @@ class LauncherActivity : Activity() {
         if (!rom.isFile) return say("Choose your ROM first.")
         // The game keeps its state in globals, so a second one in the same process would share them.
         if (gameRunning()) return say("The last game is still closing. Try again in a moment.")
-        val args = state?.let { arrayOf("--load", it.path) } ?: emptyArray()
+        sync?.stop()
+        sync = null
+        val args = arrayOf("--device", SyncPrefs(this).device) + (state?.let { arrayOf("--load", it.path) } ?: emptyArray())
         say("")
         startActivity(Intent(this, GameActivity::class.java).putExtra(GameActivity.ARGS, args))
     }
