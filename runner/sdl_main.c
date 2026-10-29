@@ -36,8 +36,11 @@
  *   --save-at N state     write a savestate after frame N (proof runs)
  *   --load state          start from a savestate (frame count continues)
  *   --load-at N state     load a savestate after frame N, in process (proof runs)
+ *   --autosave state      autosave to state (scripted runs too; see autosave_seconds in the ini)
+ *   --build-id            print the build id that savestate sidecars name, then the git version, exit
  *   --menu-at N           open the settings menu after frame N (screenshots)
- *   --menu-page controls|level|about  with --menu-at: open the Controls (remap) or Level select section, or the About window
+ *   --menu-page saves|controls|level|about  with --menu-at: open the Save states, Controls (remap) or Level select
+ *                         section, or the About window
  *   --speedrun off|practice  practice mode on or off (overrides the ini)
  *   --practice-level N    level select N (0-13) after frame 1 (proof runs)
  *   --invul N             with --practice-level: debug-menu INVUL 0 off, 1 health, 2 lives
@@ -86,6 +89,8 @@
 #include "verified_rom.h"
 #include "tlk_font8x8.h"
 #include "tlk_savestate.h"
+#include "tlk_saveinfo.h"
+#include "tlk_build_id.h"
 #include "tlk_wide.h"
 
 #include "common_cpu_infra.h"
@@ -117,6 +122,7 @@ void TlkAssetPath(const char *rel, char *out, size_t n);           /* tlk_assets
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "tlk_compat.h"
 #include "tlk_menu_imgui.h"
 #include "tlk_touch.h"
@@ -312,6 +318,12 @@ static uint32_t s_wide_px[TLK_WIDE_MAX_WIDTH * TLK_WIDE_HEIGHT];
 static double s_wide_aspect;   /* aspect of the picture being shown, 0 when native */
 static const char *const kTouchChoices[] = { "auto", "on", "off" };
 static int s_touch_mode, s_touch_size = 100, s_touch_opacity = 40;
+/* autosave_seconds: seconds of play between autosaves; 0 turns the autosave off. */
+#ifdef __ANDROID__
+static int s_autosave_seconds = 60;
+#else
+static int s_autosave_seconds;
+#endif
 static int s_practice;   /* speedrun = practice: level timer, lag, inputs, best times, restart */
 /* How the open menu covers the game, in percent: dimming of the picture
  * behind it, and how solid its panel is (see recomp_runtime_ui_set_backdrop). */
@@ -331,7 +343,7 @@ static char *Trim(char *s) {
  * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, hd_mode7 (0 or 2-4),
  * widescreen (off 16:9 21:9 adaptive), widescreen_hud (edges or in place),
  * widescreen_enemies (as the game or out of view), turbo_speed (2-16),
- * speedrun (off or practice), menu_dim and menu_opacity (0-100), and one per binding
+ * speedrun (off or practice), menu_dim and menu_opacity (0-100), autosave_seconds (0 off), and one per binding
  * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
 static void LoadConfig(const char *path) {
@@ -380,6 +392,7 @@ static void LoadConfig(const char *path) {
         }
         else if (!strcmp(k, "touch_size")) s_touch_size = SDL_clamp(atoi(v), 50, 150);
         else if (!strcmp(k, "touch_opacity")) s_touch_opacity = SDL_clamp(atoi(v), 10, 100);
+        else if (!strcmp(k, "autosave_seconds")) s_autosave_seconds = SDL_max(atoi(v), 0);
         else if (!strncmp(k, "pad_", 4)) {
             for (int i = 0; i < kBindings; i++)
                 if (!strcmp(k + 4, kButtonNames[i])) {
@@ -424,6 +437,8 @@ static int SaveConfig(void) {
     fprintf(f, "; touchscreen pad: auto, on or off; its size and opacity, percent\n"
                "touch = %s\ntouch_size = %d\ntouch_opacity = %d\n",
             kTouchChoices[s_touch_mode], s_touch_size, s_touch_opacity);
+    fprintf(f, "; tlk_autosave.state: every N seconds of play, and on leaving the app or quitting (0 = off)\n"
+               "autosave_seconds = %d\n", s_autosave_seconds);
     fprintf(f, "; keys use SDL key names\n");
     for (int i = 0; i < kBindings; i++) fprintf(f, "%s = %s\n", kButtonNames[i], SDL_GetKeyName(s_keys[i]));
     fprintf(f, "; gamepad buttons use SDL names (a = south, b = east, x = west, y = north,\n"
@@ -599,6 +614,50 @@ static const PrCp kTasCp[] = { { 0, 0, 0x04B0, 0x0070, 904 }, { 1, 0, 0x1270, 0x
 
 static uint16_t Wram16(uint32_t off) { return (uint16_t)(g_ram[off] | g_ram[off + 1] << 8); }
 
+/* ── Savestates and their sidecars (tlk_saveinfo.c) ────────────────────── */
+static int s_level_loading = 1, s_level_on;   /* a level is on from the end of its load (AutosaveTrack) */
+
+/* $7FFF9E changes on the title before the level loads, so a save with no level on or loading is the title's. */
+static const char *LevelName(int lvl) {
+    if (lvl == 0x0E || (!s_level_on && !s_level_loading)) return "Title";
+    return lvl >= 0 && lvl < 14 ? kSelectNames[lvl] : "Unknown";
+}
+
+_Static_assert(sizeof TLK_BUILD_ID <= sizeof ((TlkSaveInfo *)0)->build, "the build id must fit the sidecar's field");
+
+/* Removes the json, writes the state and its picture, then the json again, so a json means the other two are whole.
+ * A save that fails part way leaves no state, since a state with no json loads as an earlier build's. */
+static int SaveStateFiles(const char *path) {
+    char png[1100];
+    tlk_saveinfo_remove(path);
+    tlk_saveinfo_path(path, ".png", png, sizeof png);
+    if (!tlk_state_save(path, (uint32_t)frame) || !WritePng(png, s_pixels, kWidth, kHeight, kWidth * kBpp)) {
+        remove(path);
+        return 0;
+    }
+    TlkSaveInfo info;
+    memset(&info, 0, sizeof info);
+    snprintf(info.build, sizeof info.build, "%s", TLK_BUILD_ID);
+    snprintf(info.version, sizeof info.version, "%s", TLK_BUILD_VERSION);
+    info.frame = frame;
+    info.saved_unix = (long long)time(NULL);
+    info.level = Wram16(0x1FF9E);
+    snprintf(info.level_name, sizeof info.level_name, "%s", LevelName(info.level));
+    info.lives = Wram16(0x1FFAA);
+    if (tlk_saveinfo_write(path, &info)) return 1;
+    fprintf(stderr, "cannot write the sidecar of %s\n", path);
+    remove(path);
+    return 0;
+}
+
+/* 0 when the state's sidecar names another build, whose snapshot this build would misread. */
+static int StateFromThisBuild(const char *path) {
+    TlkSaveInfo info;
+    if (tlk_saveinfo_check(path, TLK_BUILD_ID, &info) != TLK_SAVE_OTHER_BUILD) return 1;
+    fprintf(stderr, "%s was saved by build %s; this is %s\n", path, info.build, TLK_BUILD_ID);
+    return 0;
+}
+
 static void PrTimesPath(char *out, size_t n) { SidePath("tlk_practice_times.txt", out, n); }
 static void PrRestartPath(char *out, size_t n) { SidePath("tlk_practice_restart.state", out, n); }
 
@@ -753,7 +812,7 @@ static void PracticeFrame(uint16_t pad) {
             if (pr.fresh && lvl < kPrLevels) {
                 char path[1100];
                 PrRestartPath(path, sizeof path);
-                tlk_state_save(path, (uint32_t)frame);
+                SaveStateFiles(path);
             }
             pr.fresh = 0;
         }
@@ -844,13 +903,16 @@ static void BuildLevelMacro(int level, int invul) {
 
 static void PrBootPath(char *out, size_t n) { SidePath("tlk_practice_boot.state", out, n); }
 static int LoadStateLive(const char *path);
+static void SlotLabels(void);
+static int SaveSlot(int slot, char *msg, size_t n);
+static int LoadSlot(int slot, char *msg, size_t n);
 static void CloseMenu(void);
 static void StartLabel(void);
 
 static void PrStartLevel(int level) {
     char path[1100], msg[64];
     PrBootPath(path, sizeof path);
-    if (!LoadStateLive(path)) { Toast("Level select: no power-on state"); return; }
+    if (LoadStateLive(path) <= 0) { Toast("Level select: no power-on state"); return; }
     BuildLevelMacro(level, s_sel_invul);
     s_sel_level = level;
     StartLabel();
@@ -1380,8 +1442,10 @@ static void DrawTouchPad(int dw, int dh) {
 /* ── Settings menu: recomp-ui's runtime menu ───────────────────────────── */
 /* The rows, in order; sections appear in first-use order. Every change is
  * applied at once and saved to the ini (the menu calls MenuSave after it). */
+enum { kSlots = 4 };
 enum {
-    R_SCALE, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
+    R_SAVE0, R_LOAD0 = R_SAVE0 + kSlots,
+    R_SCALE = R_LOAD0 + kSlots, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
     R_SHADER, R_HD_MODE7, R_WIDE, R_WIDE_HUD, R_WIDE_SPAWN, R_SMOOTH, R_INTEGER,
     R_AUDIO, R_VOLUME,
     R_TOUCH, R_TOUCH_SIZE, R_TOUCH_OPACITY,
@@ -1398,6 +1462,9 @@ static const char *s_shader_names[kShaderCount + 1];
 static char s_shader_custom[1024];
 /* Binding rows show their binding in the label ("B:  Z  /  Bottom"). */
 static char s_bind_label[kBindings][64];
+/* Save states rows name what each slot holds ("Save 2:  Pride Rock  14:02"). */
+static char s_slot_label[2 * kSlots][64];
+static int s_slot_loadable[kSlots];
 /* The level select's action row names the level it goes to. */
 static char s_start_label[48];
 /* About: the first row opens tlk_menu_imgui.cpp's About window (OpenGL menu
@@ -1409,7 +1476,13 @@ static char s_start_label[48];
     { key, sec, label, desc, RECOMP_RUNTIME_UI_##type, lo, hi, step, ch, n, NULL }
 #define BIND_ROW(i) MENU_ROW("tlk.bind", "Controls", s_bind_label[i], \
     "Enter, then the new key or button.", ACTION, 0, 0, 0, NULL, 0)
+#define SAVE_ROW(i) MENU_ROW("tlk.save_slot", "Save states", s_slot_label[i], \
+    "Also F1-F4.", ACTION, 0, 0, 0, NULL, 0)
+#define LOAD_ROW(i) MENU_ROW("tlk.load_slot", "Save states", s_slot_label[kSlots + i], \
+    "Also F5-F8.", ACTION, 0, 0, 0, NULL, 0)
 static RecompRuntimeUiItem s_rows[R_COUNT] = {
+    [R_SAVE0 + 0] = SAVE_ROW(0), [R_SAVE0 + 1] = SAVE_ROW(1), [R_SAVE0 + 2] = SAVE_ROW(2), [R_SAVE0 + 3] = SAVE_ROW(3),
+    [R_LOAD0 + 0] = LOAD_ROW(0), [R_LOAD0 + 1] = LOAD_ROW(1), [R_LOAD0 + 2] = LOAD_ROW(2), [R_LOAD0 + 3] = LOAD_ROW(3),
     [R_SCALE] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE, "Display", "Window scale",
                          "Window height, times 224 pixels.", INT, 1, 8, 1, NULL, 0),
     [R_FULLSCREEN] = MENU_ROW("tlk.fullscreen", "Display", "Fullscreen",
@@ -1584,6 +1657,7 @@ static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
     switch ((int)(item - s_rows)) {
     case R_SHADER: return s_gl_on;
     case R_ABOUT: return s_menu_gl;
+    case R_LOAD0: case R_LOAD0 + 1: case R_LOAD0 + 2: case R_LOAD0 + 3: return s_slot_loadable[item - s_rows - R_LOAD0];
     default: return 1;
     }
 }
@@ -1603,11 +1677,20 @@ static void MenuShown(void *ctx, int open) {
     s_key_wait = 0;
     s_about = 0;
     BindLabels();
-    if (open) { s_kbd_pad = 0; s_turbo_held = 0; TlkMenuImguiOpened(); }
+    if (open) { s_kbd_pad = 0; s_turbo_held = 0; SlotLabels(); TlkMenuImguiOpened(); }
     else {
         s_pad_hold = 1;
         s_touch_hold = s_finger_n > 0;
     }
+}
+
+/* A Save states row: 1 when it loaded a slot, so the menu closes; a save keeps it open to show it saved. */
+static int SlotRow(int r, char *msg, size_t n) {
+    if (r < R_LOAD0) {
+        SaveSlot(r - R_SAVE0 + 1, msg, n);
+        return 0;
+    }
+    return LoadSlot(r - R_LOAD0 + 1, msg, n);
 }
 
 static int MenuRun(void *ctx, const RecompRuntimeUiItem *item) {
@@ -1618,6 +1701,13 @@ static int MenuRun(void *ctx, const RecompRuntimeUiItem *item) {
         s_key_wait = 1;
         BindLabels();
         return 0;
+    }
+    if (r >= R_SAVE0 && r < R_LOAD0 + kSlots) {
+        char msg[64];
+        if (!SlotRow(r, msg, sizeof msg)) { recomp_runtime_ui_set_status(s_ui, msg); return 0; }
+        CloseMenu();
+        Toast(msg);
+        return 1;
     }
     switch (r) {
     case R_START: PrStartLevel(s_sel_level); return 1;
@@ -1662,6 +1752,7 @@ static void MenuCreate(void) {
     }
     BindLabels();
     StartLabel();
+    SlotLabels();
     RecompRuntimeUiConfig c;
     memset(&c, 0, sizeof c);
     c.title = "The Lion King";
@@ -1698,16 +1789,98 @@ static int SectionOf(int row) {
     return n;
 }
 
-/* Load a savestate during play (F5-F8, F9). */
+static void SlotLabels(void) {
+    for (int i = 0; i < kSlots; i++) {
+        char path[1100], what[48];
+        SlotPath(i + 1, path, sizeof path);
+        TlkSaveInfo info;
+        FILE *f = fopen(path, "rb");
+        if (f) fclose(f);
+        int who = tlk_saveinfo_check(path, TLK_BUILD_ID, &info);
+        s_slot_loadable[i] = f && who != TLK_SAVE_OTHER_BUILD;
+        if (!f) snprintf(what, sizeof what, "empty");
+        else if (who == TLK_SAVE_OTHER_BUILD) snprintf(what, sizeof what, "another build's");
+        else if (who == TLK_SAVE_NO_INFO) snprintf(what, sizeof what, "saved");
+        else {
+            time_t t = (time_t)info.saved_unix;
+            struct tm *lt = localtime(&t);
+            snprintf(what, sizeof what, "%s  %02d:%02d", info.level_name, lt ? lt->tm_hour : 0, lt ? lt->tm_min : 0);
+        }
+        snprintf(s_slot_label[i], sizeof s_slot_label[i], "Save %d:  %s", i + 1, what);
+        snprintf(s_slot_label[kSlots + i], sizeof s_slot_label[i], "Load %d:  %s", i + 1, what);
+    }
+}
+
+/* ── Autosave ──────────────────────────────────────────────────────────── */
+/* tlk_autosave.state, which the launcher's Continue loads: written on going to the background, on quitting,
+ * and every autosave_seconds of play. Only at a place a player would resume, so a new game left on its
+ * title keeps the last game's autosave. */
+static char s_autosave_path[1100];   /* empty: autosave off */
+static long s_autosave_played;       /* frames played since the last autosave or load */
+
+/* $0008: 0 or $8000 while loading, then 4 or 6 in play. The title and the attract demo count as no level. */
+static void AutosaveTrack(void) {
+    uint16_t st = Wram16(0x0008), lvl = Wram16(0x1FF9E);
+    int demo = (Wram16(0x1E03) & 0x8000) != 0;
+    if (st == 0 || st == 0x8000) { s_level_loading = 1; s_level_on = 0; }
+    if (st != 0 && st != 0x8000 && s_level_loading) { s_level_loading = 0; s_level_on = !demo && lvl != 0x0E; }
+}
+
+static int AutosaveSpot(void) { return s_level_on && s_macro_i >= s_macro_n; }
+
+/* After a state load: count from here, and take whether a level is on from the state's RAM. */
+static void AutosaveRestart(void) {
+    s_autosave_played = 0;
+    s_level_loading = 1;
+    s_level_on = 0;
+    AutosaveTrack();
+}
+
+static void Autosave(void) {
+    if (!s_autosave_path[0] || s_autosave_played == 0 || !AutosaveSpot()) return;
+    if (!SaveStateFiles(s_autosave_path)) { fprintf(stderr, "cannot write the autosave %s\n", s_autosave_path); return; }
+    printf("autosave=%s at_frame=%ld\n", s_autosave_path, frame);
+    s_autosave_played = 0;
+}
+
+static void AutosaveTick(void) {
+    AutosaveTrack();
+    if (s_level_on) s_autosave_played++;
+    if (s_autosave_seconds > 0 && s_autosave_played >= (long)(s_autosave_seconds * NTSC_FPS)) Autosave();
+}
+
+/* Load a savestate during play (F5-F8, F9): 1 loaded, 0 none or unreadable, -1 from another build. */
 static int LoadStateLive(const char *path) {
     uint32_t hf = 0;
+    if (!StateFromThisBuild(path)) return -1;
     if (!tlk_state_load(path, &hf)) return 0;
+    AutosaveRestart();
     TlkWideReset();
     if (input_path && !s_polled) frame = (long)hf;
     RecStop("a savestate was loaded (the recording replays only up to here)");
     audio_acc = 0;
     if (astream) SDL_ClearAudioStream(astream);
     return 1;
+}
+
+/* F1-F8 and the Save states rows. `msg` gets what happened, short enough for a toast. */
+static int SaveSlot(int slot, char *msg, size_t n) {
+    char path[1100];
+    SlotPath(slot, path, sizeof path);
+    int ok = SaveStateFiles(path);
+    snprintf(msg, n, ok ? "Saved slot %d" : "Slot %d: save failed", slot);
+    SlotLabels();
+    return ok;
+}
+static int LoadSlot(int slot, char *msg, size_t n) {
+    char path[1100];
+    SlotPath(slot, path, sizeof path);
+    int r = LoadStateLive(path);
+    if (r > 0) {
+        if (s_practice) PrAfterLoad(0);
+        snprintf(msg, n, "Loaded slot %d", slot);
+    } else snprintf(msg, n, r < 0 ? "Slot %d: from another build" : "Slot %d: no state", slot);
+    return r > 0;
 }
 
 static void HandleKey(const SDL_KeyboardEvent *ke) {
@@ -1746,23 +1919,15 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
         if (k == SDLK_F9 && s_practice) {
             char path[1100];
             PrRestartPath(path, sizeof path);
-            if (LoadStateLive(path)) { PrAfterLoad(1); Toast("Restart level"); }
+            if (LoadStateLive(path) > 0) { PrAfterLoad(1); Toast("Restart level"); }
             else Toast("No level start yet");
             return;
         }
         int fn = k >= SDLK_F1 && k <= SDLK_F8 ? (int)(k - SDLK_F1) : -1;
         if (fn >= 0) {
-            int load = fn >= 4 || (ke->mod & SDL_KMOD_SHIFT);
-            int slot = fn % 4 + 1;
-            char path[1100], msg[64];
-            SlotPath(slot, path, sizeof path);
-            if (load) {
-                if (LoadStateLive(path)) {
-                    if (s_practice) PrAfterLoad(0);
-                    snprintf(msg, sizeof msg, "Loaded slot %d", slot);
-                } else snprintf(msg, sizeof msg, "Slot %d: no state", slot);
-            } else
-                snprintf(msg, sizeof msg, tlk_state_save(path, (uint32_t)frame) ? "Saved slot %d" : "Slot %d: save failed", slot);
+            char msg[64];
+            if (fn >= 4 || (ke->mod & SDL_KMOD_SHIFT)) LoadSlot(fn % 4 + 1, msg, sizeof msg);
+            else SaveSlot(fn % 4 + 1, msg, sizeof msg);
             Toast(msg);
             return;
         }
@@ -2066,6 +2231,54 @@ static int RemapSelfTest(void) {
     s_touch_mode = touch_mode, s_touch_size = touch_size, s_touch_opacity = touch_opacity;
     TouchReset();
 
+    /* Save states rows, from sidecars written here: the emulator is not running, so nothing loads. */
+    {
+        char path[1100], msg[64];
+        TlkSaveInfo info;
+        memset(&info, 0, sizeof info);
+        info.level = 4;
+        snprintf(info.level_name, sizeof info.level_name, "Exile");
+        for (int i = 1; i <= kSlots; i++) {
+            SlotPath(i, path, sizeof path);
+            remove(path);
+            tlk_saveinfo_remove(path);
+            if (i == 1) continue;   /* empty */
+            FILE *f = fopen(path, "wb");
+            if (f) fclose(f);
+            snprintf(info.build, sizeof info.build, "%s", i == 3 ? "another" : TLK_BUILD_ID);
+            if (i != 4) tlk_saveinfo_write(path, &info);   /* 4: no sidecar, as an earlier build leaves it */
+        }
+        SlotLabels();
+        StCheck(!strcmp(s_slot_label[0], "Save 1:  empty") && !s_slot_loadable[0], "an empty slot says so and can't be loaded");
+        StCheck(!strncmp(s_slot_label[kSlots + 1], "Load 2:  Exile  ", 16) && s_slot_loadable[1],
+                "a slot from this build names its level and loads");
+        StCheck(!strcmp(s_slot_label[kSlots + 2], "Load 3:  another build's") && !s_slot_loadable[2],
+                "a slot from another build is greyed out");
+        StCheck(!strcmp(s_slot_label[kSlots + 3], "Load 4:  saved") && s_slot_loadable[3], "a slot with no sidecar loads");
+        StCheck(!MenuEnabled(NULL, &s_rows[R_LOAD0 + 2]) && MenuEnabled(NULL, &s_rows[R_LOAD0 + 1]), "the menu greys out what can't load");
+        StCheck(!LoadSlot(3, msg, sizeof msg) && !strcmp(msg, "Slot 3: from another build"), "loading another build's slot is refused");
+        StCheck(!LoadSlot(1, msg, sizeof msg) && !strcmp(msg, "Slot 1: no state"), "loading an empty slot is refused");
+        StCheck(!SlotRow(R_LOAD0 + 2, msg, sizeof msg) && !strcmp(msg, "Slot 3: from another build"),
+                "the Load 3 row loads slot 3, and reports it didn't when it can't");
+        SlotPath(2, path, sizeof path);
+        tlk_saveinfo_remove(path);
+        SlotRow(R_SAVE0, msg, sizeof msg);
+        StCheck(!strcmp(s_slot_label[1], "Save 2:  saved"), "a Save row refreshes every slot's label");
+        for (int i = 1; i <= kSlots; i++) {
+            SlotPath(i, path, sizeof path);
+            remove(path);
+            tlk_saveinfo_remove(path);
+        }
+        int autosave_seconds = s_autosave_seconds;
+        s_autosave_seconds = 25;
+        SaveConfig();
+        s_autosave_seconds = 0;
+        LoadConfig(s_cfg_path);
+        StCheck(s_autosave_seconds == 25, "autosave_seconds was saved to the ini");
+        s_autosave_seconds = autosave_seconds;
+        StCheck(SectionOf(R_SAVE0) == 0, "Save states is the menu's first section");
+    }
+
     /* Hotplug and live state with an SDL virtual gamepad. */
     SDL_VirtualJoystickDesc desc;
     SDL_INIT_INTERFACE(&desc);
@@ -2146,8 +2359,8 @@ static void Usage(void) {
         "               [--input tape | --input-polled tape | --input-raw rec] [--no-record] [--lle] [--interp-targets f]\n"
         "               [--frames N] [--hash-at a,b,..] [--dump-png path] [--no-pace]\n"
         "               [--no-audio] [--wav path [--wav-seconds S]]\n"
-        "               [--save-at N state] [--load state] [--load-at N state]\n"
-        "               [--menu-at N [--menu-page controls|level|about]] [--selftest-remap]\n"
+        "               [--save-at N state] [--load state] [--load-at N state] [--autosave state] [--build-id]\n"
+        "               [--menu-at N [--menu-page saves|controls|level|about]] [--selftest-remap]\n"
         "               [--speedrun off|practice] [--practice-level N [--invul N]] [--dump-window path]\n"
         "               [--list-drivers]\n"
         "Without --rom (or rom= in the ini) the .sfc/.smc files next to the binary and in the\n"
@@ -2307,6 +2520,11 @@ int main(int argc, char **argv) {
 
     int selftest = 0, menu_page = -1;
     for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--build-id")) {
+            printf("%s %s\n", TLK_BUILD_ID, TLK_BUILD_VERSION);
+            return 0;
+        }
+    for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--list-drivers")) {
             int v = SDL_GetVersion();
             printf("SDL %d.%d.%d (%s)\nvideo:", SDL_VERSIONNUM_MAJOR(v),
@@ -2357,9 +2575,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--save-at") && v && i + 2 < argc) { save_at = atol(v); save_path = argv[i + 2]; i += 2; }
         else if (!strcmp(a, "--load-at") && v && i + 2 < argc) { load_at = atol(v); load_at_path = argv[i + 2]; i += 2; }
         else if (!strcmp(a, "--load") && v) { load_path = v; i++; }
+        else if (!strcmp(a, "--autosave") && v) { snprintf(s_autosave_path, sizeof s_autosave_path, "%s", v); i++; }
         else if (!strcmp(a, "--menu-at") && v) { menu_at = atol(v); i++; }
         else if (!strcmp(a, "--menu-page") && v) {
-            menu_page = !strcmp(v, "controls") || !strcmp(v, "keys") ? SectionOf(R_BIND0)
+            menu_page = !strcmp(v, "saves") ? SectionOf(R_SAVE0)
+                      : !strcmp(v, "controls") || !strcmp(v, "keys") ? SectionOf(R_BIND0)
                       : !strcmp(v, "level") ? SectionOf(R_LEVEL)
                       : !strcmp(v, "about") ? SectionOf(R_ABOUT) : -1;
             i++;
@@ -2466,16 +2686,25 @@ int main(int argc, char **argv) {
     s_snes_ready = 1;
 
     frame = 0;
+    if (!s_autosave_path[0] && interactive && s_autosave_seconds > 0)
+        SidePath("tlk_autosave.state", s_autosave_path, sizeof s_autosave_path);
     if (load_path) {
         uint32_t hf = 0;
-        if (!tlk_state_load(load_path, &hf)) { fprintf(stderr, "cannot load state %s\n", load_path); return 8; }
-        frame = (long)hf;
-        printf("loaded_state=%s at_frame=%ld\n", load_path, frame);
+        if (StateFromThisBuild(load_path) && tlk_state_load(load_path, &hf)) {
+            frame = (long)hf;
+            AutosaveRestart();
+            printf("loaded_state=%s at_frame=%ld\n", load_path, frame);
+        } else {
+            fprintf(stderr, "cannot load state %s\n", load_path);
+            if (!interactive) return 8;
+            load_path = NULL;   /* a player gets a new game, and the power-on state below */
+            Toast("Can't resume: new game");
+        }
     }
     if (!load_path && (interactive || practice_level >= 0)) {   /* power-on state for level select */
         char boot[1100];
         PrBootPath(boot, sizeof boot);
-        tlk_state_save(boot, 0);
+        SaveStateFiles(boot);
     }
     if (s_practice) PrEnable();
     /* --frames runs are scripted proof runs: they must not clobber a player's recording. */
@@ -2505,6 +2734,7 @@ int main(int argc, char **argv) {
         if (!running) break;
 
         if (SDL_GetAtomicInt(&s_background)) {
+            Autosave();   /* Android may end the process from here on */
             if (astream) SDL_PauseAudioStreamDevice(astream);
             while (running && SDL_GetAtomicInt(&s_background))
                 if (SDL_WaitEventTimeout(&ev, 100)) HandleEvent(&ev);
@@ -2537,16 +2767,18 @@ int main(int argc, char **argv) {
         TlkWideEndFrame(s_pixels);
         frame++;
         if (s_practice) PracticeFrame((uint16_t)pad);
+        AutosaveTick();
         s_polls_frame = 0;
         if (g_fail) { fprintf(stderr, "runtime failure (g_fail) at frame %ld\n", frame); break; }
         if (save_path && frame == save_at) {
-            if (!tlk_state_save(save_path, (uint32_t)frame)) { fprintf(stderr, "cannot save state %s\n", save_path); return 8; }
+            if (!SaveStateFiles(save_path)) { fprintf(stderr, "cannot save state %s\n", save_path); return 8; }
             printf("saved_state=%s at_frame=%ld\n", save_path, frame);
         }
         if (load_at_path && frame == load_at) {
             uint32_t hf = 0;
-            if (!tlk_state_load(load_at_path, &hf)) { fprintf(stderr, "cannot load state %s\n", load_at_path); return 8; }
+            if (!StateFromThisBuild(load_at_path) || !tlk_state_load(load_at_path, &hf)) { fprintf(stderr, "cannot load state %s\n", load_at_path); return 8; }
             TlkWideReset();
+            AutosaveRestart();
             printf("loaded_state=%s at_frame=%ld -> %u\n", load_at_path, frame, hf);
             frame = (long)hf;
             if (s_practice) PrAfterLoad(0);
@@ -2627,6 +2859,7 @@ int main(int argc, char **argv) {
             else if (now - deadline > 5 * period_ns) { deadline = now; late_resyncs++; }
         }
     }
+    if (!g_fail) Autosave();
     RecStop("session ended");
     double wall = (double)(SDL_GetTicksNS() - t_start) / 1e9;
 
