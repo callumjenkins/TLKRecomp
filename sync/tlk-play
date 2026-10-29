@@ -1,0 +1,4 @@
+#!/bin/sh
+# Plays The Lion King with save sync: pulls, resumes the newest autosave, and pushes when the game exits.
+# tlk-play --new starts at the title. Options after -- go to tlk_sdl.
+exec python3 "$(dirname "$(readlink -f "$0")")/tlk_sync.py" play "$@"
