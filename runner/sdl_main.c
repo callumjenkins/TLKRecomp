@@ -127,6 +127,8 @@ void TlkAssetPath(const char *rel, char *out, size_t n);           /* tlk_assets
 #include "tlk_compat.h"
 #include "tlk_menu_imgui.h"
 #include "tlk_touch.h"
+#include "tlk_gpu_shader.h"
+#include "tlk_scanlines.h"
 
 enum { kWidth = 256, kHeight = 224, kBpp = 4 };
 static uint8_t s_pixels[kWidth * kHeight * kBpp];
@@ -288,12 +290,18 @@ static int s_turbo_speed = 4, s_turbo_held;
  * Shaders need OpenGL 3.3 (opengl = 0 forces the plain SDL renderer). */
 static int s_aspect = kSnesDisplayAspect_SquarePixels8x7, s_smooth, s_integer, s_opengl = 1;
 static char s_shader[1024];
+/* shader_param lines: a preset's #pragma parameter set from the ini. They are kept when the preset changes, and a
+ * preset without that parameter ignores it. */
+enum { kMaxShaderParams = 32 };
+static struct { char name[48]; float value; } s_shader_params[kMaxShaderParams];
+static int s_shader_param_count;
 static const char *const kShaders[][2] = {
     { "", "off" },
     { "assets/shaders/crt-soft.glslp", "CRT" },
     { "assets/shaders/lcd-grid.glslp", "LCD grid" },
     { "assets/shaders/sharp.glslp", "Sharpen" },
-    { "assets/shaders/warm-composite.glslp", "Composite" } };
+    { "assets/shaders/warm-composite.glslp", "Composite" },
+    { "assets/shaders/pvm.glslp", "PVM" } };
 enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
 /* HD Mode 7 (snesrecomp's PpuBindMode7HdSurface): 0 = off, else 2..4. The PPU
  * also draws each line into s_hd at that scale, resampling Mode 7 lines at the
@@ -348,10 +356,12 @@ static char *Trim(char *s) {
 
 /* Plain "key = value" lines; [sections] and ; or # comments are ignored.
  * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, volume, shader,
- * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, hd_mode7 (0 or 2-4),
+ * shader_param (NAME VALUE, one line each), aspect (4:3 8:7 1:1), smooth,
+ * integer_scale, opengl, hd_mode7 (0 or 2-4),
  * widescreen (off 16:9 21:9 adaptive), widescreen_hud (edges or in place),
  * widescreen_enemies (as the game or out of view), turbo_speed (2-16),
- * scanlines (0-100), speedrun (off or practice), menu_dim and menu_opacity (0-100), autosave_seconds (0 off), and one per binding
+ * scanlines (0-100), speedrun (off or practice), menu_dim and menu_opacity
+ * (0-100), autosave_seconds (0 off), and one per binding
  * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
 static void LoadConfig(const char *path) {
@@ -374,6 +384,17 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "audio_rate")) s_audio_rate = atoi(v);
         else if (!strcmp(k, "volume")) s_volume = atoi(v);
         else if (!strcmp(k, "shader")) snprintf(s_shader, sizeof s_shader, "%s", v);
+        else if (!strcmp(k, "shader_param")) {
+            char name[48];
+            float value;
+            int i = 0;
+            if (sscanf(v, "%47s %f", name, &value) != 2) { fprintf(stderr, "config: shader_param wants NAME VALUE\n"); continue; }
+            while (i < s_shader_param_count && strcmp(s_shader_params[i].name, name)) i++;
+            if (i == kMaxShaderParams) { fprintf(stderr, "config: more than %d shader_param names; %s is ignored\n", kMaxShaderParams, name); continue; }
+            if (i == s_shader_param_count) s_shader_param_count++;
+            snprintf(s_shader_params[i].name, sizeof s_shader_params[i].name, "%s", name);
+            s_shader_params[i].value = value;
+        }
         else if (!strcmp(k, "aspect")) {
             uint8_t a;
             if (SnesDisplayAspect_Parse(v, &a)) s_aspect = a;
@@ -430,9 +451,13 @@ static int SaveConfig(void) {
     if (s_rom_cfg[0]) fprintf(f, "rom = %s\n", s_rom_cfg);
     fprintf(f, "scale = %d\nfullscreen = %d\nvsync = %d\naudio = %d\naudio_rate = %d\nvolume = %d\n",
             s_scale, s_fullscreen, s_vsync, s_audio, s_audio_rate, s_volume);
-    fprintf(f, "; shader: empty, a bundled assets/shaders/*.glslp or your own .glslp/.glsl path\n");
-    fprintf(f, "shader = %s\naspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
-            s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
+    fprintf(f, "; shader: empty, a bundled assets/shaders/*.glslp, or with OpenGL your own .glslp/.glsl path\n");
+    fprintf(f, "shader = %s\n", s_shader);
+    fprintf(f, "; shader_param = NAME VALUE sets one of a preset's parameters, such as BEAM_MAX for pvm\n");
+    for (int i = 0; i < s_shader_param_count; i++)
+        fprintf(f, "shader_param = %s %g\n", s_shader_params[i].name, s_shader_params[i].value);
+    fprintf(f, "aspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
+            SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
     fprintf(f, "; scanlines without OpenGL: how dark the gap between lines is, percent (0 = off)\nscanlines = %d\n",
             s_scanlines);
     fprintf(f, "; Mode 7 drawn at 2-4x the native resolution (0 = off)\nhd_mode7 = %d\n", s_hd_mode7);
@@ -532,6 +557,10 @@ static int s_scan_h, s_scan_pct;
 static struct RendererFuncs s_gl;
 #endif
 static int s_gl_on;            /* the OpenGL presenter owns the window */
+static int s_gpu_shaders;      /* the SDL renderer is SDL's GPU renderer, with the presets compiled in */
+#ifndef __ANDROID__
+int snesrecomp_opengl_set_param(const char *name, float value);   /* cmake/runtime-patches/opengl.hunks */
+#endif
 static SDL_AudioStream *astream;
 static int pace = 1, running = 1;
 static long frame;
@@ -984,6 +1013,23 @@ static void PrEnable(void) {
 /* ── Presenting ─────────────────────────────────────────────────────────── */
 static void ApplyVideoConfig(void) { TlkVideoConfig(s_shader, s_aspect, s_smooth); }
 
+/* After a preset loads: its parameters from the ini, on whichever renderer runs it. */
+static void ApplyShaderParams(void) {
+    for (int i = 0; i < s_shader_param_count; i++) {
+#ifndef __ANDROID__
+        if (s_gl_on) { snesrecomp_opengl_set_param(s_shader_params[i].name, s_shader_params[i].value); continue; }
+#endif
+        TlkGpuShaderSetParam(s_shader_params[i].name, s_shader_params[i].value);
+    }
+}
+
+/* The SDL renderer's preset: the one named by s_shader, when the build compiled it in. */
+static void ApplyGpuShader(void) {
+    if (!s_gpu_shaders) return;
+    if (!TlkGpuShaderSelect(ren, s_shader)) fprintf(stderr, "shader: %s isn't one this build can run on the SDL renderer\n", s_shader);
+    ApplyShaderParams();
+}
+
 /* sw x sh is the presented picture, native or HD; the maths runs on the
  * native size so integer scaling still counts game pixels. */
 static void ComputeViewport(int sw, int sh, int dw, int dh, SnesDisplayViewport *vp) {
@@ -1012,9 +1058,7 @@ static void SizeWindow(void) {
 
 static int TurboHeld(void);
 
-/* The column is the picture's height on screen. Each of the game's lines gets
- * its own whole rows and darkens the bottom third of them, so every gap looks
- * the same when that height is not a whole multiple of 224. */
+/* One column of the overlay, as tall as the picture on screen, stretched across it. */
 static void DrawScanlines(const SDL_FRect *dst) {
     const int h = (int)dst->h;
     if (!s_scanlines || h < 2 * kHeight) return;   /* under two pixels a line there is no gap to draw */
@@ -1023,12 +1067,7 @@ static void DrawScanlines(const SDL_FRect *dst) {
         if (s_scan_tex) SDL_DestroyTexture(s_scan_tex);
         s_scan_tex = col ? SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, 1, h) : NULL;
         if (!s_scan_tex) { free(col); return; }
-        const uint32_t gap = (uint32_t)(s_scanlines * 255 / 100) << 24;   /* black, alpha only */
-        for (int i = 0; i < kHeight; i++) {   /* the rows nearest sampling gives line i: from ceil(i * h / 224 - 0.5) */
-            int y0 = (2 * i * h + kHeight - 1) / (2 * kHeight), y1 = (2 * (i + 1) * h + kHeight - 1) / (2 * kHeight);
-            int dark = y1 - (y1 - y0 + 2) / 3;
-            for (int y = y0; y < y1; y++) col[y] = y < dark ? 0 : gap;
-        }
+        TlkScanlineColumn(col, h, kHeight, s_scanlines);
         SDL_UpdateTexture(s_scan_tex, NULL, col, 4);
         free(col);
         SDL_SetTextureBlendMode(s_scan_tex, SDL_BLENDMODE_BLEND);
@@ -1189,7 +1228,8 @@ static void Present(void) {
         if (!tex) return;
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
     }
-    SDL_SetTextureScaleMode(tex, s_smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+    const int shaded = TlkGpuShaderActive();
+    SDL_SetTextureScaleMode(tex, (shaded ? TlkGpuShaderFilterLinear() : s_smooth) ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
     if (ww || sc > 1) {
         void *px;
         int pitch;
@@ -1200,7 +1240,9 @@ static void Present(void) {
     } else SDL_UpdateTexture(tex, NULL, s_screen, kWidth * kBpp);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
+    if (shaded) TlkGpuShaderBegin(ren, tw, th, vp.width, vp.height);
     SDL_RenderTexture(ren, tex, NULL, &dst);
+    if (shaded) SDL_SetGPURenderState(ren, NULL);
     DrawScanlines(&dst);
     DrawTouchPad(dw, dh);
     if (s_menu_open && s_menu_imgui) TlkMenuImguiDraw(s_ui, &s_about);
@@ -1244,6 +1286,7 @@ static int OpenVideo(void) {
             snesrecomp_opengl_set_viewport(ComputeViewport);
             s_gl_on = s_gl.Initialize(win);
         }
+        if (s_gl_on) ApplyShaderParams();
         if (s_gl_on) {   /* the presenter's context is current here */
             char font[1200];
             TlkAssetPath("assets/fonts/LatoLatin-Regular.ttf", font, sizeof font);
@@ -1261,12 +1304,20 @@ static int OpenVideo(void) {
     if (!s_gl_on) {
         SDL_GL_ResetAttributes();
         win = SDL_CreateWindow("The Lion King", w, h, flags);
-        ren = win ? SDL_CreateRenderer(win, NULL) : NULL;
+#ifdef __ANDROID__
+        /* SDL's GPU renderer (Vulkan) runs the shader presets; a phone without it gets the default renderer. */
+        ren = win ? SDL_CreateRenderer(win, "gpu") : NULL;
+        if (!ren && win) ren = SDL_CreateRenderer(win, NULL);
+#else
+        ren = win ? SDL_CreateRenderer(win, NULL) : NULL;   /* SDL_RENDER_DRIVER=gpu picks the GPU renderer */
+#endif
         if (!ren) { fprintf(stderr, "SDL window: %s\n", SDL_GetError()); return 0; }
         SDL_SetRenderVSync(ren, (s_vsync && pace) ? 1 : 0);
         /* The PPU leaves the top byte 0: an alpha format would draw every pixel transparent. */
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth, kHeight);
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+        s_gpu_shaders = TlkGpuShaderInit(ren);
+        ApplyGpuShader();
         char font[1200];
         TlkAssetPath("assets/fonts/LatoLatin-Regular.ttf", font, sizeof font);
         s_menu_imgui = TlkMenuImguiInit(win, ren, font, 18.0f);
@@ -1588,11 +1639,13 @@ static char s_start_label[48];
 #define LOAD_KEYS NULL
 #define TOUCH_AUTO "Auto: shown while no gamepad is connected."
 #define SCANLINES_DESC "Dark gaps between the game's lines, percent. 0 is off."
+#define SHADER_DESC "Picture filters. PVM looks like a Sony Trinitron monitor."
 #else
 #define SAVE_KEYS "Also F1-F4."
 #define LOAD_KEYS "Also F5-F8."
 #define TOUCH_AUTO "Auto: shown on a touchscreen while no gamepad is connected. Needs opengl = 0 in the ini."
-#define SCANLINES_DESC "Percent; 0 is off. Needs opengl = 0 in the ini; with OpenGL, the CRT shader has them."
+#define SCANLINES_DESC "Dark gaps between lines, percent; 0 is off. Needs opengl = 0; with OpenGL, use a shader."
+#define SHADER_DESC "Presets in assets/shaders; parameters are shader_param lines in the ini."
 #endif
 #define SAVE_ROW(i) MENU_ROW("tlk.save_slot", "Save states", s_slot_label[i], \
     SAVE_KEYS, ACTION, 0, 0, 0, NULL, 0)
@@ -1614,7 +1667,7 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_OPACITY] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_MENU_OPACITY, "Display", "Menu opacity",
                            "How solid the menu's background is.", INT, 0, 100, 10, NULL, 0),
     [R_SHADER] = MENU_ROW("tlk.shader", "Graphics", "Shader",
-                          "Presets in assets/shaders.", CHOICE, 0, kShaderCount - 1, 1,
+                          SHADER_DESC, CHOICE, 0, kShaderCount - 1, 1,
                           s_shader_names, kShaderCount),
     [R_SCANLINES] = MENU_ROW("tlk.scanlines", "Graphics", "Scanlines",
                              SCANLINES_DESC, INT, 0, 100, 10, NULL, 0),
@@ -1747,8 +1800,9 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
         snprintf(s_shader, sizeof s_shader, "%s", v < kShaderCount ? kShaders[v][0] : s_shader_custom);
         ApplyVideoConfig();
 #ifndef __ANDROID__
-        if (s_gl.Reconfigure) s_gl.Reconfigure();
+        if (s_gl_on && s_gl.Reconfigure) { s_gl.Reconfigure(); ApplyShaderParams(); }
 #endif
+        ApplyGpuShader();
         break;
     case R_SCANLINES: s_scanlines = v; break;
     case R_HD_MODE7: s_hd_mode7 = v ? v + 1 : 0; ApplyHdMode7(); break;
@@ -1781,7 +1835,7 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
 static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
     (void)ctx;
     switch ((int)(item - s_rows)) {
-    case R_SHADER: return s_gl_on;
+    case R_SHADER: return s_gl_on || s_gpu_shaders;
     case R_SCANLINES: return !s_gl_on;
     case R_ABOUT: return s_menu_imgui;
     case R_LOAD0: case R_LOAD0 + 1: case R_LOAD0 + 2: case R_LOAD0 + 3: return s_slot_loadable[item - s_rows - R_LOAD0];
@@ -2392,6 +2446,37 @@ static int RemapSelfTest(void) {
             "touch settings were saved to the ini");
     s_touch_mode = touch_mode, s_touch_size = touch_size, s_touch_opacity = touch_opacity, s_touch_haptics = touch_haptics;
     TouchReset();
+
+    /* The picture's ini lines: scanlines and shader_param. */
+    {
+        int scanlines = s_scanlines, param_count = s_shader_param_count;
+        s_scanlines = 70;
+        s_shader_param_count = 1;
+        snprintf(s_shader_params[0].name, sizeof s_shader_params[0].name, "BEAM_MAX");
+        s_shader_params[0].value = 0.9f;
+        SaveConfig();
+        s_scanlines = 0;
+        s_shader_param_count = 0;
+        LoadConfig(s_cfg_path);
+        StCheck(s_scanlines == 70 && s_shader_param_count == 1 && !strcmp(s_shader_params[0].name, "BEAM_MAX")
+                && s_shader_params[0].value == 0.9f, "scanlines and shader_param were saved to the ini");
+        char ini[1100];
+        snprintf(ini, sizeof ini, "%s.selftest", s_cfg_path);
+        FILE *f = fopen(ini, "w");
+        if (f) {
+            fputs("scanlines = 150\nshader_param = MASK 0.2\nshader_param = broken\nshader_param = MASK 0.4\n", f);
+            fclose(f);
+        }
+        s_shader_param_count = 0;
+        LoadConfig(ini);
+        remove(ini);
+        StCheck(s_scanlines == 100, "scanlines over 100 reads as 100");
+        StCheck(s_shader_param_count == 1 && !strcmp(s_shader_params[0].name, "MASK") && s_shader_params[0].value == 0.4f,
+                "a repeated shader_param keeps the last value, and a line without a value is dropped");
+        s_scanlines = scanlines;
+        s_shader_param_count = param_count;
+        SaveConfig();
+    }
 
     /* Save states rows, from sidecars written here: the emulator is not running, so nothing loads. */
     {
@@ -3048,6 +3133,7 @@ int main(int argc, char **argv) {
     recomp_runtime_ui_destroy(s_ui);
     if (tex) SDL_DestroyTexture(tex);
     if (s_scan_tex) SDL_DestroyTexture(s_scan_tex);
+    TlkGpuShaderQuit();
     if (ren) SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();

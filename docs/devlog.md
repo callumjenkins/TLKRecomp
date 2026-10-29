@@ -2645,9 +2645,9 @@ The owner asked for a scanline overlay on Android, where the picture goes throug
 snesrecomp's GLSL presets don't build. Graphics > Scanlines (0-100 in tens, `scanlines =` in the ini, and a row in the
 launcher's Settings) draws one column of black, alpha only, over the picture after the game texture. Each of the
 game's 224 lines gets the screen rows that nearest sampling gives it, starting at `ceil(i * h / 224 - 0.5)`, and the
-bottom third of them are dark. The first try darkened by a cosine of the position within a line instead. At 500 rows
-the darkest row of a gap ranged from 28 to 153 of alpha across lines, which shows as moiré. With whole rows per line
-every gap is the same, apart from one row more or less. Under two screen rows a line nothing is drawn. On the
+bottom `ceil(m / 3)` of them are dark, where m is the fewest rows any line gets, so every gap is the same height and
+the beam takes the odd row. The first try darkened by a cosine of the position within a line instead. At 500 rows
+the darkest row of a gap ranged from 28 to 153 of alpha across lines, which shows as moiré. Under two screen rows a line nothing is drawn. On the
 desktop the row is greyed out while the OpenGL presenter runs, where the CRT shader has its own scanlines.
 
 ```
@@ -2657,4 +2657,45 @@ scripts/compare_modes.sh 600 3000                                             MA
 ctest 8/8; remap self-test PASS; scripts/build_android.sh (Kotlin tests)      BUILD SUCCESSFUL, build ce87336647f1-lp64le
 ```
 
+A later test-gaps audit found the gaps were not the same: a third of each line's own rows gave 1 or 2 dark rows at 673
+to 895 rows high, uneven at 669 of the heights from 448 to 2400. `runner/tlk_scanlines.c` holds the column now, and
+`tests/tlk_scanlines_test.c` checks every height from 448 to 2400 for equal gaps at the bottom of each line.
+
 Not run on a phone: none was on adb when this landed.
+
+## Task GPU: shader presets on the phone, and a PVM preset
+
+The owner asked for real shaders on the phone and a PVM look ("I like the PVM look for example, I have a PVM-20L4").
+The phone draws through SDL_Renderer, and so do its touch pad and menu, so the presets run inside it: SDL 3.4's
+`SDL_CreateGPURenderState` gives the `gpu` renderer (Vulkan on Android) a custom fragment shader.
+`tools/glslp_to_spirv.py` takes the same single-pass RetroArch presets the desktop's GL presenter loads, gives each
+SDL's binding layout (texture at set 2, uniforms in one std140 block at set 3), and compiles it to SPIR-V with the
+NDK's `glslc` into `tlk_gpu_shaders.h`. `runner/tlk_gpu_shader.c` fills `InputSize`, `TextureSize`, `OutputSize`,
+`FrameCount` and the parameters each frame. Android asks for the `gpu` renderer first and falls back to the default
+one, where the Shader row stays greyed out and the scanline overlay remains.
+
+`runner/assets/shaders/pvm.glslp` is new (CC0). Each of the two nearest lines is a beam whose height follows each
+channel's brightness: Gaussian, `exp(-4.5 (d/w)^2)`, with `w` from `BEAM_MIN` to `BEAM_MAX` by `sqrt` of the linear
+value. Then an aperture grille over `gl_FragCoord.x`, divided by its mean so it keeps the brightness, a four-tap glow,
+and gamma 2.4 in, 2.2 out. The first tuning (`k = 2.8`, beams 0.55 to 0.95) left mid-tones with barely a gap at 6x.
+`shader_param = NAME VALUE` lines in the ini set any preset's parameters, on the SDL path through the uniform block and
+on the GL path through a new `snesrecomp_opengl_set_param` hunk.
+
+```
+uv run --with pytest python -m pytest -q tools/tests              41 passed, 4 skipped (18 new, glslp_to_spirv)
+SDL_RENDER_DRIVER=gpu, opengl = 0, scale 4, f1500, each preset     no error; six different pictures; frame_sha256 d55aba8a... all six
+l05_random.tape f4000, scale 6, pvm on gpu vs GL presenter         RMSE 0.09%
+same, shader_param MASK 0 and BEAM_MIN 1.0                         applied on both (RMSE 0.16% between them)
+default renderer with shader = pvm                                 runs, no preset (the phone's fallback)
+scripts/compare_modes.sh 600 3000                                  MATCH (57ccb8d5, c897f389)
+ctest 8/8; remap self-test PASS; scripts/build_android.sh          BUILD SUCCESSFUL, build 3f145799c267-lp64le, 5 presets compiled in
+```
+
+The test-gaps audit also found that a `shader =` path no compiled preset matched was accepted without a message at
+startup; it now prints one. `--selftest-remap` round-trips `scanlines` and `shader_param` through the ini, including a
+repeated name, a line without a value, and `scanlines = 150`.
+
+Not run on a phone: none was on adb. The desktop runs the same SPIR-V through Vulkan, which covers the shaders and the
+host code, not the phone's driver. HD Mode 7 hands every preset a taller texture, so scanline presets draw HD lines, as
+they already did on the GL path. On the SDL path a `.glslp` of your own named like a bundled preset runs the bundled
+one.

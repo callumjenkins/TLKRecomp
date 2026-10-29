@@ -151,6 +151,7 @@ if(TLK_BUILD_HOSTS)
     set(TLK_SDL_SOURCES ${TLK_COMMON_SOURCES}
         ${TLK_RUNNER_DIR}/sdl_main.c
         ${TLK_RUNNER_DIR}/tlk_touch.c
+        ${TLK_RUNNER_DIR}/tlk_scanlines.c
         ${TLK_RUNNER_DIR}/tlk_video.c
         ${TLK_RUNNER_DIR}/tlk_assets.c
         ${TLK_RUNNER_DIR}/headless_host.c
@@ -168,6 +169,31 @@ if(TLK_BUILD_HOSTS)
     tlk_configure_target(tlk_sdl)
     snesrecomp_target_sdl(tlk_sdl)
     target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_saveinfo.c)
+    # Shader presets for SDL's GPU renderer, which the phone draws with: tools/glslp_to_spirv.py compiles each to
+    # SPIR-V with glslc, from the NDK or the PATH. Without glslc the header holds none and the Shader row stays off
+    # on the SDL renderer.
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    file(GLOB tlk_ndk_glslc "${ANDROID_NDK}/shader-tools/*/glslc" "$ENV{ANDROID_HOME}/ndk/*/shader-tools/*/glslc"
+         "$ENV{HOME}/Android/Sdk/ndk/*/shader-tools/*/glslc")
+    list(TRANSFORM tlk_ndk_glslc REPLACE "/glslc$" "")
+    find_program(TLK_GLSLC glslc HINTS ${tlk_ndk_glslc})
+    file(GLOB tlk_gpu_presets "${SNESRECOMP_ROOT}/runner/assets/shaders/*.glslp"
+         "${TLK_RUNNER_DIR}/assets/shaders/*.glslp")
+    file(GLOB tlk_gpu_passes "${SNESRECOMP_ROOT}/runner/assets/shaders/_passes/*.glsl"
+         "${TLK_RUNNER_DIR}/assets/shaders/_passes/*.glsl")
+    set(tlk_gpu_glslc "")
+    if(TLK_GLSLC)
+        set(tlk_gpu_glslc --glslc "${TLK_GLSLC}")
+    else()
+        message(STATUS "glslc not found: no shader presets on the SDL renderer")
+    endif()
+    add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/tlk_gpu_shaders.h"
+        COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tools/glslp_to_spirv.py" ${tlk_gpu_glslc}
+            --out "${CMAKE_CURRENT_BINARY_DIR}/tlk_gpu_shaders.h" ${tlk_gpu_presets}
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/glslp_to_spirv.py" ${tlk_gpu_presets} ${tlk_gpu_passes}
+        COMMENT "Compiling shader presets to SPIR-V" VERBATIM)
+    target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_gpu_shader.c "${CMAKE_CURRENT_BINARY_DIR}/tlk_gpu_shaders.h")
+    target_include_directories(tlk_sdl PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     # TLK_BUILD_ID, which every savestate's sidecar names. Run on every build: the files it hashes are globbed, so
     # no DEPENDS list could name them.
     # The id names the data layout a state depends on rather than the platform, so Linux, Android, and macOS share states.
@@ -200,6 +226,10 @@ if(TLK_BUILD_HOSTS)
     if(NOT ANDROID)
         snesrecomp_target_opengl(tlk_sdl)
         snesrecomp_target_shader_presets(tlk_sdl)
+        add_custom_command(TARGET tlk_sdl POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${TLK_RUNNER_DIR}/assets/shaders" "$<TARGET_FILE_DIR:tlk_sdl>/assets/shaders"
+            COMMENT "tlk_sdl: staging TLK's shader presets" VERBATIM)
         tlk_use_patched_target_sources(tlk_sdl)
     endif()
     # In-game settings menu: recomp-ui's runtime menu (MIT, submodule), drawn
@@ -231,6 +261,11 @@ if(TLK_BUILD_HOSTS)
     foreach(f IN LISTS tlk_shader_files)
         list(APPEND tlk_embedded "assets/shaders/${f}=${tlk_shader_dir}/${f}")
     endforeach()
+    file(GLOB_RECURSE tlk_own_shader_files RELATIVE "${TLK_RUNNER_DIR}/assets/shaders" CONFIGURE_DEPENDS
+         "${TLK_RUNNER_DIR}/assets/shaders/*.glslp" "${TLK_RUNNER_DIR}/assets/shaders/*.glsl")
+    foreach(f IN LISTS tlk_own_shader_files)
+        list(APPEND tlk_embedded "assets/shaders/${f}=${TLK_RUNNER_DIR}/assets/shaders/${f}")
+    endforeach()
     tlk_embed_assets(tlk_sdl "${CMAKE_CURRENT_BINARY_DIR}/tlk_assets_data.c" ${tlk_embedded})
     # Windows: the app icon (packaging/icon, tools/make_icon.py).
     if(WIN32)
@@ -251,6 +286,12 @@ if(NOT ANDROID)
     endif()
     add_test(NAME tlk_touch COMMAND tlk_touch_test)
 
+    add_executable(tlk_scanlines_test tests/tlk_scanlines_test.c runner/tlk_scanlines.c)
+    target_include_directories(tlk_scanlines_test PRIVATE runner)
+    if(NOT MSVC)
+        target_link_libraries(tlk_scanlines_test PRIVATE m)
+    endif()
+    add_test(NAME tlk_scanlines COMMAND tlk_scanlines_test)
     add_executable(tlk_saveinfo_test tests/tlk_saveinfo_test.c runner/tlk_saveinfo.c)
     target_include_directories(tlk_saveinfo_test PRIVATE runner)
     set(tlk_saveinfo_dir "${CMAKE_CURRENT_BINARY_DIR}/tlk_saveinfo_test.d")
@@ -300,6 +341,7 @@ if(TLK_BUILD_HOSTS)
     # Shader presets are looked up next to the binary (assets/shaders/...).
     install(DIRECTORY ${SNESRECOMP_ROOT}/runner/assets/shaders
             DESTINATION ${CMAKE_INSTALL_BINDIR}/assets)
+    install(DIRECTORY ${TLK_RUNNER_DIR}/assets/shaders DESTINATION ${CMAKE_INSTALL_BINDIR}/assets)
     install(FILES packaging/README.txt packaging/LICENSE-NOTES.txt
             DESTINATION ${CMAKE_INSTALL_DOCDIR})
     install(FILES snesrecomp/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}

@@ -42,6 +42,9 @@ class SettingsActivity : Activity() {
         choice("Picture shape", "aspect", listOf("4:3 TV" to "4:3", "8:7 pixels" to "8:7", "1:1" to "1:1"), "8:7")
         choice("Widescreen", "widescreen",
             listOf("Off" to "off", "16:9" to "16:9", "21:9" to "21:9", "Fit the screen" to "adaptive"), "adaptive")
+        choice("Shader", "shader", listOf("Off" to "", "PVM" to "assets/shaders/pvm.glslp",
+            "CRT" to "assets/shaders/crt-soft.glslp", "LCD grid" to "assets/shaders/lcd-grid.glslp",
+            "Sharpen" to "assets/shaders/sharp.glslp", "Composite" to "assets/shaders/warm-composite.glslp"), "")
         number("Scanlines", "scanlines", 0, 100, 0, "%")
         choice("Touch pad", "touch", listOf("Auto: hidden while a controller is connected" to "auto", "On" to "on", "Off" to "off"), "auto")
         number("Touch pad size", "touch_size", 50, 150, 100, "%")

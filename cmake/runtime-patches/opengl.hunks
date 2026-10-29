@@ -51,3 +51,21 @@ void snesrecomp_opengl_set_overlay(void (*draw)(int, int)) {
   }
   SDL_GL_SwapWindow(g_window);
 >>>>
+
+# Task GPU: tlk_sdl keeps `shader_param = NAME VALUE` lines in its ini and sets them on whichever preset is loaded.
+# The parameters live on the presenter's own GlslShader, so it gets a setter.
+@@ shader-param-set
+<<<<
+static bool OpenGLRenderer_Init(SDL_Window *window) {
+====
+int snesrecomp_opengl_set_param(const char *name, float value) {
+  for (GlslParam *p = g_glsl_shader ? g_glsl_shader->first_param : NULL; p; p = p->next)
+    if (strcmp(p->id, name) == 0) {
+      p->value = value < p->min ? p->min : value > p->max ? p->max : value;
+      return 1;
+    }
+  return 0;
+}
+
+static bool OpenGLRenderer_Init(SDL_Window *window) {
+>>>>
