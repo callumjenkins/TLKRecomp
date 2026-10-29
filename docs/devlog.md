@@ -2598,3 +2598,43 @@ with three states and their files. After `tlk_slot2.*` was deleted, Import put a
 `wm size 1080x2520` while the game ran redrew it at the new size without a restart, with the pad under the picture,
 and `wm size 2520x1080` in the first level showed the level 21:9 wide with the HUD at its edges and the pad at the same
 1260 px unit. A real fold to the outer screen has not been tried.
+
+## Task SYNC: saves that move between the PC, the laptop, and the phone
+
+The build id named the platform (`Linux-x86_64`, `Android-aarch64`), on the reasoning that a snapshot of the runtime's
+memory has no promise of matching across architectures. The promise holds where it matters here. With the same code,
+a state saved at frame 3000 on the PC loads on the Fold 7 and plays on to the same frame and WRAM hashes as here, and
+the reverse. The two files differ in 5 bytes at offset 297480 of 316015. The rollback residue starts 18,568 bytes
+from the end, so those bytes are at offset 32 in it. That is `CpuState.ram`, the host's pointer to WRAM, which
+`rtl_rb_residue_apply` replaces with the live one on load. So the id now ends in a data layout tag instead
+(`sizeof(long)`, `sizeof(void *)`, byte order: `lp64le` on Linux, Android, and Apple Silicon, `llp64le` on MinGW).
+
+Sidecars gain `device` (`--device NAME`) and `state_sha256`, the hash of the state as written, and the C escapes
+control characters in their strings. Sync itself is outside `tlk_sdl`, in `sync/` and the Android launcher, and is
+described in `docs/SAVE_SYNC.md`. Pressing Home on the phone keeps the game process alive, so the launcher never saw
+the autosave written on leaving. `GameActivity.onStop` pushes it 3 s later, which is safe because a store refuses a
+state that doesn't match its sidecar's hash.
+
+A test-gaps audit found four bugs in the desktop client, each now under a test. An HTTP answer other than 400, 404,
+or 409 (Tailscale Serve's 502 when the service is down, 403 for another login) crashed `tlk-play` before the game
+started. A file in `history/NAME/` that the folder store didn't write, such as a Syncthing conflict copy, raised
+after the live zip had moved to history, losing it. A device name such as "My Laptop" made every autosave push fail.
+A `cmd:` store printing something other than JSON crashed play.
+
+```
+$ scripts/check_cross_device_state.sh          # l05_random.tape to 3000 on one side, no input to 6000 on the other
+MATCH    PC state on the phone
+MATCH    both builds are 95c032fd8f51-lp64le
+MATCH    phone state on the PC
+CROSS-DEVICE MATCH
+scripts/check_state_resume.sh l05_random.tape 9000 600=Title,2 1450=Hakuna,8 4000=Hakuna,6   RESUME MATCH (sidecar sha = sha256sum, device recorded)
+scripts/compare_modes.sh 600 3000; -p tapes/6987M.read.tape 1200 6000                        MATCH (57ccb8d5, c897f389, d8e93da4, a07184e1)
+scripts/check_all_tapes.sh -s                                                                 45 MATCH, 0 MISMATCH
+check_idle_lle IDLE MATCH; check_native_decomp IDENTICAL; check_exit_mx 0 WRONG; remap self-test PASS
+ctest 8/8; sync/tests 73 passed; Kotlin unit tests 37/37 (SaveSyncTest 17)
+```
+
+The resumed run in the cross-device check has to differ from a fresh run, so a load that was ignored fails it. On the
+phone, with a test server on the PC through `adb reverse`, the desktop's autosave showed on the launcher as
+"Hakuna, from cj-desk-pc, just now". After a few seconds of play and Home, the game pushed its own autosave, and
+`tlk-play` on the PC pulled it and loaded it at frame 4750.

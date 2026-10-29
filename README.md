@@ -132,8 +132,9 @@ B goes back, Start closes.
 
 Save states are `tlk_slot1.state` .. `tlk_slot4.state`, in the same folder as the ini, and the menu's first section,
 Save states, saves and loads them too. Each has a `.png` of the screen and a `.json` naming the level, the time
-and the build that wrote it. A state only loads in a build of the same code on the same platform (`tlk_sdl
---build-id` prints the id, then the git version, which is only a label); one from another build is refused, and one with no `.json`, from an earlier build, loads as before. `autosave_seconds = N` in the ini
+and the build that wrote it. A state only loads in a build of the same code and data layout (`tlk_sdl
+--build-id` prints the id, then the git version, which is only a label), so Linux, Android, and macOS on Apple
+Silicon share states and Windows keeps its own; one from another build is refused, and one with no `.json`, from an earlier build, loads as before. `autosave_seconds = N` in the ini
 also writes `tlk_autosave.state` every N seconds of play inside a level and on quitting; it is off by default on
 the desktop and every 60 seconds on Android.
 
@@ -308,7 +309,7 @@ published: the APK is for your own phone. It has been played on a Galaxy Z Fold 
 
 The app opens on a launcher: choose the ROM once (it is checked against the USA dump), then Continue from the
 autosave, start a new game, or pick a save slot. Settings holds the picture, the touch pad, the volume, and the
-autosave interval. "Export saves" writes the states, their pictures, and the ini to one zip, and "Import saves" puts
+autosave interval. Settings also takes a save sync server (see Save sync). "Export saves" writes the states, their pictures, and the ini to one zip, and "Import saves" puts
 them back. The zip is the only copy that survives an uninstall.
 
 In the game a touch pad is drawn while no controller is connected. Its buttons are sized by the screen's density,
@@ -321,6 +322,13 @@ The script signs every build with the key named in `~/.local/share/tlk-recomp/re
 exists (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`, with `storeFile` relative to the file). Android only
 installs a build over another signed with the same key, so keep that folder backed up: a new key means uninstalling,
 which deletes the saves.
+
+## Save sync
+
+Saves can follow you between a Linux PC, a laptop, and the phone. Each device's autosave and the four slots go to a
+store: a small server of your own on the tailnet, a synced folder, or a script around any cloud storage. The phone
+and `tlk-play` on Linux resume the newest autosave from whichever device saved last. `docs/SAVE_SYNC.md` has the
+setup and the protocol for writing another store.
 
 ## How it works
 

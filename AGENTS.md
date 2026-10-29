@@ -119,6 +119,8 @@ The full list, commands and pass strings are in `docs/VERIFYING.md`. Short form,
 | `scripts/check_exit_mx.py` | 0 WRONG |
 | `SDL_VIDEO_DRIVER=dummy build/tlk_sdl --rom R --no-audio --selftest-remap` | PASS (0 failed). Under Xvfb pad events don't arrive and it fails |
 | `python3 -m pytest -q tools/tests` | no failures (needs the submodule checked out) |
+| `python3 -m pytest -q sync/tests` | no failures |
+| `scripts/check_cross_device_state.sh` (phone on adb, same commit's APK) | CROSS-DEVICE MATCH |
 | run `tlk_sdl` and look at the window | right picture |
 
 `build/tapes/`, `build/playtapes/` and `build-host/out/sync/` are local (gitignored) and regenerated from your own
