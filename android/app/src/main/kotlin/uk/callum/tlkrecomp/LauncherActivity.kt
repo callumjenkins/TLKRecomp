@@ -19,7 +19,7 @@ import android.widget.TextView
 import java.io.File
 import java.util.concurrent.Executors
 
-/** The ROM, Continue, New game, Save slots and Settings, with everything kept in the app's files folder. */
+/** The app's first screen. Everything it reads and writes is in the app's files folder. */
 class LauncherActivity : Activity() {
     private val work = Executors.newSingleThreadExecutor()
     private val rom get() = File(filesDir, GameActivity.ROM)
@@ -81,6 +81,13 @@ class LauncherActivity : Activity() {
         newGame = button("New game") { newGame() }
         button("Save slots") { startActivityForResult(Intent(this, SlotsActivity::class.java), SLOTS) }
         button("Settings") { startActivity(Intent(this, SettingsActivity::class.java)) }
+        button("Export saves…") {
+            startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("application/zip").putExtra(Intent.EXTRA_TITLE, "tlk-saves.zip"), EXPORT)
+        }
+        button("Import saves…") {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), IMPORT)
+        }
         status = text().apply { setPadding(0, pad, 0, 0) }
         setContentView(ScrollView(this).apply {
             fitsSystemWindows = true   // Android 15 draws an app under the status and navigation bars
@@ -144,6 +151,51 @@ class LauncherActivity : Activity() {
         when (requestCode) {
             PICK -> data.data?.let { uri -> importRom(uri) }
             SLOTS -> data.getStringExtra(SlotsActivity.EXTRA_STATE)?.let { play(File(it)) }
+            EXPORT -> data.data?.let { uri -> exportSaves(uri) }
+            IMPORT -> data.data?.let { uri ->
+                AlertDialog.Builder(this)
+                    .setTitle("Import these saves?")
+                    .setMessage("Each save in the file replaces the one in the same slot, and its settings replace yours. Slots it doesn't have are kept.")
+                    .setPositiveButton("Import") { _, _ -> importSaves(uri) }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun exportSaves(uri: Uri) {
+        // An autosave written while the zip is made could pair one state with another's json.
+        if (gameRunning()) return say("The game is still open or closing. Close it from its menu, or try again in a moment.")
+        work.execute {
+            val message = try {
+                val w = contentResolver.openOutputStream(uri)!!.use { SaveArchive.write(filesDir, it) }
+                (if (w.states == 1) "Exported 1 save" else "Exported ${w.states} saves") + (if (w.settings) " and your settings." else ".")
+            } catch (e: Exception) {
+                "Couldn't write that file: ${e.message}"
+            }
+            say(message)
+        }
+    }
+
+    private fun importSaves(uri: Uri) {
+        // The game would write over the import: its autosave as it closes, its ini from its menu.
+        if (gameRunning()) return say("The game is still open or closing. Close it from its menu, or try again in a moment.")
+        work.execute {
+            val message = try {
+                val c = contentResolver.openInputStream(uri)!!.use { SaveArchive.read(it, filesDir) }
+                when {
+                    c.states == 0 && !c.settings -> "That file has no saves in it."
+                    c.states == 0 -> "Imported your settings. That file has no saves in it."
+                    else -> (if (c.states == 1) "Imported 1 save" else "Imported ${c.states} saves") +
+                        (if (c.settings) " and your settings." else ".")
+                }
+            } catch (e: Exception) {
+                "Couldn't read that file: ${e.message}"
+            }
+            runOnUiThread {
+                show()
+                say(message)
+            }
         }
     }
 
@@ -183,5 +235,7 @@ class LauncherActivity : Activity() {
     companion object {
         private const val PICK = 1
         private const val SLOTS = 2
+        private const val EXPORT = 3
+        private const val IMPORT = 4
     }
 }
