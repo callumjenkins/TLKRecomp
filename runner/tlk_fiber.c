@@ -30,8 +30,8 @@
  * Linux/macOS, the Win32 fiber API on Windows (ucontext does not exist
  * there). Both give the game the same 64 MB stack. Android's libc has no
  * ucontext calls either, so it takes the Win32 path through snesrecomp's
- * fiber_compat, where each fiber is a parked thread (TLK_FIBER_COMPAT forces
- * that path elsewhere, to test it). */
+ * fiber_compat, where each fiber is a parked thread. TLK_FIBER_COMPAT takes
+ * the same path elsewhere, where fiber_compat switches with ucontext. */
 #ifdef __APPLE__
 /* macOS hides the (deprecated) ucontext calls without _XOPEN_SOURCE, and
  * _XOPEN_SOURCE alone would hide MAP_ANONYMOUS. */

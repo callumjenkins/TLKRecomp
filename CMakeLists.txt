@@ -65,8 +65,10 @@ option(TLK_BUILD_HOSTS "Build tlk_headless and tlk_sdl" ON)
 # video/audio/input backends are compiled in and dlopen their system libraries
 # at run time. Default OFF: dev builds keep using the system SDL3.
 option(TLK_STATIC_SDL "Build and statically link the pinned SDL3 release" OFF)
-# TLK_FIBER_COMPAT: run the fibers on snesrecomp's fiber_compat, the backend
-# Android has to use, so the Linux gates can check that path.
+# TLK_FIBER_COMPAT: run the fibers through snesrecomp's fiber_compat, as Android
+# does, so the gates can check tlk_fiber.c's fiber API path. Off Android,
+# fiber_compat switches with ucontext; tlk_fiber_test_android covers its
+# parked-thread backend.
 option(TLK_FIBER_COMPAT "Use fiber_compat for TLK's fibers (always on for Android)" OFF)
 if(TLK_STATIC_SDL)
     set(CMAKE_DISABLE_FIND_PACKAGE_SDL3 ON)
@@ -220,6 +222,26 @@ if(NOT ANDROID)
         target_link_libraries(tlk_touch_test PRIVATE m)
     endif()
     add_test(NAME tlk_touch COMMAND tlk_touch_test)
+
+    # The fiber switches on each backend: plain ucontext, fiber_compat on ucontext, and fiber_compat's
+    # parked threads, which only Android builds otherwise.
+    set(tlk_fiber_fc "${SNESRECOMP_ROOT}/runner/src/desktop")
+    foreach(v IN ITEMS ucontext compat android)
+        set(t tlk_fiber_test_${v})
+        add_executable(${t} tests/tlk_fiber_test.c runner/tlk_fiber.c)
+        target_include_directories(${t} PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+        if(NOT v STREQUAL ucontext)
+            target_sources(${t} PRIVATE ${tlk_fiber_fc}/fiber_compat.c)
+            target_include_directories(${t} PRIVATE ${tlk_fiber_fc})
+            target_compile_definitions(${t} PRIVATE TLK_FIBER_COMPAT=1)
+        endif()
+        if(v STREQUAL android)
+            target_compile_definitions(${t} PRIVATE __ANDROID__=1)
+            find_package(Threads REQUIRED)
+            target_link_libraries(${t} PRIVATE Threads::Threads)
+        endif()
+        add_test(NAME tlk_fiber_${v} COMMAND ${t})
+    endforeach()
 endif()
 
 # ── Install / packaging ───────────────────────────────────────────────────
