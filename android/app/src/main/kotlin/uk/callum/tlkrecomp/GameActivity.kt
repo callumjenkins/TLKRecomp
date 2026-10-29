@@ -3,6 +3,7 @@ package uk.callum.tlkrecomp
 import android.os.Bundle
 import android.os.Process
 import android.system.Os
+import android.view.InputDevice
 import android.view.KeyEvent
 import org.libsdl.app.SDLActivity
 import java.io.File
@@ -26,17 +27,22 @@ class GameActivity : SDLActivity() {
         return arrayOf("--fullscreen", "--config", File(filesDir, "tlk_sdl.ini").path, "--rom", File(filesDir, ROM).path) + extra
     }
 
-    // The phone's own Back opens the game's menu. A controller can send Back too, for a button or as
-    // it reconnects, so a Back from any real device is dropped; the gamepad's Back button opens the menu.
+    // The phone's own Back opens the game's menu. A controller's Back is its Select button, which SDL
+    // reads as the gamepad's Back; Back from any other real device is dropped.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode != KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
-        if (event.device?.isVirtual == false || event.action != KeyEvent.ACTION_UP) return true
+        val device = event.device
+        if (device != null && !device.isVirtual) {
+            val pad = device.sources and (InputDevice.SOURCE_GAMEPAD or InputDevice.SOURCE_JOYSTICK) != 0
+            return if (pad) super.dispatchKeyEvent(event) else true
+        }
+        if (event.action != KeyEvent.ACTION_UP) return true
         onNativeKeyDown(KeyEvent.KEYCODE_BACK)
         onNativeKeyUp(KeyEvent.KEYCODE_BACK)
         return true
     }
 
-    // SDL's would finish the activity mid-frame; the menu's Quit ends the game instead.
+    // SDLActivity's finishes the activity, which ends the game; the menu's Quit does that instead.
     @Deprecated("SDLActivity overrides it")
     override fun onBackPressed() {}
 
