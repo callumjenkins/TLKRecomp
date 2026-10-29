@@ -69,8 +69,7 @@ echo "native libraries in $libs"
 variant=$([ $release = 1 ] && echo Release || echo Debug)
 "$ROOT/android/gradlew" -p "$ROOT/android" --no-daemon "assemble$variant" \
     -Ptlk.native="$OUT/jniLibs" \
-    -Psdl.java="$sdl_src/android-project/app/src/main/java" \
-    -Ptlk.romIdentity="$ROOT/cmake/rom_identity.txt"
+    -Psdl.java="$sdl_src/android-project/app/src/main/java"
 apk=$(ls "$ROOT"/android/app/build/outputs/apk/"${variant,,}"/*.apk | head -n1)
 cp "$apk" "$OUT/TLKRecomp-android-$ABI.apk"
 echo "apk: $OUT/TLKRecomp-android-$ABI.apk"

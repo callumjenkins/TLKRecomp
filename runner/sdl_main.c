@@ -100,11 +100,10 @@
 #define SDL_MAIN_HANDLED 1
 #include <SDL3/SDL.h>
 
-/* snesrecomp's desktop OpenGL presenter (GLSL shader presets, aspect).
- * Android draws through SDL_Renderer on GLES instead. */
 #include "display_aspect.h"
 #include "util.h"
 #ifndef __ANDROID__
+/* snesrecomp's desktop OpenGL presenter (GLSL shader presets, aspect). Android draws through SDL_Renderer. */
 #include "opengl.h"
 #include "gl_core_3_1.h"
 void snesrecomp_opengl_set_overlay(void (*draw)(int, int));   /* cmake/runtime-patches/opengl.hunks */
@@ -311,7 +310,6 @@ static const char *const kWideIni[] = { "off", "16:9", "21:9", "adaptive" };
 static const char *const kWideHudChoices[] = { "in place", "at the edges" };
 static uint32_t s_wide_px[TLK_WIDE_MAX_WIDTH * TLK_WIDE_HEIGHT];
 static double s_wide_aspect;   /* aspect of the picture being shown, 0 when native */
-/* touch = auto (shown on a touchscreen while no gamepad is connected), on or off. */
 static const char *const kTouchChoices[] = { "auto", "on", "off" };
 static int s_touch_mode, s_touch_size = 100, s_touch_opacity = 40;
 static int s_practice;   /* speedrun = practice: level timer, lag, inputs, best times, restart */
@@ -1017,9 +1015,9 @@ static void ComposeWide(uint8_t *dst, int pitch, int w) {
     }
 }
 
-/* Shows s_pixels plus the overlay (menu when open, toast, turbo tag). */
 static void DrawTouchPad(int dw, int dh);
 
+/* Shows s_pixels plus the overlay (menu when open, toast, turbo tag) and the touch pad. */
 static void Present(void) {
     memcpy(s_screen, s_pixels, sizeof s_screen);
     if (s_practice && !s_menu_open) DrawPractice();
@@ -1195,8 +1193,6 @@ static int s_finger_n;
 static int s_touchscreen;     /* a touchscreen is there, or a finger has been seen */
 static SDL_AtomicInt s_background;   /* the app is off screen (Android); the loop takes no frames */
 
-/* Android stops SDL's event pump inside SDL_PollEvent while the app is in the background,
- * so the lifecycle events are read as they are sent. */
 static bool SDLCALL WatchLifecycle(void *ud, SDL_Event *ev) {
     (void)ud;
     if (ev->type == SDL_EVENT_DID_ENTER_BACKGROUND) SDL_SetAtomicInt(&s_background, 1);
@@ -1232,7 +1228,6 @@ static uint16_t TouchPadState(void) {
     return s_touch_held = tlk_touch_buttons(&l, f, s_finger_n);
 }
 
-/* What the game reads from the touch pad. */
 static uint16_t TouchGameState(void) {
     uint16_t w = TouchPadState();
     if (s_touch_hold) {
@@ -1449,7 +1444,7 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_VOLUME] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_VOLUME, "Audio", "Volume",
                           "Percent.", INT, 0, 100, 10, NULL, 0),
     [R_TOUCH] = MENU_ROW("tlk.touch", "Touch", "Touch pad",
-                         "Auto: shown on a touchscreen while no gamepad is connected. Needs OpenGL off.", CHOICE, 0, 2, 1, kTouchChoices, 3),
+                         "Auto: shown on a touchscreen while no gamepad is connected. Needs opengl = 0 in the ini.", CHOICE, 0, 2, 1, kTouchChoices, 3),
     [R_TOUCH_SIZE] = MENU_ROW("tlk.touch_size", "Touch", "Size",
                               "Percent.", INT, 50, 150, 10, NULL, 0),
     [R_TOUCH_OPACITY] = MENU_ROW("tlk.touch_opacity", "Touch", "Opacity",
@@ -1695,10 +1690,10 @@ static void MenuOpenSection(int section) {
 /* A section's place in the menu: the menu lists sections in the order their first row comes in s_rows. */
 static int SectionOf(int row) {
     int n = 0;
-    for (int i = 0; i < row; i++) {
+    for (int i = 0; strcmp(s_rows[i].section, s_rows[row].section); i++) {
         int first = 1;
         for (int j = 0; j < i && first; j++) first = strcmp(s_rows[j].section, s_rows[i].section) != 0;
-        if (first && strcmp(s_rows[i].section, s_rows[row].section)) n++;
+        n += first;
     }
     return n;
 }
@@ -2057,7 +2052,7 @@ static int RemapSelfTest(void) {
     StFinger(SDL_EVENT_FINGER_DOWN, 6, tb->x, tb->y);
     TouchReset();
     StCheck(s_finger_n == 0 && s_touch_held == 0 && TouchGameState() == 0,
-            "coming back from the background drops every finger and held button");
+            "TouchReset drops every finger and held button");
     s_touch_mode = 2;
     StFinger(SDL_EVENT_FINGER_DOWN, 7, tb->x, tb->y);
     StCheck(TouchGameState() == 0, "with touch off a finger presses nothing");
@@ -2299,7 +2294,8 @@ int main(int argc, char **argv) {
     const char *cfg_path = getenv("TLK_SDL_INI") ? getenv("TLK_SDL_INI") : "tlk_sdl.ini";
     const char *save_path = NULL, *load_path = NULL, *load_at_path = NULL;
 #ifdef __ANDROID__
-    /* The process is killed once main returns, before stdio would flush, so a proof run's hashes need each line written as it ends. */
+    /* GameActivity kills the process once main returns, so stdout never gets exit()'s flush.
+     * Line buffering keeps a proof run's hashes. */
     setvbuf(stdout, NULL, _IOLBF, 0);
 #endif
     long frames = 0, save_at = -1, load_at = -1, menu_at = -1;

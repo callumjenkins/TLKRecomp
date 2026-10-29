@@ -66,9 +66,7 @@ option(TLK_BUILD_HOSTS "Build tlk_headless and tlk_sdl" ON)
 # at run time. Default OFF: dev builds keep using the system SDL3.
 option(TLK_STATIC_SDL "Build and statically link the pinned SDL3 release" OFF)
 # TLK_FIBER_COMPAT: run the fibers through snesrecomp's fiber_compat, as Android
-# does, so the gates can check tlk_fiber.c's fiber API path. Off Android,
-# fiber_compat switches with ucontext; tlk_fiber_test_android covers its
-# parked-thread backend.
+# does, so the Linux gates can run tlk_fiber.c's fiber API path.
 option(TLK_FIBER_COMPAT "Use fiber_compat for TLK's fibers (always on for Android)" OFF)
 if(TLK_STATIC_SDL)
     set(CMAKE_DISABLE_FIND_PACKAGE_SDL3 ON)
@@ -158,7 +156,7 @@ if(TLK_BUILD_HOSTS)
         ${TLK_RUNNER_DIR}/headless_host.c
         ${TLK_RUNNER_DIR}/verified_rom.c)
     if(ANDROID)
-        # SDLActivity loads the game as libmain.so and calls its SDL_main.
+        # SDLActivity loads the game as libmain.so and calls its main.
         add_library(tlk_sdl SHARED ${TLK_SDL_SOURCES})
         set_target_properties(tlk_sdl PROPERTIES OUTPUT_NAME main)
         target_link_libraries(tlk_sdl PRIVATE android log)

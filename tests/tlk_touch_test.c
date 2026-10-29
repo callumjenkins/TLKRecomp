@@ -18,7 +18,7 @@ static int s_failed;
 /* The Fold 7's outer and inner screens in landscape, a small tablet, and a small old phone. */
 static const int kScreens[][2] = { { 2520, 1080 }, { 2184, 1968 }, { 1280, 800 }, { 800, 480 } };
 enum { kScreenCount = sizeof kScreens / sizeof kScreens[0] };
-/* The menu's touch_size choices, in percent. */
+/* touch_size at its minimum, default, and maximum, in percent. */
 static const int kSizes[] = { 50, 100, 150 };
 enum { kSizeCount = sizeof kSizes / sizeof kSizes[0] };
 
@@ -81,12 +81,12 @@ static void touch_dpad_and_menu_take_fingers_near_them(void) {
     CHECK(!tlk_touch_on_menu(&l, kScreens[0][0] / 2.0f, kScreens[0][1] / 2.0f), "the middle of the screen");
 }
 
-static void touch_button_edges_take_nearest_within_half_a_button(void) {
+static void touch_finger_near_a_button_takes_the_nearest(void) {
     TlkTouchLayout l = Layout(0);
     const TlkTouchButton *x = Find(&l, TLK_PAD_X), *a = Find(&l, TLK_PAD_A);
     float r = a->w;
-    CHECK(Held1(&l, a->x + 1.4f * r, a->y, 0) == TLK_PAD_A, "within half a button of A");
-    CHECK(Held1(&l, a->x + 1.6f * r, a->y, 0) == 0, "beyond half a button of A");
+    CHECK(Held1(&l, a->x + 1.4f * r, a->y, 0) == TLK_PAD_A, "just outside A, within its margin");
+    CHECK(Held1(&l, a->x + 1.6f * r, a->y, 0) == 0, "past A's margin");
     /* Between X and A, a little nearer A. */
     float px = x->x + 0.6f * (a->x - x->x), py = x->y + 0.6f * (a->y - x->y);
     CHECK(Held1(&l, px, py, 0) == TLK_PAD_A, "the nearer of two buttons");
@@ -121,7 +121,7 @@ static void EdgePoint(const TlkTouchButton *b, int k, int n, float *x, float *y)
     *y = b->y + k2 * s;
 }
 
-static void touch_layout_fits_outer_and_inner_fold_screens(void) {
+static void touch_layout_fits_every_screen_and_size_without_overlap(void) {
     for (int s = 0; s < kScreenCount; s++)
         for (int z = 0; z < kSizeCount; z++) {
             TlkTouchLayout l = LayoutAt(s, kSizes[z]);
@@ -159,10 +159,10 @@ int main(void) {
     touch_finger_on_each_button_gives_its_bit();
     touch_dpad_directions_and_dead_centre();
     touch_dpad_and_menu_take_fingers_near_them();
-    touch_button_edges_take_nearest_within_half_a_button();
+    touch_finger_near_a_button_takes_the_nearest();
     touch_two_face_buttons_at_once();
     touch_two_fingers_combine_and_lifting_one_clears_it();
-    touch_layout_fits_outer_and_inner_fold_screens();
+    touch_layout_fits_every_screen_and_size_without_overlap();
     touch_pad_too_big_for_the_screen_shrinks_to_fit();
     printf("%s (%d failed)\n", s_failed ? "FAIL" : "PASS", s_failed);
     return s_failed != 0;

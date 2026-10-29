@@ -13,7 +13,7 @@
         android:allowBackup="false"
         android:theme="@android:style/Theme.DeviceDefault"
         android:hardwareAccelerated="true">
-        <!-- A process of its own: SDL and the runtime keep their state in globals, so each play starts a new one.
+        <!-- A process of its own, which GameActivity ends on exit: SDL and the runtime keep their state in globals.
              GameActivity takes Back as a key event, which predictive back would replace. -->
         <activity
             android:name=".GameActivity"

@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-/* Bits of the runtime pad word, as sdl_main.c's bindings number them. */
+/* Bits of the pad word the runtime reads, in the SNES controller's order. */
 enum {
     TLK_PAD_B = 1u << 0, TLK_PAD_Y = 1u << 1, TLK_PAD_SELECT = 1u << 2, TLK_PAD_START = 1u << 3,
     TLK_PAD_UP = 1u << 4, TLK_PAD_DOWN = 1u << 5, TLK_PAD_LEFT = 1u << 6, TLK_PAD_RIGHT = 1u << 7,
@@ -46,6 +46,6 @@ int tlk_touch_on_dpad(const TlkTouchLayout *l, float x, float y);
 int tlk_touch_on_menu(const TlkTouchLayout *l, float x, float y);
 /* How far a point is outside the button, in pixels: 0 or less is on it. */
 float tlk_touch_distance(const TlkTouchButton *b, float x, float y);
-/* A finger on the d-pad holds the one or two directions it leans towards; any other presses the
- * nearest button within half a button's size of it. */
+/* A finger on the d-pad holds the one or two directions it leans towards. Any other presses the
+ * nearest button it is on or near: within half the radius of a round button, half the height of a pill. */
 uint16_t tlk_touch_buttons(const TlkTouchLayout *l, const TlkTouchFinger *fingers, int n);

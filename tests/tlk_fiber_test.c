@@ -1,6 +1,4 @@
-/* The game fiber's switches (tlk_fiber.c), with the bridge it drives replaced by a scripted run.
- * CTest builds it three times: on ucontext, through fiber_compat's ucontext backend, and through
- * fiber_compat's parked-thread backend, the one Android uses. */
+/* The game fiber's switches (tlk_fiber.c), with the bridge it drives replaced by a scripted run. */
 #include "cpu_state.h"
 
 #include <stdio.h>
