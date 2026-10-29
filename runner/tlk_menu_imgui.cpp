@@ -3,20 +3,22 @@
  * The menu itself (rows, navigation, status line, look) is recomp-ui's
  * runtime menu (recomp-ui/src/recomp_runtime_ui.h); sdl_main.c owns its rows
  * and callbacks. This file only gives it an ImGui frame to draw in: one
- * context on the OpenGL presenter's window, fed SDL events, rendered from the
- * presenter's overlay hook between the game picture and the swap. ImGui's own
- * keyboard/gamepad navigation stays off; sdl_main.c drives the menu. */
+ * context on the window, fed SDL events, drawn over the game picture just
+ * before it is shown, through the OpenGL presenter or an SDL_Renderer.
+ * ImGui's own keyboard/gamepad navigation stays off; sdl_main.c drives the menu. */
 #include "tlk_menu_imgui.h"
 
 #include "imgui.h"
 #include "launcher_theme.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl3.h"
+#include "imgui_impl_sdlrenderer3.h"
 
 #include <cstdio>
 
 static bool s_ready;
 static SDL_Window *s_win;
+static SDL_Renderer *s_ren;   /* NULL: the OpenGL presenter */
 
 /* recomp-ui's desktop layout needs about 768x672 (the window at scale 3);
  * smaller, its footer runs into the Resume button. A smaller window gets the
@@ -33,10 +35,10 @@ static void UpdateShrink(void) {
     s_shrink = k;
 }
 
-extern "C" int TlkMenuImguiInit(SDL_Window *win, const char *font_path, float font_px) {
+extern "C" int TlkMenuImguiInit(SDL_Window *win, SDL_Renderer *ren, const char *font_path, float font_px) {
     if (s_ready) return 1;
-    SDL_GLContext ctx = SDL_GL_GetCurrentContext();
-    if (!ctx) return 0;
+    SDL_GLContext ctx = ren ? nullptr : SDL_GL_GetCurrentContext();
+    if (!ren && !ctx) return 0;
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
@@ -44,27 +46,34 @@ extern "C" int TlkMenuImguiInit(SDL_Window *win, const char *font_path, float fo
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouse;   /* until the mouse moves (UseMouse) */
     /* Sizes stay in window units; on a HiDPI display the glyphs are
-     * rasterized at its pixel density so they are sharp, not magnified. */
+     * rasterized at its pixel density so they are sharp, not magnified.
+     * A phone has a pixel density of 1, and recomp-ui's touch layout draws the
+     * font 2 to 2.7 times larger there, so it is rasterized at the content scale (2.6). */
     ImFontConfig cfg;
-    float density = SDL_GetWindowPixelDensity(win);
-    cfg.RasterizerDensity = density > 0.0f ? density : 1.0f;
+    float density = SDL_GetWindowPixelDensity(win), content = SDL_GetDisplayContentScale(SDL_GetDisplayForWindow(win));
+    cfg.RasterizerDensity = SDL_max(density, content) > 0.0f ? SDL_max(density, content) : 1.0f;
     ImFont *font = nullptr;
-    if (font_path) {
-        if (FILE *f = std::fopen(font_path, "rb")) {
-            std::fclose(f);
-            font = io.Fonts->AddFontFromFileTTF(font_path, font_px, &cfg);
-        }
+    /* Through SDL, which on Android resolves a relative path where fopen does not. */
+    size_t size = 0;
+    if (void *data = font_path ? SDL_LoadFile(font_path, &size) : nullptr) {
+        void *copy = IM_ALLOC(size);   /* the atlas frees it */
+        SDL_memcpy(copy, data, size);
+        SDL_free(data);
+        font = io.Fonts->AddFontFromMemoryTTF(copy, (int)size, font_px, &cfg);
     }
     if (!font) {
         cfg.SizePixels = font_px;
         io.Fonts->AddFontDefault(&cfg);
         std::fprintf(stderr, "menu: font %s not found, using ImGui's own\n", font_path ? font_path : "(none)");
     }
-    if (!ImGui_ImplSDL3_InitForOpenGL(win, ctx) || !ImGui_ImplOpenGL3_Init("#version 330")) {
+    bool ok = ren ? ImGui_ImplSDL3_InitForSDLRenderer(win, ren) && ImGui_ImplSDLRenderer3_Init(ren)
+                  : ImGui_ImplSDL3_InitForOpenGL(win, ctx) && ImGui_ImplOpenGL3_Init("#version 330");
+    if (!ok) {
         ImGui::DestroyContext();
         return 0;
     }
     s_win = win;
+    s_ren = ren;
     s_ready = true;
     return 1;
 }
@@ -163,7 +172,8 @@ static void DrawAbout(int *about) {
 
 extern "C" void TlkMenuImguiDraw(RecompRuntimeUi *ui, int *about) {
     if (!s_ready) return;
-    ImGui_ImplOpenGL3_NewFrame();
+    if (s_ren) ImGui_ImplSDLRenderer3_NewFrame();
+    else ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     UpdateShrink();
     if (s_shrink < 1.0f) {
@@ -177,12 +187,22 @@ extern "C" void TlkMenuImguiDraw(RecompRuntimeUi *ui, int *about) {
     recomp_runtime_ui_render_imgui(ui);
     if (*about) DrawAbout(about);
     ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    ImDrawData *d = ImGui::GetDrawData();
+    if (s_ren) {
+        /* The backend passes vertices in display units, so SDL's render scale applies
+         * FramebufferScale (the shrink and the pixel density) to them and to the clip rects. */
+        SDL_SetRenderScale(s_ren, d->FramebufferScale.x, d->FramebufferScale.y);
+        ImGui_ImplSDLRenderer3_RenderDrawData(d, s_ren);
+        SDL_SetRenderScale(s_ren, 1.0f, 1.0f);
+    } else {
+        ImGui_ImplOpenGL3_RenderDrawData(d);
+    }
 }
 
 extern "C" void TlkMenuImguiShutdown(void) {
     if (!s_ready) return;
-    ImGui_ImplOpenGL3_Shutdown();
+    if (s_ren) ImGui_ImplSDLRenderer3_Shutdown();
+    else ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
     s_ready = false;

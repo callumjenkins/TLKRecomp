@@ -534,10 +534,10 @@ static const char *const kSelectNames[14] = {
 static const char *const kInvulNames[3] = { "Off", "Infinite health", "Infinite lives" };
 static int s_sel_level, s_sel_invul;
 /* Menu state the rest of the host reads. The menu itself (rows, cursor,
- * drawing) is recomp-ui's runtime menu, built by MenuCreate. s_menu_gl: it
- * is drawn with Dear ImGui over the OpenGL presenter, else into s_screen. */
+ * drawing) is recomp-ui's runtime menu, built by MenuCreate. s_menu_imgui: it
+ * is drawn with Dear ImGui over the whole window, else into s_screen. */
 static RecompRuntimeUi *s_ui;
-static int s_menu_open, s_menu_gl, s_key_sel, s_key_wait;
+static int s_menu_open, s_menu_imgui, s_key_sel, s_key_wait;
 static int s_about;   /* the About window is over the menu; any back/accept closes it */
 
 /* Short on-screen names by position; the ini keeps SDL's names. */
@@ -998,7 +998,7 @@ static void ReadBackWindow(int w, int h) {
 /* The presenter's overlay hook: the menu, drawn after the game picture (and
  * its shader) over the whole window, just before the swap. */
 static void DrawOverlay(int w, int h) {
-    if (s_menu_open && s_menu_gl) TlkMenuImguiDraw(s_ui, &s_about);
+    if (s_menu_open && s_menu_imgui) TlkMenuImguiDraw(s_ui, &s_about);
     if (s_dump_req) ReadBackWindow(w, h);
 }
 #endif
@@ -1093,7 +1093,7 @@ static void Present(void) {
         DrawText(kWidth - 44, 8, t);
     }
     /* Without ImGui the same menu is drawn into the 256x224 picture. */
-    if (s_menu_open && !s_menu_gl) recomp_runtime_ui_render_argb8888(s_ui, s_screen, kWidth, kHeight, kWidth * 4);
+    if (s_menu_open && !s_menu_imgui) recomp_runtime_ui_render_argb8888(s_ui, s_screen, kWidth, kHeight, kWidth * 4);
     const int sc = s_hd ? s_hd_mode7 : 1, ww = WideWidth();
     const int tw = ww ? ww : kWidth * sc, th = ww ? kHeight : kHeight * sc;
 #ifndef __ANDROID__
@@ -1135,6 +1135,7 @@ static void Present(void) {
     SDL_RenderClear(ren);
     SDL_RenderTexture(ren, tex, NULL, &dst);
     DrawTouchPad(dw, dh);
+    if (s_menu_open && s_menu_imgui) TlkMenuImguiDraw(s_ui, &s_about);
     if (s_dump_req) {   /* --dump-window: the rendered window, as with OpenGL */
         SDL_Surface *shot = SDL_RenderReadPixels(ren, NULL), *xrgb = NULL;
         if (shot) xrgb = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_XRGB8888);
@@ -1178,8 +1179,8 @@ static int OpenVideo(void) {
         if (s_gl_on) {   /* the presenter's context is current here */
             char font[1200];
             TlkAssetPath("assets/fonts/LatoLatin-Regular.ttf", font, sizeof font);
-            s_menu_gl = TlkMenuImguiInit(win, font, 18.0f);   /* recomp-ui's theme size */
-            if (!s_menu_gl) fprintf(stderr, "menu: Dear ImGui did not start; drawing it in the game picture\n");
+            s_menu_imgui = TlkMenuImguiInit(win, NULL, font, 18.0f);   /* recomp-ui's theme size */
+            if (!s_menu_imgui) fprintf(stderr, "menu: Dear ImGui did not start; drawing it in the game picture\n");
             snesrecomp_opengl_set_overlay(DrawOverlay);
         }
         if (!s_gl_on) {
@@ -1198,6 +1199,10 @@ static int OpenVideo(void) {
         /* The PPU leaves the top byte 0: an alpha format would draw every pixel transparent. */
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth, kHeight);
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+        char font[1200];
+        TlkAssetPath("assets/fonts/LatoLatin-Regular.ttf", font, sizeof font);
+        s_menu_imgui = TlkMenuImguiInit(win, ren, font, 18.0f);
+        if (!s_menu_imgui) fprintf(stderr, "menu: Dear ImGui did not start; drawing it in the game picture\n");
     }
     return 1;
 }
@@ -1267,6 +1272,7 @@ static int s_touch_hold;   /* the menu closed under a finger: send the game no t
 
 static int TouchShown(void) {
     if (s_gl_on) return 0;   /* the OpenGL presenter has no pass for it */
+    if (s_menu_open && s_menu_imgui) return 0;   /* the menu takes taps */
     return s_touch_mode == 1 || (s_touch_mode == 0 && s_touchscreen && !s_pad);
 }
 
@@ -1499,7 +1505,7 @@ static char s_slot_label[2 * kSlots][64];
 static int s_slot_loadable[kSlots];
 /* The level select's action row names the level it goes to. */
 static char s_start_label[48];
-/* About: the first row opens tlk_menu_imgui.cpp's About window (OpenGL menu
+/* About: the first row opens tlk_menu_imgui.cpp's About window (ImGui menu
  * only); the author and source rows open their page in the browser. */
 #define AUTHOR_URL "https://kinduff.com"
 #define SOURCE_URL "https://github.com/kinduff/TLKRecomp"
@@ -1508,10 +1514,20 @@ static char s_start_label[48];
     { key, sec, label, desc, RECOMP_RUNTIME_UI_##type, lo, hi, step, ch, n, NULL }
 #define BIND_ROW(i) MENU_ROW("tlk.bind", "Controls", s_bind_label[i], \
     "Enter, then the new key or button.", ACTION, 0, 0, 0, NULL, 0)
+/* A phone has no F keys, and draws without OpenGL. */
+#ifdef __ANDROID__
+#define SAVE_KEYS NULL
+#define LOAD_KEYS NULL
+#define TOUCH_AUTO "Auto: shown while no gamepad is connected."
+#else
+#define SAVE_KEYS "Also F1-F4."
+#define LOAD_KEYS "Also F5-F8."
+#define TOUCH_AUTO "Auto: shown on a touchscreen while no gamepad is connected. Needs opengl = 0 in the ini."
+#endif
 #define SAVE_ROW(i) MENU_ROW("tlk.save_slot", "Save states", s_slot_label[i], \
-    "Also F1-F4.", ACTION, 0, 0, 0, NULL, 0)
+    SAVE_KEYS, ACTION, 0, 0, 0, NULL, 0)
 #define LOAD_ROW(i) MENU_ROW("tlk.load_slot", "Save states", s_slot_label[kSlots + i], \
-    "Also F5-F8.", ACTION, 0, 0, 0, NULL, 0)
+    LOAD_KEYS, ACTION, 0, 0, 0, NULL, 0)
 static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_SAVE0 + 0] = SAVE_ROW(0), [R_SAVE0 + 1] = SAVE_ROW(1), [R_SAVE0 + 2] = SAVE_ROW(2), [R_SAVE0 + 3] = SAVE_ROW(3),
     [R_LOAD0 + 0] = LOAD_ROW(0), [R_LOAD0 + 1] = LOAD_ROW(1), [R_LOAD0 + 2] = LOAD_ROW(2), [R_LOAD0 + 3] = LOAD_ROW(3),
@@ -1549,7 +1565,7 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_VOLUME] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_VOLUME, "Audio", "Volume",
                           "Percent.", INT, 0, 100, 10, NULL, 0),
     [R_TOUCH] = MENU_ROW("tlk.touch", "Touch", "Touch pad",
-                         "Auto: shown on a touchscreen while no gamepad is connected. Needs opengl = 0 in the ini.", CHOICE, 0, 2, 1, kTouchChoices, 3),
+                         TOUCH_AUTO, CHOICE, 0, 2, 1, kTouchChoices, 3),
     [R_TOUCH_SIZE] = MENU_ROW("tlk.touch_size", "Touch", "Size",
                               "Percent.", INT, 50, 150, 10, NULL, 0),
     [R_TOUCH_OPACITY] = MENU_ROW("tlk.touch_opacity", "Touch", "Opacity",
@@ -1692,7 +1708,7 @@ static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
     (void)ctx;
     switch ((int)(item - s_rows)) {
     case R_SHADER: return s_gl_on;
-    case R_ABOUT: return s_menu_gl;
+    case R_ABOUT: return s_menu_imgui;
     case R_LOAD0: case R_LOAD0 + 1: case R_LOAD0 + 2: case R_LOAD0 + 3: return s_slot_loadable[item - s_rows - R_LOAD0];
     default: return 1;
     }
@@ -1804,6 +1820,9 @@ static void MenuCreate(void) {
     c.theme = "snes";
     c.accept_label = "Enter/A";
     c.back_label = "Esc/B";
+#ifdef __ANDROID__
+    c.presentation_flags = RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY;
+#endif
     s_ui = recomp_runtime_ui_create(&c);
     ApplyBackdrop();
 }
@@ -2253,6 +2272,8 @@ static int RemapSelfTest(void) {
     StCheck(TouchGameState() == TLK_PAD_RIGHT, "a finger that slides off the d-pad keeps pressing right");
     StFinger(SDL_EVENT_FINGER_CANCELED, 2, 0, 0);
     StCheck(TouchGameState() == 0, "a cancelled finger presses nothing");
+    int imgui = s_menu_imgui;
+    s_menu_imgui = 0;   /* the menu drawn in the picture, which the pad drives */
     StFinger(SDL_EVENT_FINGER_DOWN, 3, tl.menu_x, tl.menu_y);
     StFinger(SDL_EVENT_FINGER_UP, 3, tl.menu_x, tl.menu_y);
     StCheck(s_menu_open, "the touch menu button opens the menu");
@@ -2260,6 +2281,20 @@ static int RemapSelfTest(void) {
     StCheck(!s_menu_open, "touch Start closes it");
     StCheck(TouchGameState() == 0, "touch Start still held after closing is not sent to the game");
     StFinger(SDL_EVENT_FINGER_UP, 4, ts->x, ts->y);
+    TouchGameState();
+    StCheck(imgui, "the ImGui menu started on the SDL renderer");
+    s_menu_imgui = 1;   /* the ImGui menu, which takes taps */
+    OpenMenu();
+    StCheck(!TouchShown(), "the ImGui menu hides the touch pad");
+    StFinger(SDL_EVENT_FINGER_DOWN, 4, ts->x, ts->y);
+    StCheck(s_menu_open && TouchGameState() == 0, "a tap where Start was leaves the ImGui menu open");
+    CloseMenu();   /* as its Resume button does, under the finger */
+    StCheck(TouchGameState() == 0, "a finger that closed the ImGui menu is not sent to the game");
+    ticks = s_haptic_ticks;
+    StFinger(SDL_EVENT_FINGER_MOTION, 4, tb->x, tb->y);
+    StCheck(s_haptic_ticks == ticks, "nor does it tick, sliding onto another button");
+    StFinger(SDL_EVENT_FINGER_UP, 4, ts->x, ts->y);
+    s_menu_imgui = imgui;
     TouchGameState();
     StFinger(SDL_EVENT_FINGER_DOWN, 5, ts->x, ts->y);
     StCheck(TouchGameState() == TLK_PAD_START, "after release, touch Start reaches the game again");

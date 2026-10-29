@@ -187,14 +187,16 @@ if(TLK_BUILD_HOSTS)
         tlk_use_patched_target_sources(tlk_sdl)
     endif()
     # In-game settings menu: recomp-ui's runtime menu (MIT, submodule), drawn
-    # with Dear ImGui over the OpenGL presenter (runner/tlk_menu_imgui.cpp).
+    # with Dear ImGui over the OpenGL presenter or the SDL_Renderer (runner/tlk_menu_imgui.cpp).
     # Its fonts and images are staged to build/assets/fonts and assets/img.
     # FreeType/HarfBuzz would only colour netplay-chat emoji, and the release
     # binary must not need either installed: keep recomp-ui from finding them.
     set(CMAKE_DISABLE_FIND_PACKAGE_Freetype ON)
     set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH "" FORCE)
     include("${RECOMP_UI_ROOT}/recomp_ui.cmake")
-    target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_menu_imgui.cpp)
+    target_sources(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/tlk_menu_imgui.cpp
+        ${TLK_RUNNER_DIR}/third_party/imgui/imgui_impl_sdlrenderer3.cpp)
+    target_include_directories(tlk_sdl PRIVATE ${TLK_RUNNER_DIR}/third_party/imgui)
     recomp_target_launcher_ui(tlk_sdl CONSOLE snes)
     if(ANDROID)
         # recomp-ui's Android branch calls SDL_AndroidGetInternalStoragePath, SDL2's name for it.
