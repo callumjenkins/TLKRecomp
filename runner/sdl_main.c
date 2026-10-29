@@ -305,7 +305,11 @@ static const char *const kHdMode7Choices[] = { "off", "2x", "3x", "4x" };
  * are drawn wider by a host compositor; other screens stay 4:3 with black
  * sides. s_wide_hud puts the HUD at the picture's edges. Hashes and
  * --dump-png stay native. */
+#ifdef __ANDROID__
+static int s_wide = 3, s_wide_hud = 1;   /* widens only a screen wider than the picture */
+#else
 static int s_wide, s_wide_hud = 1;
+#endif
 /* Widescreen enemies: 1 widens the game's spawn window by the margin, so
  * enemies are created out of view (tlk_wide.c TlkWideSetSpawnLead). This
  * changes the game: recordings and tapes made without it do not replay. */

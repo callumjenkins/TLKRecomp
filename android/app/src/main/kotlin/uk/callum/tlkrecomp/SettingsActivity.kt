@@ -37,7 +37,7 @@ class SettingsActivity : Activity() {
         })
         choice("Picture shape", "aspect", listOf("4:3 TV" to "4:3", "8:7 pixels" to "8:7", "1:1" to "1:1"), "8:7")
         choice("Widescreen", "widescreen",
-            listOf("Off" to "off", "16:9" to "16:9", "21:9" to "21:9", "Fit the screen" to "adaptive"), "off")
+            listOf("Off" to "off", "16:9" to "16:9", "21:9" to "21:9", "Fit the screen" to "adaptive"), "adaptive")
         choice("Touch pad", "touch", listOf("Auto: hidden while a controller is connected" to "auto", "On" to "on", "Off" to "off"), "auto")
         number("Touch pad size", "touch_size", 50, 150, 100, "%")
         choice("Vibrate on touch", "touch_haptics", listOf("On" to "1", "Off" to "0"), "1")
