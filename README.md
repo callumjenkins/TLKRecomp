@@ -40,8 +40,8 @@ that measured it.
   speedruns and a 60,648-frame All Bugs run. Compiled and interpreted code give identical frames and RAM on 71
   hand-made input tapes.
 - **Settings menu in the game.** Tab or Esc opens it. Every change applies immediately and is saved.
-- **Shaders and scaling.** CRT, LCD grid, Sharpen and Composite presets; 8:7, 4:3 or 1:1 aspect; integer scaling;
-  fullscreen.
+- **Shaders and scaling.** CRT, LCD grid, Sharpen and Composite presets; scanlines on Android; 8:7, 4:3 or 1:1
+  aspect; integer scaling; fullscreen.
 - **Widescreen** for the levels (experimental): 16:9, 21:9 or the window's shape. Scenery, parallax and enemies
   continue past the original edges, drawn from the game's own level data, with the HUD at the picture's edges.
 - **Practice mode** for speedrunners: level timer, TAS target, splits, lag counter, input display, best times,
@@ -147,7 +147,7 @@ back.
 | Section | What's in it |
 |---|---|
 | Display | window scale, fullscreen, vsync, aspect, how much the menu dims the game |
-| Graphics | shader, HD Mode 7, widescreen, its HUD and enemies, smooth and integer scaling |
+| Graphics | shader, scanlines, HD Mode 7, widescreen, its HUD and enemies, smooth and integer scaling |
 | Audio | sound on/off, volume |
 | Level select | level, invulnerability, start |
 | Practice | practice mode on/off |
@@ -162,7 +162,9 @@ is drawn small inside the game picture.
 (CRT, LCD grid, Sharpen, Composite; CC0, from snesrecomp's `runner/assets/shaders`), which the build copies to
 `build/assets/shaders` and the release packages ship next to the binary. Aspect, Smooth and Integer scaling work
 with or without a shader. Without OpenGL 3.3 (or with `opengl = 0`) the game runs on the plain SDL renderer and the
-Shader row is greyed out. None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU
+Shader row is greyed out. The Scanlines row takes its place there: it darkens the bottom third of each of the game's
+224 lines on screen, by the percent it is set to, and draws nothing when the picture is under two screen pixels a line.
+None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU
 frame.
 
 **HD Mode 7** (off, 2x, 3x, 4x) is snesrecomp's opt-in renderer (`docs/HD_MODE7.md` in the submodule). It draws Mode
@@ -203,6 +205,7 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     smooth = 0         ; 1 = bilinear scaling (with no shader)
     integer_scale = 0  ; 1 = whole-number scaling only (black borders, even pixels)
     opengl = 1         ; 0 = plain SDL renderer, no shaders
+    scanlines = 0      ; with opengl = 0: how dark the gap between lines is, percent (0 = off)
     hd_mode7 = 0       ; 2, 3 or 4 = Mode 7 drawn at that multiple (0 = off)
     widescreen = off   ; 16:9, 21:9 or adaptive (the window's shape)
     widescreen_hud = edges   ; or "in place"
@@ -308,8 +311,8 @@ sees. It needs the Android SDK with the NDK the script names, and a JDK 17 or ne
 published: the APK is for your own phone. It has been played on a Galaxy Z Fold 7.
 
 The app opens on a launcher: choose the ROM once (it is checked against the USA dump), then Continue from the
-autosave, start a new game, or pick a save slot. Settings holds the picture, the touch pad, the volume, and the
-autosave interval. Settings also takes a save sync server (see Save sync). "Export saves" writes the states, their pictures, and the ini to one zip, and "Import saves" puts
+autosave, start a new game, or pick a save slot. Settings holds the picture (its shape, widescreen, and scanlines, the phone's stand-in
+for the shaders), the touch pad, the volume, and the autosave interval. Settings also takes a save sync server (see Save sync). "Export saves" writes the states, their pictures, and the ini to one zip, and "Import saves" puts
 them back. The zip is the only copy that survives an uninstall.
 
 In the game a touch pad is drawn while no controller is connected. Its buttons are sized by the screen's density,

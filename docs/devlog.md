@@ -2638,3 +2638,23 @@ The resumed run in the cross-device check has to differ from a fresh run, so a l
 phone, with a test server on the PC through `adb reverse`, the desktop's autosave showed on the launcher as
 "Hakuna, from cj-desk-pc, just now". After a few seconds of play and Home, the game pushed its own autosave, and
 `tlk-play` on the PC pulled it and loaded it at frame 4750.
+
+## Task SCAN: scanlines on the SDL renderer
+
+The owner asked for a scanline overlay on Android, where the picture goes through SDL_Renderer on GLES and
+snesrecomp's GLSL presets don't build. Graphics > Scanlines (0-100 in tens, `scanlines =` in the ini, and a row in the
+launcher's Settings) draws one column of black, alpha only, over the picture after the game texture. Each of the
+game's 224 lines gets the screen rows that nearest sampling gives it, starting at `ceil(i * h / 224 - 0.5)`, and the
+bottom third of them are dark. The first try darkened by a cosine of the position within a line instead. At 500 rows
+the darkest row of a gap ranged from 28 to 153 of alpha across lines, which shows as moiré. With whole rows per line
+every gap is the same, apart from one row more or less. Under two screen rows a line nothing is drawn. On the
+desktop the row is greyed out while the OpenGL presenter runs, where the CRT shader has its own scanlines.
+
+```
+tlk_sdl --config (opengl = 0, scale = 4, scanlines = 0 / 60) --frames 1500 --dump-window   frame_sha256 d55aba8a... both
+python check of the row rule at h = 448, 672, 896, 1000, 1001, 1812          every row maps to its own line (2-9 rows)
+scripts/compare_modes.sh 600 3000                                             MATCH (57ccb8d5, c897f389)
+ctest 8/8; remap self-test PASS; scripts/build_android.sh (Kotlin tests)      BUILD SUCCESSFUL, build ce87336647f1-lp64le
+```
+
+Not run on a phone: none was on adb when this landed.

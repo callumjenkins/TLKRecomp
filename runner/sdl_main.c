@@ -301,6 +301,9 @@ enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
  * changes: s_pixels, the hashes and --dump-png stay native. */
 static int s_hd_mode7;
 static uint32_t *s_hd;
+/* Scanlines over the SDL renderer's picture: how dark the gap between two of
+ * the game's lines is, in percent; 0 is off. */
+static int s_scanlines;
 static const char *const kHdMode7Choices[] = { "off", "2x", "3x", "4x" };
 /* Widescreen (tlk_wide.c): 0 off, 1 16:9, 2 21:9, 3 the window's shape. Levels
  * are drawn wider by a host compositor; other screens stay 4:3 with black
@@ -348,7 +351,7 @@ static char *Trim(char *s) {
  * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, hd_mode7 (0 or 2-4),
  * widescreen (off 16:9 21:9 adaptive), widescreen_hud (edges or in place),
  * widescreen_enemies (as the game or out of view), turbo_speed (2-16),
- * speedrun (off or practice), menu_dim and menu_opacity (0-100), autosave_seconds (0 off), and one per binding
+ * scanlines (0-100), speedrun (off or practice), menu_dim and menu_opacity (0-100), autosave_seconds (0 off), and one per binding
  * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
 static void LoadConfig(const char *path) {
@@ -379,6 +382,7 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "smooth")) s_smooth = atoi(v);
         else if (!strcmp(k, "integer_scale")) s_integer = atoi(v);
         else if (!strcmp(k, "opengl")) s_opengl = atoi(v);
+        else if (!strcmp(k, "scanlines")) s_scanlines = SDL_clamp(atoi(v), 0, 100);
         else if (!strcmp(k, "hd_mode7")) s_hd_mode7 = atoi(v) >= 2 ? SDL_min(atoi(v), 4) : 0;
         else if (!strcmp(k, "widescreen")) {
             s_wide = 0;
@@ -429,6 +433,8 @@ static int SaveConfig(void) {
     fprintf(f, "; shader: empty, a bundled assets/shaders/*.glslp or your own .glslp/.glsl path\n");
     fprintf(f, "shader = %s\naspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
             s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
+    fprintf(f, "; scanlines without OpenGL: how dark the gap between lines is, percent (0 = off)\nscanlines = %d\n",
+            s_scanlines);
     fprintf(f, "; Mode 7 drawn at 2-4x the native resolution (0 = off)\nhd_mode7 = %d\n", s_hd_mode7);
     fprintf(f, "; levels drawn wider: off, 16:9, 21:9 or adaptive (the window's shape)\nwidescreen = %s\n"
                "; HUD in widescreen: edges or in place\nwidescreen_hud = %s\n",
@@ -520,6 +526,8 @@ static void Panel(int x, int y, int w, int h) {
 static SDL_Window *win;
 static SDL_Renderer *ren;      /* plain SDL presenter, when OpenGL is off or unavailable */
 static SDL_Texture *tex;
+static SDL_Texture *s_scan_tex;   /* one column of scanlines, s_scan_h tall at s_scan_pct */
+static int s_scan_h, s_scan_pct;
 #ifndef __ANDROID__
 static struct RendererFuncs s_gl;
 #endif
@@ -1004,6 +1012,33 @@ static void SizeWindow(void) {
 
 static int TurboHeld(void);
 
+/* The column is the picture's height on screen. Each of the game's lines gets
+ * its own whole rows and darkens the bottom third of them, so every gap looks
+ * the same when that height is not a whole multiple of 224. */
+static void DrawScanlines(const SDL_FRect *dst) {
+    const int h = (int)dst->h;
+    if (!s_scanlines || h < 2 * kHeight) return;   /* under two pixels a line there is no gap to draw */
+    if (!s_scan_tex || s_scan_h != h || s_scan_pct != s_scanlines) {
+        uint32_t *col = (uint32_t *)malloc((size_t)h * 4);
+        if (s_scan_tex) SDL_DestroyTexture(s_scan_tex);
+        s_scan_tex = col ? SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, 1, h) : NULL;
+        if (!s_scan_tex) { free(col); return; }
+        const uint32_t gap = (uint32_t)(s_scanlines * 255 / 100) << 24;   /* black, alpha only */
+        for (int i = 0; i < kHeight; i++) {   /* the rows nearest sampling gives line i: from ceil(i * h / 224 - 0.5) */
+            int y0 = (2 * i * h + kHeight - 1) / (2 * kHeight), y1 = (2 * (i + 1) * h + kHeight - 1) / (2 * kHeight);
+            int dark = y1 - (y1 - y0 + 2) / 3;
+            for (int y = y0; y < y1; y++) col[y] = y < dark ? 0 : gap;
+        }
+        SDL_UpdateTexture(s_scan_tex, NULL, col, 4);
+        free(col);
+        SDL_SetTextureBlendMode(s_scan_tex, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(s_scan_tex, SDL_SCALEMODE_NEAREST);
+        s_scan_h = h;
+        s_scan_pct = s_scanlines;
+    }
+    SDL_RenderTexture(ren, s_scan_tex, NULL, dst);
+}
+
 /* --dump-window with the OpenGL presenter: read the next composited window
  * (shader and ImGui menu included) back before it is swapped. */
 static const char *s_dump_req;
@@ -1166,6 +1201,7 @@ static void Present(void) {
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
     SDL_RenderTexture(ren, tex, NULL, &dst);
+    DrawScanlines(&dst);
     DrawTouchPad(dw, dh);
     if (s_menu_open && s_menu_imgui) TlkMenuImguiDraw(s_ui, &s_about);
     if (s_dump_req) {   /* --dump-window: the rendered window, as with OpenGL */
@@ -1516,7 +1552,7 @@ enum { kSlots = 4 };
 enum {
     R_SAVE0, R_LOAD0 = R_SAVE0 + kSlots,
     R_SCALE = R_LOAD0 + kSlots, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
-    R_SHADER, R_HD_MODE7, R_WIDE, R_WIDE_HUD, R_WIDE_SPAWN, R_SMOOTH, R_INTEGER,
+    R_SHADER, R_SCANLINES, R_HD_MODE7, R_WIDE, R_WIDE_HUD, R_WIDE_SPAWN, R_SMOOTH, R_INTEGER,
     R_AUDIO, R_VOLUME,
     R_TOUCH, R_TOUCH_SIZE, R_TOUCH_OPACITY, R_TOUCH_HAPTICS,
     R_LEVEL, R_INVUL, R_START, R_PRACTICE,
@@ -1551,10 +1587,12 @@ static char s_start_label[48];
 #define SAVE_KEYS NULL
 #define LOAD_KEYS NULL
 #define TOUCH_AUTO "Auto: shown while no gamepad is connected."
+#define SCANLINES_DESC "Dark gaps between the game's lines, percent. 0 is off."
 #else
 #define SAVE_KEYS "Also F1-F4."
 #define LOAD_KEYS "Also F5-F8."
 #define TOUCH_AUTO "Auto: shown on a touchscreen while no gamepad is connected. Needs opengl = 0 in the ini."
+#define SCANLINES_DESC "Percent; 0 is off. Needs opengl = 0 in the ini; with OpenGL, the CRT shader has them."
 #endif
 #define SAVE_ROW(i) MENU_ROW("tlk.save_slot", "Save states", s_slot_label[i], \
     SAVE_KEYS, ACTION, 0, 0, 0, NULL, 0)
@@ -1578,6 +1616,8 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_SHADER] = MENU_ROW("tlk.shader", "Graphics", "Shader",
                           "Presets in assets/shaders.", CHOICE, 0, kShaderCount - 1, 1,
                           s_shader_names, kShaderCount),
+    [R_SCANLINES] = MENU_ROW("tlk.scanlines", "Graphics", "Scanlines",
+                             SCANLINES_DESC, INT, 0, 100, 10, NULL, 0),
     [R_HD_MODE7] = MENU_ROW("tlk.hd_mode7", "Graphics", "HD Mode 7",
                             "Mode 7 scenes drawn at a finer resolution.", CHOICE, 0, 3, 1,
                             kHdMode7Choices, 4),
@@ -1672,6 +1712,7 @@ static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
     case R_DIM: *v = s_menu_dim; break;
     case R_OPACITY: *v = s_menu_opacity; break;
     case R_SHADER: { int sh = ShaderIndex(); *v = sh >= 0 ? sh : kShaderCount; break; }
+    case R_SCANLINES: *v = s_scanlines; break;
     case R_HD_MODE7: *v = s_hd_mode7 ? s_hd_mode7 - 1 : 0; break;
     case R_WIDE: *v = s_wide; break;
     case R_WIDE_HUD: *v = s_wide_hud; break;
@@ -1709,6 +1750,7 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
         if (s_gl.Reconfigure) s_gl.Reconfigure();
 #endif
         break;
+    case R_SCANLINES: s_scanlines = v; break;
     case R_HD_MODE7: s_hd_mode7 = v ? v + 1 : 0; ApplyHdMode7(); break;
     case R_WIDE: s_wide = v; TlkWideEnable(s_wide != 0); SizeWindow(); break;
     case R_WIDE_HUD: s_wide_hud = v; break;
@@ -1740,6 +1782,7 @@ static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
     (void)ctx;
     switch ((int)(item - s_rows)) {
     case R_SHADER: return s_gl_on;
+    case R_SCANLINES: return !s_gl_on;
     case R_ABOUT: return s_menu_imgui;
     case R_LOAD0: case R_LOAD0 + 1: case R_LOAD0 + 2: case R_LOAD0 + 3: return s_slot_loadable[item - s_rows - R_LOAD0];
     default: return 1;
@@ -3004,6 +3047,7 @@ int main(int argc, char **argv) {
     TlkMenuImguiShutdown();
     recomp_runtime_ui_destroy(s_ui);
     if (tex) SDL_DestroyTexture(tex);
+    if (s_scan_tex) SDL_DestroyTexture(s_scan_tex);
     if (ren) SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
