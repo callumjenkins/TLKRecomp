@@ -38,6 +38,7 @@
  *   --load-at N state     load a savestate after frame N, in process (proof runs)
  *   --autosave state      autosave to state (scripted runs too; see autosave_seconds in the ini)
  *   --build-id            print the build id that savestate sidecars name, then the git version, exit
+ *   --device NAME         the machine name savestate sidecars record, which save sync shows beside a save
  *   --menu-at N           open the settings menu after frame N (screenshots)
  *   --menu-page saves|controls|level|about  with --menu-at: open the Save states, Controls (remap) or Level select
  *                         section, or the About window
@@ -629,6 +630,32 @@ static const char *LevelName(int lvl) {
 }
 
 _Static_assert(sizeof TLK_BUILD_ID <= sizeof ((TlkSaveInfo *)0)->build, "the build id must fit the sidecar's field");
+static char s_device[64];   /* --device */
+
+/* The file's SHA-256 as hex into out[65]. Returns 0 when it can't be read. */
+static int FileSha256(const char *path, char out[65]) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    uint8_t *buf = NULL;
+    size_t n = 0, cap = 0;
+    for (;;) {
+        if (n == cap) {
+            uint8_t *grown = realloc(buf, cap = cap ? cap * 2 : 1 << 19);
+            if (!grown) { free(buf); fclose(f); return 0; }
+            buf = grown;
+        }
+        size_t got = fread(buf + n, 1, cap - n, f);
+        n += got;
+        if (got == 0) break;
+    }
+    int ok = !ferror(f);
+    fclose(f);
+    uint8_t h[32];
+    if (ok) sha256_compute(buf, n, h);
+    free(buf);
+    for (int i = 0; ok && i < 32; i++) snprintf(out + 2 * i, 3, "%02x", h[i]);
+    return ok;
+}
 
 /* Removes the json, writes the state and its picture, then the json again, so a json means the other two are whole.
  * A save that fails part way leaves no state, since a state with no json loads as an earlier build's. */
@@ -649,7 +676,8 @@ static int SaveStateFiles(const char *path) {
     info.level = Wram16(0x1FF9E);
     snprintf(info.level_name, sizeof info.level_name, "%s", LevelName(info.level));
     info.lives = Wram16(0x1FFAA);
-    if (tlk_saveinfo_write(path, &info)) return 1;
+    snprintf(info.device, sizeof info.device, "%s", s_device);
+    if (FileSha256(path, info.state_sha256) && tlk_saveinfo_write(path, &info)) return 1;
     fprintf(stderr, "cannot write the sidecar of %s\n", path);
     remove(path);
     return 0;
@@ -2450,7 +2478,7 @@ static void Usage(void) {
         "               [--input tape | --input-polled tape | --input-raw rec] [--no-record] [--lle] [--interp-targets f]\n"
         "               [--frames N] [--hash-at a,b,..] [--dump-png path] [--no-pace]\n"
         "               [--no-audio] [--wav path [--wav-seconds S]]\n"
-        "               [--save-at N state] [--load state] [--load-at N state] [--autosave state] [--build-id]\n"
+        "               [--save-at N state] [--load state] [--load-at N state] [--autosave state] [--device name] [--build-id]\n"
         "               [--menu-at N [--menu-page saves|controls|level|about]] [--selftest-remap]\n"
         "               [--speedrun off|practice] [--practice-level N [--invul N]] [--dump-window path]\n"
         "               [--list-drivers]\n"
@@ -2666,6 +2694,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--save-at") && v && i + 2 < argc) { save_at = atol(v); save_path = argv[i + 2]; i += 2; }
         else if (!strcmp(a, "--load-at") && v && i + 2 < argc) { load_at = atol(v); load_at_path = argv[i + 2]; i += 2; }
         else if (!strcmp(a, "--load") && v) { load_path = v; i++; }
+        else if (!strcmp(a, "--device") && v) { snprintf(s_device, sizeof s_device, "%s", v); i++; }
         else if (!strcmp(a, "--autosave") && v) { snprintf(s_autosave_path, sizeof s_autosave_path, "%s", v); i++; }
         else if (!strcmp(a, "--menu-at") && v) { menu_at = atol(v); i++; }
         else if (!strcmp(a, "--menu-page") && v) {

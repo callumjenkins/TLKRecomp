@@ -36,11 +36,14 @@ check() {   # label, state
 first=${1%%=*}
 for arg in "$@"; do
     f=${arg%%=*}
-    run --frames "$f" --save-at "$f" "$work/s$f.state" >/dev/null
+    run --frames "$f" --save-at "$f" "$work/s$f.state" --device gate-host >/dev/null
     # The json is written last, so it can vouch for the other two.
     order=$(stat -c '%.9Y %n' "$work/s$f".{state,png,json} | sort -s -n | sed 's/.*\.//' | tr '\n' ' ')
     [ "$order" = "state png json " ] || { echo "MISMATCH sidecar order at $f: $order"; fail=1; }
     said="$(sed -n 's/.*"level_name": "\([^"]*\)".*/\1/p' "$work/s$f.json"),$(sed -n 's/.*"lives": \([0-9]*\).*/\1/p' "$work/s$f.json")"
+    sha=$(sed -n 's/.*"state_sha256": "\([0-9a-f]*\)".*/\1/p' "$work/s$f.json")
+    [ "$sha" = "$(sha256sum < "$work/s$f.state" | cut -d' ' -f1)" ] || { echo "MISMATCH sidecar sha at $f: '$sha'"; fail=1; }
+    grep -q '"device": "gate-host"' "$work/s$f.json" || { echo "MISMATCH sidecar at $f has no device"; fail=1; }
     [ "$arg" = "$f" ] || [ "${arg#*=}" = "$said" ] || { echo "MISMATCH sidecar at $f says $said, want ${arg#*=}"; fail=1; }
     check "saved at $f ($said)" "$work/s$f.state"
 done

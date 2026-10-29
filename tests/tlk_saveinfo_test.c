@@ -38,6 +38,9 @@ static TlkSaveInfo Sample(void) {
     s.level = 9;
     snprintf(s.level_name, sizeof s.level_name, "Pride Rock");
     s.lives = 3;
+    snprintf(s.device, sizeof s.device, "cj-cos-laptop");
+    snprintf(s.state_sha256, sizeof s.state_sha256, "%s",
+             "d4d83ed69ced64608d6a6e3018c9e189d179160b23cb01a4d86a90533d3b8d7f");
     return s;
 }
 
@@ -62,6 +65,8 @@ static void saveinfo_write_then_read_round_trips_every_field(void) {
     CHECK(!strcmp(r.version, w.version), r.version);
     CHECK(r.frame == 6000 && r.saved_unix == 1792800000LL && r.level == 9 && r.lives == 3, "numbers");
     CHECK(!strcmp(r.level_name, "Pride Rock"), r.level_name);
+    CHECK(!strcmp(r.device, "cj-cos-laptop"), r.device);
+    CHECK(!strcmp(r.state_sha256, w.state_sha256), r.state_sha256);
     char tmp[1100];
     tlk_saveinfo_path(state, ".json.tmp", tmp, sizeof tmp);
     CHECK(!Exists(tmp), "no .tmp left behind");
@@ -74,6 +79,21 @@ static void saveinfo_quotes_in_names_survive(void) {
     snprintf(w.level_name, sizeof w.level_name, "a \"b\" \\c");
     CHECK(tlk_saveinfo_write(state, &w), "written");
     CHECK(tlk_saveinfo_read(state, &r) && !strcmp(r.level_name, w.level_name), r.level_name);
+}
+
+static void saveinfo_control_characters_are_escaped_and_read_back(void) {
+    char state[1100], json[1100], text[2048];
+    At("ctl.state", state, sizeof state);
+    TlkSaveInfo w = Sample(), r;
+    snprintf(w.device, sizeof w.device, "my\nlaptop\t\x01");
+    CHECK(tlk_saveinfo_write(state, &w), "written");
+    At("ctl.json", json, sizeof json);
+    FILE *f = fopen(json, "rb");
+    size_t n = f ? fread(text, 1, sizeof text - 1, f) : 0;
+    if (f) fclose(f);
+    text[n] = 0;
+    CHECK(strstr(text, "\"my\\nlaptop\\t\\u0001\"") != NULL, text);
+    CHECK(tlk_saveinfo_read(state, &r) && !strcmp(r.device, w.device), r.device);
 }
 
 static void saveinfo_missing_json_reads_as_none_and_a_cut_short_one_by_its_build(void) {
@@ -121,6 +141,7 @@ int main(int argc, char **argv) {
     saveinfo_path_replaces_state_extension_or_appends();
     saveinfo_write_then_read_round_trips_every_field();
     saveinfo_quotes_in_names_survive();
+    saveinfo_control_characters_are_escaped_and_read_back();
     saveinfo_missing_json_reads_as_none_and_a_cut_short_one_by_its_build();
     saveinfo_check_tells_this_build_other_build_and_none();
     saveinfo_reads_keys_in_any_order_with_spacing();

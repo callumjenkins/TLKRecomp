@@ -5,13 +5,15 @@
 #include <stddef.h>
 
 typedef struct {
-    char build[96];         /* what a load compares: the code hash and the platform */
+    char build[96];         /* what a load compares: the code hash and the data layout tag */
     char version[64];       /* git describe, a label only */
     long frame;
     long long saved_unix;   /* seconds since 1970, UTC */
     int level;              /* $7FFF9E */
     char level_name[32];
     int lives;              /* $7FFFAA */
+    char device[64];        /* the machine that wrote it; may be empty */
+    char state_sha256[65];  /* hex, of NAME.state as written */
 } TlkSaveInfo;
 
 /* NAME.ext for NAME.state; a path without ".state" gets ext appended. */

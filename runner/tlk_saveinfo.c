@@ -13,8 +13,12 @@ void tlk_saveinfo_path(const char *state_path, const char *ext, char *out, size_
 static void PutString(FILE *f, const char *s) {
     fputc('"', f);
     for (; *s; s++) {
-        if (*s == '"' || *s == '\\') fputc('\\', f);
-        fputc(*s, f);
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') fprintf(f, "\\%c", c);
+        else if (c == '\n') fputs("\\n", f);
+        else if (c == '\t') fputs("\\t", f);
+        else if (c < 0x20) fprintf(f, "\\u%04x", c);
+        else fputc(c, f);
     }
     fputc('"', f);
 }
@@ -32,7 +36,11 @@ int tlk_saveinfo_write(const char *state_path, const TlkSaveInfo *info) {
     fprintf(f, ", \"frame\": %ld, \"saved_unix\": %lld, \"level\": %d, \"level_name\": ", info->frame,
             info->saved_unix, info->level);
     PutString(f, info->level_name);
-    fprintf(f, ", \"lives\": %d}\n", info->lives);
+    fprintf(f, ", \"lives\": %d, \"device\": ", info->lives);
+    PutString(f, info->device);
+    fputs(", \"state_sha256\": ", f);
+    PutString(f, info->state_sha256);
+    fputs("}\n", f);
     int ok = !ferror(f);
     if (fclose(f) != 0) ok = 0;
     if (ok) {
@@ -61,8 +69,19 @@ static int GetString(const char *json, const char *key, char *out, size_t n) {
     if (!p || *p++ != '"' || !n) return 0;
     size_t i = 0;
     for (; *p && *p != '"'; p++) {
-        if (*p == '\\' && p[1]) p++;
-        if (i + 1 < n) out[i++] = *p;
+        char c = *p;
+        if (c == '\\' && p[1]) {
+            c = *++p;
+            if (c == 'n') c = '\n';
+            else if (c == 't') c = '\t';
+            else if (c == 'r') c = '\r';
+            else if (c == 'u' && p[1] && p[2] && p[3] && p[4]) {
+                char hex[5] = { p[1], p[2], p[3], p[4], 0 };
+                c = (char)strtol(hex, NULL, 16);   /* the writer escapes only control characters this way */
+                p += 4;
+            }
+        }
+        if (i + 1 < n) out[i++] = c;
     }
     out[i] = 0;
     return *p == '"';
@@ -85,6 +104,8 @@ int tlk_saveinfo_read(const char *state_path, TlkSaveInfo *info) {
     if (!GetString(json, "build", info->build, sizeof info->build)) return 0;
     GetString(json, "version", info->version, sizeof info->version);
     GetString(json, "level_name", info->level_name, sizeof info->level_name);
+    GetString(json, "device", info->device, sizeof info->device);
+    GetString(json, "state_sha256", info->state_sha256, sizeof info->state_sha256);
     info->frame = (long)GetNumber(json, "frame");
     info->saved_unix = GetNumber(json, "saved_unix");
     info->level = (int)GetNumber(json, "level");
