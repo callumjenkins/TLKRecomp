@@ -460,7 +460,7 @@ static int SaveConfig(void) {
             SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
     fprintf(f, "; scanlines without OpenGL: how dark the gap between lines is, percent (0 = off)\nscanlines = %d\n",
             s_scanlines);
-    fprintf(f, "; Mode 7 drawn at 2-4x the native resolution (0 = off)\nhd_mode7 = %d\n", s_hd_mode7);
+    fprintf(f, "; Mode 7 drawn at 2-4x the native resolution (0 = off), except under a shader\nhd_mode7 = %d\n", s_hd_mode7);
     fprintf(f, "; levels drawn wider: off, 16:9, 21:9 or adaptive (the window's shape)\nwidescreen = %s\n"
                "; HUD in widescreen: edges or in place\nwidescreen_hud = %s\n",
             kWideIni[s_wide], s_wide_hud ? "edges" : "in place");
@@ -1027,7 +1027,19 @@ static void ApplyShaderParams(void) {
 static void ApplyGpuShader(void) {
     if (!s_gpu_shaders) return;
     if (!TlkGpuShaderSelect(ren, s_shader)) fprintf(stderr, "shader: %s isn't one this build can run on the SDL renderer\n", s_shader);
+    else if (TlkGpuShaderActive() && ShaderIndex() < 0) {   /* the ini's own file, named like a bundled preset */
+        fprintf(stderr, "shader: %s runs the bundled preset of that name; the SDL renderer runs only those\n", s_shader);
+        Toast("Bundled shader runs, not yours");
+    }
     ApplyShaderParams();
+}
+
+/* Whether a preset draws the picture. It gets the native 224 lines and draws its own scanlines. */
+static int PresetOn(void) {
+#ifndef __ANDROID__
+    if (s_gl_on) return s_shader[0] != 0;
+#endif
+    return TlkGpuShaderActive();
 }
 
 /* sw x sh is the presented picture, native or HD; the maths runs on the
@@ -1200,7 +1212,7 @@ static void Present(void) {
     }
     /* Without ImGui the same menu is drawn into the 256x224 picture. */
     if (s_menu_open && !s_menu_imgui) recomp_runtime_ui_render_argb8888(s_ui, s_screen, kWidth, kHeight, kWidth * 4);
-    const int sc = s_hd ? s_hd_mode7 : 1, ww = WideWidth();
+    const int sc = s_hd && !PresetOn() ? s_hd_mode7 : 1, ww = WideWidth();
     const int tw = ww ? ww : kWidth * sc, th = ww ? kHeight : kHeight * sc;
 #ifndef __ANDROID__
     if (s_gl_on) {
@@ -1243,7 +1255,7 @@ static void Present(void) {
     if (shaded) TlkGpuShaderBegin(ren, tw, th, vp.width, vp.height);
     SDL_RenderTexture(ren, tex, NULL, &dst);
     if (shaded) SDL_SetGPURenderState(ren, NULL);
-    DrawScanlines(&dst);
+    else DrawScanlines(&dst);
     DrawTouchPad(dw, dh);
     if (s_menu_open && s_menu_imgui) TlkMenuImguiDraw(s_ui, &s_about);
     if (s_dump_req) {   /* --dump-window: the rendered window, as with OpenGL */
@@ -1638,13 +1650,13 @@ static char s_start_label[48];
 #define SAVE_KEYS NULL
 #define LOAD_KEYS NULL
 #define TOUCH_AUTO "Auto: shown while no gamepad is connected."
-#define SCANLINES_DESC "Dark gaps between the game's lines, percent. 0 is off."
+#define SCANLINES_DESC "Dark gaps between the game's lines, percent. 0 is off. Off while a shader is on."
 #define SHADER_DESC "Picture filters. PVM looks like a Sony Trinitron monitor."
 #else
 #define SAVE_KEYS "Also F1-F4."
 #define LOAD_KEYS "Also F5-F8."
 #define TOUCH_AUTO "Auto: shown on a touchscreen while no gamepad is connected. Needs opengl = 0 in the ini."
-#define SCANLINES_DESC "Dark gaps between lines, percent; 0 is off. Needs opengl = 0; with OpenGL, use a shader."
+#define SCANLINES_DESC "Dark gaps between lines, percent; 0 is off. Needs opengl = 0 and no shader."
 #define SHADER_DESC "Presets in assets/shaders; parameters are shader_param lines in the ini."
 #endif
 #define SAVE_ROW(i) MENU_ROW("tlk.save_slot", "Save states", s_slot_label[i], \
@@ -1672,7 +1684,7 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_SCANLINES] = MENU_ROW("tlk.scanlines", "Graphics", "Scanlines",
                              SCANLINES_DESC, INT, 0, 100, 10, NULL, 0),
     [R_HD_MODE7] = MENU_ROW("tlk.hd_mode7", "Graphics", "HD Mode 7",
-                            "Mode 7 scenes drawn at a finer resolution.", CHOICE, 0, 3, 1,
+                            "Mode 7 scenes drawn at a finer resolution. Off while a shader is on.", CHOICE, 0, 3, 1,
                             kHdMode7Choices, 4),
     [R_WIDE] = MENU_ROW("tlk.widescreen", "Graphics", "Widescreen",
                         "Experimental. Levels drawn wider; other screens stay 4:3.", CHOICE, 0, 3, 1, kWideChoices, 4),
@@ -1836,7 +1848,8 @@ static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
     (void)ctx;
     switch ((int)(item - s_rows)) {
     case R_SHADER: return s_gl_on || s_gpu_shaders;
-    case R_SCANLINES: return !s_gl_on;
+    case R_SCANLINES: return !s_gl_on && !PresetOn();
+    case R_HD_MODE7: return !PresetOn();
     case R_ABOUT: return s_menu_imgui;
     case R_LOAD0: case R_LOAD0 + 1: case R_LOAD0 + 2: case R_LOAD0 + 3: return s_slot_loadable[item - s_rows - R_LOAD0];
     default: return 1;
@@ -2477,6 +2490,23 @@ static int RemapSelfTest(void) {
         s_shader_param_count = param_count;
         SaveConfig();
     }
+
+#ifndef __ANDROID__
+    /* A preset on the OpenGL presenter turns the Scanlines and HD Mode 7 rows off. */
+    {
+        char shader[sizeof s_shader];
+        int gl_on = s_gl_on;
+        snprintf(shader, sizeof shader, "%s", s_shader);
+        s_gl_on = 1;
+        snprintf(s_shader, sizeof s_shader, "%s", kShaders[1][0]);
+        StCheck(!MenuEnabled(NULL, &s_rows[R_SCANLINES]) && !MenuEnabled(NULL, &s_rows[R_HD_MODE7]),
+                "a preset turns the Scanlines and HD Mode 7 rows off");
+        s_shader[0] = 0;
+        StCheck(MenuEnabled(NULL, &s_rows[R_HD_MODE7]), "without a preset the HD Mode 7 row is on");
+        s_gl_on = gl_on;
+        snprintf(s_shader, sizeof s_shader, "%s", shader);
+    }
+#endif
 
     /* Save states rows, from sidecars written here: the emulator is not running, so nothing loads. */
     {
