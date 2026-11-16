@@ -40,8 +40,8 @@ that measured it.
   speedruns and a 60,648-frame All Bugs run. Compiled and interpreted code give identical frames and RAM on 71
   hand-made input tapes.
 - **Settings menu in the game.** Tab or Esc opens it. Every change applies immediately and is saved.
-- **Shaders and scaling.** CRT, LCD grid, Sharpen and Composite presets; 8:7, 4:3 or 1:1 aspect; integer scaling;
-  fullscreen.
+- **Shaders and scaling.** PVM, CRT, LCD grid, Sharpen and Composite presets; scanlines; 8:7, 4:3 or 1:1 aspect;
+  integer scaling; fullscreen.
 - **Widescreen** for the levels (experimental): 16:9, 21:9 or the window's shape. Scenery, parallax and enemies
   continue past the original edges, drawn from the game's own level data, with the HUD at the picture's edges.
 - **Practice mode** for speedrunners: level timer, TAS target, splits, lag counter, input display, best times,
@@ -130,8 +130,13 @@ Everything else:
 triggers = L/R; left stick or d-pad moves. Guide, or Back+Start, opens the menu; in it the d-pad moves, A selects,
 B goes back, Start closes.
 
-Save states are `tlk_slot1.state` .. `tlk_slot4.state`, in the same folder as the ini. They only load in the build
-that wrote them.
+Save states are `tlk_slot1.state` .. `tlk_slot4.state`, in the same folder as the ini, and the menu's first section,
+Save states, saves and loads them too. Each has a `.png` of the screen and a `.json` naming the level, the time
+and the build that wrote it. A state only loads in a build of the same code and data layout (`tlk_sdl
+--build-id` prints the id, then the git version, which is only a label), so Linux, Android, and macOS on Apple
+Silicon share states and Windows keeps its own; one from another build is refused, and one with no `.json`, from an earlier build, loads as before. `autosave_seconds = N` in the ini
+also writes `tlk_autosave.state` every N seconds of play inside a level and on quitting; it is off by default on
+the desktop and every 60 seconds on Android.
 
 ## The settings menu
 
@@ -142,7 +147,7 @@ back.
 | Section | What's in it |
 |---|---|
 | Display | window scale, fullscreen, vsync, aspect, how much the menu dims the game |
-| Graphics | shader, HD Mode 7, widescreen, its HUD and enemies, smooth and integer scaling |
+| Graphics | shader, scanlines, HD Mode 7, widescreen, its HUD and enemies, smooth and integer scaling |
 | Audio | sound on/off, volume |
 | Level select | level, invulnerability, start |
 | Practice | practice mode on/off |
@@ -153,11 +158,28 @@ back.
 Every change is saved to `tlk_sdl.ini` (the file is rewritten, so comments are dropped). Without OpenGL 3.3 the menu
 is drawn small inside the game picture.
 
-**Video.** The picture goes through snesrecomp's OpenGL 3.3 presenter. The Shader row cycles the bundled presets
-(CRT, LCD grid, Sharpen, Composite; CC0, from snesrecomp's `runner/assets/shaders`), which the build copies to
-`build/assets/shaders` and the release packages ship next to the binary. Aspect, Smooth and Integer scaling work
-with or without a shader. Without OpenGL 3.3 (or with `opengl = 0`) the game runs on the plain SDL renderer and the
-Shader row is greyed out. None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU
+**Video.** The picture goes through snesrecomp's OpenGL 3.3 presenter. The Shader row cycles the bundled presets:
+CRT, LCD grid, Sharpen and Composite (CC0, from snesrecomp's `runner/assets/shaders`), and PVM (CC0, from this
+repository's `runner/assets/shaders`). The build copies them to `build/assets/shaders`, and the release packages ship
+them next to the binary. Aspect, Smooth and Integer scaling work with or without a shader. Without OpenGL 3.3 (or with
+`opengl = 0`) the game runs on the plain SDL renderer, where the Shader row is greyed out unless SDL's GPU renderer
+runs the presets (below). The Scanlines row works there, alone or over a preset. It darkens the bottom of each of the
+game's 224 lines on screen by the percent it is set to, and draws nothing when the picture is under two screen pixels
+a line.
+
+**PVM** is a Sony PVM's Trinitron picture: beams that grow with brightness, so dark lines leave black gaps and bright
+ones nearly close them, an aperture grille over the screen's own pixels, and a little glow. Its parameters, and any
+preset's, go in the ini as `shader_param = NAME VALUE` lines, up to 32, clamped to the preset's range: `BEAM_MIN` and
+`BEAM_MAX` (beam height for dark and bright, in lines), `MASK` (grille strength), `MASK_WIDTH` (screen pixels per RGB
+triad), `GLOW`, `SHARPNESS` (how hard the pixel edges are) and `BRIGHTNESS`.
+
+The Android build runs the same presets through SDL's GPU renderer (Vulkan), and so does Linux with `opengl = 0` and
+`SDL_RENDER_DRIVER=gpu`. On macOS that renderer is Metal, which takes no SPIR-V, so the row stays off. The build
+compiles the presets to SPIR-V with `glslc` (`tools/glslp_to_spirv.py`; the Android NDK ships it), and matches the
+ini's `shader =` path to one of them by file name. Your own `.glslp` path doesn't load on that renderer: put the preset
+in `runner/assets/shaders` and rebuild. Only single-pass presets that read nothing but the game texture can go there.
+
+None of this changes the emulated picture: hashes, `--dump-png` and the gates read the PPU
 frame.
 
 **HD Mode 7** (off, 2x, 3x, 4x) is snesrecomp's opt-in renderer (`docs/HD_MODE7.md` in the submodule). It draws Mode
@@ -193,11 +215,13 @@ Settings go in `tlk_sdl.ini` in the working directory (or the file in `$TLK_SDL_
     audio = 1
     audio_rate = 48000
     volume = 100       ; percent
-    shader =           ; empty, assets/shaders/crt-soft.glslp (or lcd-grid, sharp, warm-composite), or your own
+    shader =           ; empty, assets/shaders/pvm.glslp (or crt-soft, lcd-grid, sharp, warm-composite), or your own
+    shader_param = BEAM_MAX 0.9   ; one of the preset's parameters (up to 32 of these lines)
     aspect = 8:7       ; 8:7 square pixels, 4:3 as a TV showed it, 1:1
     smooth = 0         ; 1 = bilinear scaling (with no shader)
     integer_scale = 0  ; 1 = whole-number scaling only (black borders, even pixels)
     opengl = 1         ; 0 = plain SDL renderer, no shaders
+    scanlines = 0      ; with opengl = 0: how dark the gap between lines is, percent (0 = off)
     hd_mode7 = 0       ; 2, 3 or 4 = Mode 7 drawn at that multiple (0 = off)
     widescreen = off   ; 16:9, 21:9 or adaptive (the window's shape)
     widescreen_hud = edges   ; or "in place"
@@ -297,6 +321,35 @@ frame 6000 of the 6987M tape, and checks that Linux and Windows give the same ha
 the single .exe must show the same frame 600. Pushing a `v*` tag runs it in CI (`.gitea/workflows/release.yml`),
 builds the macOS packages on a Mac runner, and publishes everything as one release. These checks are a quick subset:
 run the full gates in `docs/VERIFYING.md` before tagging.
+
+## Android
+
+`scripts/build_android.sh -r ROM --install` builds an arm64 APK from your own ROM and installs it on the phone `adb`
+sees. It needs the Android SDK with the NDK the script names, and a JDK 17 or newer in `JAVA_HOME`. Nothing is
+published: the APK is for your own phone. It has been played on a Galaxy Z Fold 7.
+
+The app opens on a launcher: choose the ROM once (it is checked against the USA dump), then Continue from the
+autosave, start a new game, or pick a save slot. Settings holds the picture (its shape, widescreen, the shader, and
+scanlines), the touch pad, the volume, and the autosave interval. Settings also takes a save sync server (see Save sync). "Export saves" writes the states, their pictures, and the ini to one zip, and "Import saves" puts
+them back. The zip is the only copy that survives an uninstall.
+
+In the game a touch pad is drawn while no controller is connected. Its buttons are sized by the screen's density,
+so they are the same size on any screen with room for them. The pad stays clear of the system bars and the camera
+cutout, and each press gives a short vibration (`touch_haptics = 0` turns that off). The menu button at the top, or
+Back, opens the settings menu, and you tap its rows to pick them. Widescreen starts at "Fit the screen", which
+fills the outer screen in landscape and leaves the near-square inner one as it is.
+
+The script signs every build with the key named in `~/.local/share/tlk-recomp/release.properties` when that file
+exists (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`, with `storeFile` relative to the file). Android only
+installs a build over another signed with the same key, so keep that folder backed up: a new key means uninstalling,
+which deletes the saves.
+
+## Save sync
+
+Saves can follow you between a Linux PC, a laptop, and the phone. Each device's autosave and the four slots go to a
+store: a small server of your own on the tailnet, a synced folder, or a script around any cloud storage. The phone
+and `tlk-play` on Linux resume the newest autosave from whichever device saved last. `docs/SAVE_SYNC.md` has the
+setup and the protocol for writing another store.
 
 ## How it works
 

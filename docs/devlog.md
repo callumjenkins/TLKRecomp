@@ -2634,3 +2634,221 @@ catalog test.yml, private copy, this AppImage      green; no appdata or update-i
 Not tested: an update through AppImageUpdate (needs a release that carries the .zsync; check with
 `appimageupdatetool -j` on it once published). The .desktop id changed from `tlkrecomp` to
 `io.github.kinduff.TLKRecomp`: an AppImageLauncher-integrated older version keeps its own menu entry.
+
+## Task SAVE: save states with a build id, the Save states menu, and an autosave
+
+The fork's Android launcher needs to tell which states it can load and to resume a game Android ended in the
+background. Every state write (slots, practice restart, level-select power-on, `--save-at`, autosave) now goes
+through `SaveStateFiles`: the json beside it is deleted, then the state, a `.png` of the PPU frame, and last the
+json (`runner/tlk_saveinfo.c`, through `.tmp` and a rename). The json names `TLK_BUILD_ID`, which
+`cmake/TlkBuildId.cmake` computes on every build: 12 hex digits of a SHA-256 over `generated/`,
+snesrecomp's runtime sources (`snesrecomp/runner/src`, which defines the snapshot), `cmake/runtime-patches/` and
+`runner/`, then the platform. `git describe` goes in the json as `version`, a label, so a
+commit that changes no code keeps every save; `tlk_build_id` checks that with a commit to a scratch repository. `LoadStateLive`, `--load` and `--load-at`
+refuse a state whose json names another build; a state with no json loads as before. The `TLKSTAT1` format is
+unchanged.
+
+The menu's new first section has Save 1-4 and Load 1-4, each naming the level and time; a load row is greyed out
+when its slot is empty or from another build. The autosave goes to `tlk_autosave.state` (or `--autosave PATH`) on
+`SDL_EVENT_DID_ENTER_BACKGROUND`, on quitting, and every `autosave_seconds` of frames played, but only inside a
+level: from when `$0008` leaves 0 after a load until the next load, and never on the title or in the attract demo
+(`$1E03` bit 15). `$0008` is 6 for long stretches of play, so practice mode's "reaches 4" missed the start of a
+level where Simba stands still (gameover.tape: on at f2740, now f1427). `$7FFF9E` changes on the title before the
+level loads, so a save with no level on or loading is named "Title".
+
+Evidence (2026-10-29, branch `android-launcher`):
+
+```
+scripts/check_state_resume.sh gameover.tape 9000 (11 frames 600-8500) + autosave   RESUME MATCH
+scripts/check_state_resume.sh l05_random.tape 9000 (600, mid-load 1450, 1561,
+  2300, 3000, 4000, 5600, 6000, 6300, 8000) + autosave + guard + json order          RESUME MATCH
+autosave frames, autosave_seconds = 10: attract none; l05_random 2160 2881 3602 4202 ...; gameover 2026 2626 3226 ...
+sidecar at l05_random f4000: level 5 "Hakuna", lives 6 (the HUD shows 6); l09_right "Pride Rock"
+ctest: tlk_touch, tlk_saveinfo, tlk_build_id, tlk_fiber_{ucontext,compat,android}; remap self-test PASS
+```
+
+A test-gaps audit then ran mutants against these checks. `check_state_resume.sh` now also checks the sidecar's level
+and lives where a frame is given as `FRAME=LEVEL,LIVES`, the autosave on quitting, no autosave in 6000 frames with no
+input, and `--load-at` refusing another build. Each fails on its mutant: autosave anywhere (10 autosaves with no
+input), no autosave on quitting, no "Title" name (f600 said Pridelands), and an unguarded `--load-at`. A json cut
+short still names its build, so the game refuses it when the build is another's; the launcher read it as no sidecar
+and offered it, and now reads the build key the same way. A build id longer than the sidecar's 95 characters would
+refuse its own states, so the build fails on one (`_Static_assert`). The self-test drives the Save states rows
+(`SlotRow`), and `tlk_build_id` checks the id covers `runner/` and that an unchanged id leaves the header alone.
+
+```
+scripts/check_state_resume.sh l05_random.tape 9000 600=Title,2 1450=Hakuna,8 4000=Hakuna,6   RESUME MATCH
+scripts/check_state_resume.sh gameover.tape 9000 600 3000 6000                               RESUME MATCH
+ctest 6/6; remap self-test PASS (0 failed); Kotlin unit tests 12/12
+```
+
+The timer counts only frames inside a level. It had counted the title too, so the first autosave came on the frame a
+level began (l05_random f1561, gameover f1427) and now comes 600 level frames in, with each load's frames left out.
+A save whose picture or json can't be written removes its state and reports the failure. `TlkBuildId.cmake` fails
+when a directory it hashes is missing, since an empty path globs from `/`.
+
+On the Fold 7 (2026-10-29, build `...-7597e659b2e4-Android-aarch64`): l05_random.tape to Hakuna Matata, Home, then
+`am kill` left no `uk.callum.tlkrecomp` process; the background autosave was `at_frame=4951` (Hakuna, 6 lives). The
+launcher showed Continue as "Hakuna, just now" with that picture, and Continue opened on the same screen with the same
+lives and health bars. Save 2 in the in-game menu wrote `tlk_slot2.{state,png,json}`, relabelled both rows "Hakuna
+03:48", and the launcher's Save slots showed "Slot 2: Hakuna, just now, 6 lives".
+
+## Task FOLD: the menu on a phone, the touch pad's size, haptics, signing, and saves outside the app
+
+On Android the settings menu was recomp-ui's software menu drawn into the 256x224 picture: its footer was cut off
+at "ENT", taps on its rows did nothing, and the touch pad was drawn over it. `tlk_menu_imgui.cpp` now also draws
+through an `SDL_Renderer`, with Dear ImGui's `imgui_impl_sdlrenderer3` from v1.91.9b, the release recomp-ui vendors
+(`runner/third_party/imgui/`; recomp-ui has only the SDL2 one). Android asks for recomp-ui's touch-friendly layout,
+which sizes rows and text from the screen's short side. The touch pad hides while that menu is open, since the menu takes
+taps itself; with the software menu (ImGui failed to start) the pad still drives it. The desktop with `opengl = 0`
+gets the same ImGui menu.
+
+The touch pad was sized by the screen's short side, so on the Fold's inner screen in landscape (2184x1968) its unit
+was 1968 px.
+saturn-recomp and megadrive-recomp size theirs at 480 density-independent pixels; `tlk_touch_unit` does the same
+(`480 x SDL_GetWindowDisplayScale x touch_size%`, 1260 px on the Fold at 420 dpi), and the layout sits inside
+`SDL_GetWindowSafeArea`, clear of the system bars and the cutout. Each new touch button press plays a 10 ms rumble
+on the phone's vibrator, which SDL lists as the haptic device `VIBRATOR_SERVICE` (`touch_haptics`).
+
+`scripts/build_android.sh` signs both build types with the key named in
+`~/.local/share/tlk-recomp/release.properties` when it exists. That keystore is a copy of the debug key the phone's
+install was signed with, so the first build signed with it installed over the old one and kept the app's files.
+The launcher's "Export saves" writes the states, pictures, sidecars, and ini to a zip through the system's file
+picker, and "Import saves" restores them, json last per slot, taking only the names it knows. Widescreen defaults
+to "Fit the screen" on Android: on the inner screen, narrower than the picture, it widens nothing, and on a
+2520x1080 screen it fills the width.
+
+Evidence (2026-10-29, branch `android-fold`):
+
+```
+ctest 6/6 (tlk_touch: the 480 dp unit, the same pad size on both Fold screens, every control inside a safe area,
+  the safe area in pixels, every control shifted with the area's origin)
+remap self-test PASS (0 failed): ImGui starts on the SDL renderer and hides the pad; a finger that closed it is not
+  sent to the game and doesn't tick; a press ticks once, a slide onto another button ticks again, touch_haptics = 0
+  and the Vibrate row turn it off
+Kotlin unit tests 20/20 (SaveArchiveTest: every name byte for byte, only the archive's slots replaced, no old json
+  left beside a new state, ../ and unknown names skipped, an archive cut short changes nothing, an ini-only archive)
+mutants: the short-side unit, each axis of the safe area's offset, and four in SaveArchive (no json, old json kept,
+  .import files kept, no name filter) each fail a test
+scripts/check_state_resume.sh l05_random.tape 9000 600=Title,2 1450=Hakuna,8 4000=Hakuna,6   RESUME MATCH
+scripts/compare_modes.sh 600 3000; -p tapes/6987M.read.tape 1200 6000                        MATCH (57ccb8d5, c897f389, d8e93da4, a07184e1)
+scripts/check_all_tapes.sh -s                                                                 45 MATCH, 0 MISMATCH
+(this worktree has no build/tapes/, so 6987M ran from the committed polled tape, and the 45 are all its play tapes)
+```
+
+A test-gaps audit found the desktop's renderer menu drawn full size and cut off in a window smaller than 768x672:
+the vendored backend scales only clip rects by FramebufferScale, so `SDL_SetRenderScale` now applies it. On the
+phone the menu font fell back to ImGui's own after the first launch: `SDL_GetBasePath` is `./` there, and SDL
+resolves a relative path against internal storage where `fopen` does not, so the font now loads through
+`SDL_LoadFile`. The haptic tick uses only `VIBRATOR_SERVICE`, the one haptic SDL lists on Android, and export refuses
+while the game is running, as import does.
+
+On the Fold 7's inner screen: the pad's unit is 1260 px where it was 1968. The menu button opened the ImGui menu
+with no pad over it and no F-key hints. A tap on "Save 1" wrote `tlk_slot1.{state,png,json}`, and the status
+"Saved slot 1" showed in the footer. Resume closed it and the pad came back. A tap on B played a 10 ms effect at
+amplitude 0.5 from `uk.callum.tlkrecomp` (`dumpsys vibrator_manager`, usage TOUCH). Export saved `tlk-saves.zip`
+with three states and their files. After `tlk_slot2.*` was deleted, Import put all three back ("Imported 3 saves.").
+`wm size 1080x2520` while the game ran redrew it at the new size without a restart, with the pad under the picture,
+and `wm size 2520x1080` in the first level showed the level 21:9 wide with the HUD at its edges and the pad at the same
+1260 px unit. A real fold to the outer screen has not been tried.
+
+## Task SYNC: saves that move between the PC, the laptop, and the phone
+
+The build id named the platform (`Linux-x86_64`, `Android-aarch64`), on the reasoning that a snapshot of the runtime's
+memory has no promise of matching across architectures. The promise holds where it matters here. With the same code,
+a state saved at frame 3000 on the PC loads on the Fold 7 and plays on to the same frame and WRAM hashes as here, and
+the reverse. The two files differ in 5 bytes at offset 297480 of 316015. The rollback residue starts 18,568 bytes
+from the end, so those bytes are at offset 32 in it. That is `CpuState.ram`, the host's pointer to WRAM, which
+`rtl_rb_residue_apply` replaces with the live one on load. So the id now ends in a data layout tag instead
+(`sizeof(long)`, `sizeof(void *)`, byte order: `lp64le` on Linux, Android, and Apple Silicon, `llp64le` on MinGW).
+
+Sidecars gain `device` (`--device NAME`) and `state_sha256`, the hash of the state as written, and the C escapes
+control characters in their strings. Sync itself is outside `tlk_sdl`, in `sync/` and the Android launcher, and is
+described in `docs/SAVE_SYNC.md`. Pressing Home on the phone keeps the game process alive, so the launcher never saw
+the autosave written on leaving. `GameActivity.onStop` pushes it 3 s later, which is safe because a store refuses a
+state that doesn't match its sidecar's hash.
+
+A test-gaps audit found four bugs in the desktop client, each now under a test. An HTTP answer other than 400, 404,
+or 409 (Tailscale Serve's 502 when the service is down, 403 for another login) crashed `tlk-play` before the game
+started. A file in `history/NAME/` that the folder store didn't write, such as a Syncthing conflict copy, raised
+after the live zip had moved to history, losing it. A device name such as "My Laptop" made every autosave push fail.
+A `cmd:` store printing something other than JSON crashed play.
+
+```
+$ scripts/check_cross_device_state.sh          # l05_random.tape to 3000 on one side, no input to 6000 on the other
+MATCH    PC state on the phone
+MATCH    both builds are 95c032fd8f51-lp64le
+MATCH    phone state on the PC
+CROSS-DEVICE MATCH
+scripts/check_state_resume.sh l05_random.tape 9000 600=Title,2 1450=Hakuna,8 4000=Hakuna,6   RESUME MATCH (sidecar sha = sha256sum, device recorded)
+scripts/compare_modes.sh 600 3000; -p tapes/6987M.read.tape 1200 6000                        MATCH (57ccb8d5, c897f389, d8e93da4, a07184e1)
+scripts/check_all_tapes.sh -s                                                                 45 MATCH, 0 MISMATCH
+check_idle_lle IDLE MATCH; check_native_decomp IDENTICAL; check_exit_mx 0 WRONG; remap self-test PASS
+ctest 8/8; sync/tests 73 passed; Kotlin unit tests 37/37 (SaveSyncTest 17)
+```
+
+The resumed run in the cross-device check has to differ from a fresh run, so a load that was ignored fails it. On the
+phone, with a test server on the PC through `adb reverse`, the desktop's autosave showed on the launcher as
+"Hakuna, from cj-desk-pc, just now". After a few seconds of play and Home, the game pushed its own autosave, and
+`tlk-play` on the PC pulled it and loaded it at frame 4750.
+
+## Task SCAN: scanlines on the SDL renderer
+
+The owner asked for a scanline overlay on Android, where the picture goes through SDL_Renderer on GLES and
+snesrecomp's GLSL presets don't build. Graphics > Scanlines (0-100 in tens, `scanlines =` in the ini, and a row in the
+launcher's Settings) draws one column of black, alpha only, over the picture after the game texture. Each of the
+game's 224 lines gets the screen rows that nearest sampling gives it, starting at `ceil(i * h / 224 - 0.5)`, and the
+bottom `ceil(m / 3)` of them are dark, where m is the fewest rows any line gets, so every gap is the same height and
+the beam takes the odd row. The first try darkened by a cosine of the position within a line instead. At 500 rows
+the darkest row of a gap ranged from 28 to 153 of alpha across lines, which shows as moiré. Under two screen rows a line nothing is drawn. On the
+desktop the row is greyed out while the OpenGL presenter runs, where the CRT shader has its own scanlines.
+
+```
+tlk_sdl --config (opengl = 0, scale = 4, scanlines = 0 / 60) --frames 1500 --dump-window   frame_sha256 d55aba8a... both
+python check of the row rule at h = 448, 672, 896, 1000, 1001, 1812          every row maps to its own line (2-9 rows)
+scripts/compare_modes.sh 600 3000                                             MATCH (57ccb8d5, c897f389)
+ctest 8/8; remap self-test PASS; scripts/build_android.sh (Kotlin tests)      BUILD SUCCESSFUL, build ce87336647f1-lp64le
+```
+
+A later test-gaps audit found the gaps were not the same: a third of each line's own rows gave 1 or 2 dark rows at 673
+to 895 rows high, uneven at 669 of the heights from 448 to 2400. `runner/tlk_scanlines.c` holds the column now, and
+`tests/tlk_scanlines_test.c` checks every height from 448 to 2400 for equal gaps at the bottom of each line.
+
+Not run on a phone: none was on adb when this landed.
+
+## Task GPU: shader presets on the phone, and a PVM preset
+
+The owner asked for real shaders on the phone and a PVM look ("I like the PVM look for example, I have a PVM-20L4").
+The phone draws through SDL_Renderer, and so do its touch pad and menu, so the presets run inside it: SDL 3.4's
+`SDL_CreateGPURenderState` gives the `gpu` renderer (Vulkan on Android) a custom fragment shader.
+`tools/glslp_to_spirv.py` takes the same single-pass RetroArch presets the desktop's GL presenter loads, gives each
+SDL's binding layout (texture at set 2, uniforms in one std140 block at set 3), and compiles it to SPIR-V with the
+NDK's `glslc` into `tlk_gpu_shaders.h`. `runner/tlk_gpu_shader.c` fills `InputSize`, `TextureSize`, `OutputSize`,
+`FrameCount` and the parameters each frame. Android asks for the `gpu` renderer first and falls back to the default
+one, where the Shader row stays greyed out and the scanline overlay remains.
+
+`runner/assets/shaders/pvm.glslp` is new (CC0). Each of the two nearest lines is a beam whose height follows each
+channel's brightness: Gaussian, `exp(-4.5 (d/w)^2)`, with `w` from `BEAM_MIN` to `BEAM_MAX` by `sqrt` of the linear
+value. Then an aperture grille over `gl_FragCoord.x`, divided by its mean so it keeps the brightness, a four-tap glow,
+and gamma 2.4 in, 2.2 out. The first tuning (`k = 2.8`, beams 0.55 to 0.95) left mid-tones with barely a gap at 6x.
+`shader_param = NAME VALUE` lines in the ini set any preset's parameters, on the SDL path through the uniform block and
+on the GL path through a new `snesrecomp_opengl_set_param` hunk.
+
+```
+uv run --with pytest python -m pytest -q tools/tests              41 passed, 4 skipped (18 new, glslp_to_spirv)
+SDL_RENDER_DRIVER=gpu, opengl = 0, scale 4, f1500, each preset     no error; six different pictures; frame_sha256 d55aba8a... all six
+l05_random.tape f4000, scale 6, pvm on gpu vs GL presenter         RMSE 0.09%
+same, shader_param MASK 0 and BEAM_MIN 1.0                         applied on both (RMSE 0.16% between them)
+default renderer with shader = pvm                                 runs, no preset (the phone's fallback)
+scripts/compare_modes.sh 600 3000                                  MATCH (57ccb8d5, c897f389)
+ctest 8/8; remap self-test PASS; scripts/build_android.sh          BUILD SUCCESSFUL, build 3f145799c267-lp64le, 5 presets compiled in
+```
+
+The test-gaps audit also found that a `shader =` path no compiled preset matched was accepted without a message at
+startup; it now prints one. `--selftest-remap` round-trips `scanlines` and `shader_param` through the ini, including a
+repeated name, a line without a value, and `scanlines = 150`.
+
+Not run on a phone: none was on adb. The desktop runs the same SPIR-V through Vulkan, which covers the shaders and the
+host code, not the phone's driver. HD Mode 7 hands every preset a taller texture, so scanline presets draw HD lines, as
+they already did on the GL path. On the SDL path a `.glslp` of your own named like a bundled preset runs the bundled
+one.

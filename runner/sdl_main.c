@@ -36,8 +36,12 @@
  *   --save-at N state     write a savestate after frame N (proof runs)
  *   --load state          start from a savestate (frame count continues)
  *   --load-at N state     load a savestate after frame N, in process (proof runs)
+ *   --autosave state      autosave to state (scripted runs too; see autosave_seconds in the ini)
+ *   --build-id            print the build id that savestate sidecars name, then the git version, exit
+ *   --device NAME         the machine name savestate sidecars record, which save sync shows beside a save
  *   --menu-at N           open the settings menu after frame N (screenshots)
- *   --menu-page controls|level|about  with --menu-at: open the Controls (remap) or Level select section, or the About window
+ *   --menu-page saves|controls|level|about  with --menu-at: open the Save states, Controls (remap) or Level select
+ *                         section, or the About window
  *   --speedrun off|practice  practice mode on or off (overrides the ini)
  *   --practice-level N    level select N (0-13) after frame 1 (proof runs)
  *   --invul N             with --practice-level: debug-menu INVUL 0 off, 1 health, 2 lives
@@ -86,6 +90,8 @@
 #include "verified_rom.h"
 #include "tlk_font8x8.h"
 #include "tlk_savestate.h"
+#include "tlk_saveinfo.h"
+#include "tlk_build_id.h"
 #include "tlk_wide.h"
 
 #include "common_cpu_infra.h"
@@ -100,12 +106,15 @@
 #define SDL_MAIN_HANDLED 1
 #include <SDL3/SDL.h>
 
-/* snesrecomp's desktop OpenGL presenter (GLSL shader presets, aspect). */
-#include "opengl.h"
+#include "display_aspect.h"
 #include "util.h"
+#ifndef __ANDROID__
+/* snesrecomp's desktop OpenGL presenter (GLSL shader presets, aspect). Android draws through SDL_Renderer. */
+#include "opengl.h"
 #include "gl_core_3_1.h"
 void snesrecomp_opengl_set_overlay(void (*draw)(int, int));   /* cmake/runtime-patches/opengl.hunks */
 void OpenGLRenderer_Create(struct RendererFuncs *funcs);
+#endif
 void TlkVideoConfig(const char *shader, int aspect, int smooth);   /* tlk_video.c */
 void TlkAssetPath(const char *rel, char *out, size_t n);           /* tlk_assets.c */
 
@@ -114,8 +123,12 @@ void TlkAssetPath(const char *rel, char *out, size_t n);           /* tlk_assets
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "tlk_compat.h"
 #include "tlk_menu_imgui.h"
+#include "tlk_touch.h"
+#include "tlk_gpu_shader.h"
+#include "tlk_scanlines.h"
 
 enum { kWidth = 256, kHeight = 224, kBpp = 4 };
 static uint8_t s_pixels[kWidth * kHeight * kBpp];
@@ -277,12 +290,18 @@ static int s_turbo_speed = 4, s_turbo_held;
  * Shaders need OpenGL 3.3 (opengl = 0 forces the plain SDL renderer). */
 static int s_aspect = kSnesDisplayAspect_SquarePixels8x7, s_smooth, s_integer, s_opengl = 1;
 static char s_shader[1024];
+/* shader_param lines: a preset's #pragma parameter set from the ini. They are kept when the preset changes, and a
+ * preset without that parameter ignores it. */
+enum { kMaxShaderParams = 32 };
+static struct { char name[48]; float value; } s_shader_params[kMaxShaderParams];
+static int s_shader_param_count;
 static const char *const kShaders[][2] = {
     { "", "off" },
     { "assets/shaders/crt-soft.glslp", "CRT" },
     { "assets/shaders/lcd-grid.glslp", "LCD grid" },
     { "assets/shaders/sharp.glslp", "Sharpen" },
-    { "assets/shaders/warm-composite.glslp", "Composite" } };
+    { "assets/shaders/warm-composite.glslp", "Composite" },
+    { "assets/shaders/pvm.glslp", "PVM" } };
 enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
 /* HD Mode 7 (snesrecomp's PpuBindMode7HdSurface): 0 = off, else 2..4. The PPU
  * also draws each line into s_hd at that scale, resampling Mode 7 lines at the
@@ -290,12 +309,19 @@ enum { kShaderCount = sizeof kShaders / sizeof kShaders[0] };
  * changes: s_pixels, the hashes and --dump-png stay native. */
 static int s_hd_mode7;
 static uint32_t *s_hd;
+/* Scanlines over the SDL renderer's picture: how dark the gap between two of
+ * the game's lines is, in percent; 0 is off. */
+static int s_scanlines;
 static const char *const kHdMode7Choices[] = { "off", "2x", "3x", "4x" };
 /* Widescreen (tlk_wide.c): 0 off, 1 16:9, 2 21:9, 3 the window's shape. Levels
  * are drawn wider by a host compositor; other screens stay 4:3 with black
  * sides. s_wide_hud puts the HUD at the picture's edges. Hashes and
  * --dump-png stay native. */
+#ifdef __ANDROID__
+static int s_wide = 3, s_wide_hud = 1;   /* widens only a screen wider than the picture */
+#else
 static int s_wide, s_wide_hud = 1;
+#endif
 /* Widescreen enemies: 1 widens the game's spawn window by the margin, so
  * enemies are created out of view (tlk_wide.c TlkWideSetSpawnLead). This
  * changes the game: recordings and tapes made without it do not replay. */
@@ -306,6 +332,14 @@ static const char *const kWideIni[] = { "off", "16:9", "21:9", "adaptive" };
 static const char *const kWideHudChoices[] = { "in place", "at the edges" };
 static uint32_t s_wide_px[TLK_WIDE_MAX_WIDTH * TLK_WIDE_HEIGHT];
 static double s_wide_aspect;   /* aspect of the picture being shown, 0 when native */
+static const char *const kTouchChoices[] = { "auto", "on", "off" };
+static int s_touch_mode, s_touch_size = 100, s_touch_opacity = 40, s_touch_haptics = 1;
+/* autosave_seconds: seconds of play between autosaves; 0 turns the autosave off. */
+#ifdef __ANDROID__
+static int s_autosave_seconds = 60;
+#else
+static int s_autosave_seconds;
+#endif
 static int s_practice;   /* speedrun = practice: level timer, lag, inputs, best times, restart */
 /* How the open menu covers the game, in percent: dimming of the picture
  * behind it, and how solid its panel is (see recomp_runtime_ui_set_backdrop). */
@@ -322,10 +356,12 @@ static char *Trim(char *s) {
 
 /* Plain "key = value" lines; [sections] and ; or # comments are ignored.
  * Keys: rom, scale, fullscreen, vsync, audio, audio_rate, volume, shader,
- * aspect (4:3 8:7 1:1), smooth, integer_scale, opengl, hd_mode7 (0 or 2-4),
+ * shader_param (NAME VALUE, one line each), aspect (4:3 8:7 1:1), smooth,
+ * integer_scale, opengl, hd_mode7 (0 or 2-4),
  * widescreen (off 16:9 21:9 adaptive), widescreen_hud (edges or in place),
  * widescreen_enemies (as the game or out of view), turbo_speed (2-16),
- * speedrun (off or practice), menu_dim and menu_opacity (0-100), and one per binding
+ * scanlines (0-100), speedrun (off or practice), menu_dim and menu_opacity
+ * (0-100), autosave_seconds (0 off), and one per binding
  * (b y select start up down left right a x l r turbo) holding an SDL key name such
  * as "Z", "Return", "Right Shift", "Up". */
 static void LoadConfig(const char *path) {
@@ -348,6 +384,17 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "audio_rate")) s_audio_rate = atoi(v);
         else if (!strcmp(k, "volume")) s_volume = atoi(v);
         else if (!strcmp(k, "shader")) snprintf(s_shader, sizeof s_shader, "%s", v);
+        else if (!strcmp(k, "shader_param")) {
+            char name[48];
+            float value;
+            int i = 0;
+            if (sscanf(v, "%47s %f", name, &value) != 2) { fprintf(stderr, "config: shader_param wants NAME VALUE\n"); continue; }
+            while (i < s_shader_param_count && strcmp(s_shader_params[i].name, name)) i++;
+            if (i == kMaxShaderParams) { fprintf(stderr, "config: more than %d shader_param names; %s is ignored\n", kMaxShaderParams, name); continue; }
+            if (i == s_shader_param_count) s_shader_param_count++;
+            snprintf(s_shader_params[i].name, sizeof s_shader_params[i].name, "%s", name);
+            s_shader_params[i].value = value;
+        }
         else if (!strcmp(k, "aspect")) {
             uint8_t a;
             if (SnesDisplayAspect_Parse(v, &a)) s_aspect = a;
@@ -356,6 +403,7 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "smooth")) s_smooth = atoi(v);
         else if (!strcmp(k, "integer_scale")) s_integer = atoi(v);
         else if (!strcmp(k, "opengl")) s_opengl = atoi(v);
+        else if (!strcmp(k, "scanlines")) s_scanlines = SDL_clamp(atoi(v), 0, 100);
         else if (!strcmp(k, "hd_mode7")) s_hd_mode7 = atoi(v) >= 2 ? SDL_min(atoi(v), 4) : 0;
         else if (!strcmp(k, "widescreen")) {
             s_wide = 0;
@@ -368,6 +416,14 @@ static void LoadConfig(const char *path) {
         else if (!strcmp(k, "speedrun")) s_practice = !strcmp(v, "practice");
         else if (!strcmp(k, "menu_dim")) s_menu_dim = SDL_clamp(atoi(v), 0, 100);
         else if (!strcmp(k, "menu_opacity")) s_menu_opacity = SDL_clamp(atoi(v), 0, 100);
+        else if (!strcmp(k, "touch")) {
+            s_touch_mode = 0;
+            for (int i = 1; i < 3; i++) if (!strcmp(v, kTouchChoices[i])) s_touch_mode = i;
+        }
+        else if (!strcmp(k, "touch_size")) s_touch_size = SDL_clamp(atoi(v), 50, 150);
+        else if (!strcmp(k, "touch_opacity")) s_touch_opacity = SDL_clamp(atoi(v), 10, 100);
+        else if (!strcmp(k, "touch_haptics")) s_touch_haptics = atoi(v) != 0;
+        else if (!strcmp(k, "autosave_seconds")) s_autosave_seconds = SDL_max(atoi(v), 0);
         else if (!strncmp(k, "pad_", 4)) {
             for (int i = 0; i < kBindings; i++)
                 if (!strcmp(k + 4, kButtonNames[i])) {
@@ -395,10 +451,16 @@ static int SaveConfig(void) {
     if (s_rom_cfg[0]) fprintf(f, "rom = %s\n", s_rom_cfg);
     fprintf(f, "scale = %d\nfullscreen = %d\nvsync = %d\naudio = %d\naudio_rate = %d\nvolume = %d\n",
             s_scale, s_fullscreen, s_vsync, s_audio, s_audio_rate, s_volume);
-    fprintf(f, "; shader: empty, a bundled assets/shaders/*.glslp or your own .glslp/.glsl path\n");
-    fprintf(f, "shader = %s\naspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
-            s_shader, SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
-    fprintf(f, "; Mode 7 drawn at 2-4x the native resolution (0 = off)\nhd_mode7 = %d\n", s_hd_mode7);
+    fprintf(f, "; shader: empty, a bundled assets/shaders/*.glslp, or with OpenGL your own .glslp/.glsl path\n");
+    fprintf(f, "shader = %s\n", s_shader);
+    fprintf(f, "; shader_param = NAME VALUE sets one of a preset's parameters, such as BEAM_MAX for pvm\n");
+    for (int i = 0; i < s_shader_param_count; i++)
+        fprintf(f, "shader_param = %s %g\n", s_shader_params[i].name, s_shader_params[i].value);
+    fprintf(f, "aspect = %s\nsmooth = %d\ninteger_scale = %d\nopengl = %d\n",
+            SnesDisplayAspect_Name(s_aspect), s_smooth, s_integer, s_opengl);
+    fprintf(f, "; scanlines without OpenGL: how dark the gap between lines is, percent (0 = off)\nscanlines = %d\n",
+            s_scanlines);
+    fprintf(f, "; Mode 7 drawn at 2-4x the native resolution (0 = off), except under a shader\nhd_mode7 = %d\n", s_hd_mode7);
     fprintf(f, "; levels drawn wider: off, 16:9, 21:9 or adaptive (the window's shape)\nwidescreen = %s\n"
                "; HUD in widescreen: edges or in place\nwidescreen_hud = %s\n",
             kWideIni[s_wide], s_wide_hud ? "edges" : "in place");
@@ -409,6 +471,11 @@ static int SaveConfig(void) {
     fprintf(f, "speedrun = %s\n", s_practice ? "practice" : "off");
     fprintf(f, "; settings menu: game dimming and panel opacity, percent\nmenu_dim = %d\nmenu_opacity = %d\n",
             s_menu_dim, s_menu_opacity);
+    fprintf(f, "; touchscreen pad: auto, on or off; its size and opacity, percent; on a phone, a vibration on each press (1 on, 0 off)\n"
+               "touch = %s\ntouch_size = %d\ntouch_opacity = %d\ntouch_haptics = %d\n",
+            kTouchChoices[s_touch_mode], s_touch_size, s_touch_opacity, s_touch_haptics);
+    fprintf(f, "; tlk_autosave.state: every N seconds of play, and on leaving the app or quitting (0 = off)\n"
+               "autosave_seconds = %d\n", s_autosave_seconds);
     fprintf(f, "; keys use SDL key names\n");
     for (int i = 0; i < kBindings; i++) fprintf(f, "%s = %s\n", kButtonNames[i], SDL_GetKeyName(s_keys[i]));
     fprintf(f, "; gamepad buttons use SDL names (a = south, b = east, x = west, y = north,\n"
@@ -484,8 +551,16 @@ static void Panel(int x, int y, int w, int h) {
 static SDL_Window *win;
 static SDL_Renderer *ren;      /* plain SDL presenter, when OpenGL is off or unavailable */
 static SDL_Texture *tex;
+static SDL_Texture *s_scan_tex;   /* one column of scanlines, s_scan_h tall at s_scan_pct */
+static int s_scan_h, s_scan_pct;
+#ifndef __ANDROID__
 static struct RendererFuncs s_gl;
+#endif
 static int s_gl_on;            /* the OpenGL presenter owns the window */
+static int s_gpu_shaders;      /* the SDL renderer is SDL's GPU renderer, with the presets compiled in */
+#ifndef __ANDROID__
+int snesrecomp_opengl_set_param(const char *name, float value);   /* cmake/runtime-patches/opengl.hunks */
+#endif
 static SDL_AudioStream *astream;
 static int pace = 1, running = 1;
 static long frame;
@@ -501,10 +576,10 @@ static const char *const kSelectNames[14] = {
 static const char *const kInvulNames[3] = { "Off", "Infinite health", "Infinite lives" };
 static int s_sel_level, s_sel_invul;
 /* Menu state the rest of the host reads. The menu itself (rows, cursor,
- * drawing) is recomp-ui's runtime menu, built by MenuCreate. s_menu_gl: it
- * is drawn with Dear ImGui over the OpenGL presenter, else into s_screen. */
+ * drawing) is recomp-ui's runtime menu, built by MenuCreate. s_menu_imgui: it
+ * is drawn with Dear ImGui over the whole window, else into s_screen. */
 static RecompRuntimeUi *s_ui;
-static int s_menu_open, s_menu_gl, s_key_sel, s_key_wait;
+static int s_menu_open, s_menu_imgui, s_key_sel, s_key_wait;
 static int s_about;   /* the About window is over the menu; any back/accept closes it */
 
 /* Short on-screen names by position; the ini keeps SDL's names. */
@@ -693,6 +768,77 @@ static const PrCp kTasCp[] = { { 0, 0, 0x04B0, 0x0070, 904 }, { 1, 0, 0x1270, 0x
 
 static uint16_t Wram16(uint32_t off) { return (uint16_t)(g_ram[off] | g_ram[off + 1] << 8); }
 
+/* ── Savestates and their sidecars (tlk_saveinfo.c) ────────────────────── */
+static int s_level_loading = 1, s_level_on;   /* a level is on from the end of its load (AutosaveTrack) */
+
+/* $7FFF9E changes on the title before the level loads, so a save with no level on or loading is the title's. */
+static const char *LevelName(int lvl) {
+    if (lvl == 0x0E || (!s_level_on && !s_level_loading)) return "Title";
+    return lvl >= 0 && lvl < 14 ? kSelectNames[lvl] : "Unknown";
+}
+
+_Static_assert(sizeof TLK_BUILD_ID <= sizeof ((TlkSaveInfo *)0)->build, "the build id must fit the sidecar's field");
+static char s_device[64];   /* --device */
+
+/* The file's SHA-256 as hex into out[65]. Returns 0 when it can't be read. */
+static int FileSha256(const char *path, char out[65]) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    uint8_t *buf = NULL;
+    size_t n = 0, cap = 0;
+    for (;;) {
+        if (n == cap) {
+            uint8_t *grown = realloc(buf, cap = cap ? cap * 2 : 1 << 19);
+            if (!grown) { free(buf); fclose(f); return 0; }
+            buf = grown;
+        }
+        size_t got = fread(buf + n, 1, cap - n, f);
+        n += got;
+        if (got == 0) break;
+    }
+    int ok = !ferror(f);
+    fclose(f);
+    uint8_t h[32];
+    if (ok) sha256_compute(buf, n, h);
+    free(buf);
+    for (int i = 0; ok && i < 32; i++) snprintf(out + 2 * i, 3, "%02x", h[i]);
+    return ok;
+}
+
+/* Removes the json, writes the state and its picture, then the json again, so a json means the other two are whole.
+ * A save that fails part way leaves no state, since a state with no json loads as an earlier build's. */
+static int SaveStateFiles(const char *path) {
+    char png[1100];
+    tlk_saveinfo_remove(path);
+    tlk_saveinfo_path(path, ".png", png, sizeof png);
+    if (!tlk_state_save(path, (uint32_t)frame) || !WritePng(png, s_pixels, kWidth, kHeight, kWidth * kBpp)) {
+        remove(path);
+        return 0;
+    }
+    TlkSaveInfo info;
+    memset(&info, 0, sizeof info);
+    snprintf(info.build, sizeof info.build, "%s", TLK_BUILD_ID);
+    snprintf(info.version, sizeof info.version, "%s", TLK_BUILD_VERSION);
+    info.frame = frame;
+    info.saved_unix = (long long)time(NULL);
+    info.level = Wram16(0x1FF9E);
+    snprintf(info.level_name, sizeof info.level_name, "%s", LevelName(info.level));
+    info.lives = Wram16(0x1FFAA);
+    snprintf(info.device, sizeof info.device, "%s", s_device);
+    if (FileSha256(path, info.state_sha256) && tlk_saveinfo_write(path, &info)) return 1;
+    fprintf(stderr, "cannot write the sidecar of %s\n", path);
+    remove(path);
+    return 0;
+}
+
+/* 0 when the state's sidecar names another build, whose snapshot this build would misread. */
+static int StateFromThisBuild(const char *path) {
+    TlkSaveInfo info;
+    if (tlk_saveinfo_check(path, TLK_BUILD_ID, &info) != TLK_SAVE_OTHER_BUILD) return 1;
+    fprintf(stderr, "%s was saved by build %s; this is %s\n", path, info.build, TLK_BUILD_ID);
+    return 0;
+}
+
 static void PrTimesPath(char *out, size_t n) { SidePath("tlk_practice_times.txt", out, n); }
 static void PrRestartPath(char *out, size_t n) { SidePath("tlk_practice_restart.state", out, n); }
 
@@ -847,7 +993,7 @@ static void PracticeFrame(uint16_t pad) {
             if (pr.fresh && lvl < kPrLevels) {
                 char path[1100];
                 PrRestartPath(path, sizeof path);
-                tlk_state_save(path, (uint32_t)frame);
+                SaveStateFiles(path);
             }
             pr.fresh = 0;
         }
@@ -938,13 +1084,16 @@ static void BuildLevelMacro(int level, int invul) {
 
 static void PrBootPath(char *out, size_t n) { SidePath("tlk_practice_boot.state", out, n); }
 static int LoadStateLive(const char *path);
+static void SlotLabels(void);
+static int SaveSlot(int slot, char *msg, size_t n);
+static int LoadSlot(int slot, char *msg, size_t n);
 static void CloseMenu(void);
 static void StartLabel(void);
 
 static void PrStartLevel(int level) {
     char path[1100], msg[64];
     PrBootPath(path, sizeof path);
-    if (!LoadStateLive(path)) { Toast("Level select: no power-on state"); return; }
+    if (LoadStateLive(path) <= 0) { Toast("Level select: no power-on state"); return; }
     BuildLevelMacro(level, s_sel_invul);
     s_sel_level = level;
     StartLabel();
@@ -975,6 +1124,35 @@ static void PrEnable(void) {
 /* ── Presenting ─────────────────────────────────────────────────────────── */
 static void ApplyVideoConfig(void) { TlkVideoConfig(s_shader, s_aspect, s_smooth); }
 
+/* After a preset loads: its parameters from the ini, on whichever renderer runs it. */
+static void ApplyShaderParams(void) {
+    for (int i = 0; i < s_shader_param_count; i++) {
+#ifndef __ANDROID__
+        if (s_gl_on) { snesrecomp_opengl_set_param(s_shader_params[i].name, s_shader_params[i].value); continue; }
+#endif
+        TlkGpuShaderSetParam(s_shader_params[i].name, s_shader_params[i].value);
+    }
+}
+
+/* The SDL renderer's preset: the one named by s_shader, when the build compiled it in. */
+static void ApplyGpuShader(void) {
+    if (!s_gpu_shaders) return;
+    if (!TlkGpuShaderSelect(ren, s_shader)) fprintf(stderr, "shader: %s isn't one this build can run on the SDL renderer\n", s_shader);
+    else if (TlkGpuShaderActive() && ShaderIndex() < 0) {   /* the ini's own file, named like a bundled preset */
+        fprintf(stderr, "shader: %s runs the bundled preset of that name; the SDL renderer runs only those\n", s_shader);
+        Toast("Bundled shader runs, not yours");
+    }
+    ApplyShaderParams();
+}
+
+/* Whether a preset draws the picture. It gets the native 224 lines and draws its own scanlines. */
+static int PresetOn(void) {
+#ifndef __ANDROID__
+    if (s_gl_on) return s_shader[0] != 0;
+#endif
+    return TlkGpuShaderActive();
+}
+
 /* sw x sh is the presented picture, native or HD; the maths runs on the
  * native size so integer scaling still counts game pixels. */
 static void ComputeViewport(int sw, int sh, int dw, int dh, SnesDisplayViewport *vp) {
@@ -1003,11 +1181,32 @@ static void SizeWindow(void) {
 
 static int TurboHeld(void);
 
+/* One column of the overlay, as tall as the picture on screen, stretched across it. */
+static void DrawScanlines(const SDL_FRect *dst) {
+    const int h = (int)dst->h;
+    if (!s_scanlines || h < 2 * kHeight) return;   /* under two pixels a line there is no gap to draw */
+    if (!s_scan_tex || s_scan_h != h || s_scan_pct != s_scanlines) {
+        uint32_t *col = (uint32_t *)malloc((size_t)h * 4);
+        if (s_scan_tex) SDL_DestroyTexture(s_scan_tex);
+        s_scan_tex = col ? SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, 1, h) : NULL;
+        if (!s_scan_tex) { free(col); return; }
+        TlkScanlineColumn(col, h, kHeight, s_scanlines);
+        SDL_UpdateTexture(s_scan_tex, NULL, col, 4);
+        free(col);
+        SDL_SetTextureBlendMode(s_scan_tex, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(s_scan_tex, SDL_SCALEMODE_NEAREST);
+        s_scan_h = h;
+        s_scan_pct = s_scanlines;
+    }
+    SDL_RenderTexture(ren, s_scan_tex, NULL, dst);
+}
+
 /* --dump-window with the OpenGL presenter: read the next composited window
  * (shader and ImGui menu included) back before it is swapped. */
 static const char *s_dump_req;
 static int s_dump_ok;
 
+#ifndef __ANDROID__
 static void ReadBackWindow(int w, int h) {
     uint8_t *px = (uint8_t *)malloc((size_t)w * h * 4), *row = (uint8_t *)malloc((size_t)w * 4);
     s_dump_ok = 0;
@@ -1028,9 +1227,10 @@ static void ReadBackWindow(int w, int h) {
 /* The presenter's overlay hook: the menu, drawn after the game picture (and
  * its shader) over the whole window, just before the swap. */
 static void DrawOverlay(int w, int h) {
-    if (s_menu_open && s_menu_gl) TlkMenuImguiDraw(s_ui, &s_about);
+    if (s_menu_open && s_menu_imgui) TlkMenuImguiDraw(s_ui, &s_about);
     if (s_dump_req) ReadBackWindow(w, h);
 }
+#endif
 
 /* (Re)binds the PPU's HD Mode 7 surface for s_hd_mode7. Takes effect from
  * the next frame drawn. */
@@ -1107,7 +1307,9 @@ static void ComposeWide(uint8_t *dst, int pitch, int w) {
     }
 }
 
-/* Shows s_pixels plus the overlay (menu when open, toast, turbo tag). */
+static void DrawTouchPad(int dw, int dh);
+
+/* Shows s_pixels plus the overlay (menu when open, toast, turbo tag) and the touch pad. */
 static void Present(void) {
     if (s_rom_prompt) DrawRomPrompt();   /* before the game starts: no PPU picture, WRAM or overlays yet */
     else {
@@ -1122,10 +1324,11 @@ static void Present(void) {
             DrawText(kWidth - 44, 8, t);
         }
         /* Without ImGui the same menu is drawn into the 256x224 picture. */
-        if (s_menu_open && !s_menu_gl) recomp_runtime_ui_render_argb8888(s_ui, s_screen, kWidth, kHeight, kWidth * 4);
+        if (s_menu_open && !s_menu_imgui) recomp_runtime_ui_render_argb8888(s_ui, s_screen, kWidth, kHeight, kWidth * 4);
     }
-    const int sc = s_hd && !s_rom_prompt ? s_hd_mode7 : 1, ww = s_rom_prompt ? 0 : WideWidth();
+    const int sc = s_hd && !s_rom_prompt && !PresetOn() ? s_hd_mode7 : 1, ww = s_rom_prompt ? 0 : WideWidth();
     const int tw = ww ? ww : kWidth * sc, th = ww ? kHeight : kHeight * sc;
+#ifndef __ANDROID__
     if (s_gl_on) {
         uint8 *px;
         int pitch;
@@ -1136,6 +1339,7 @@ static void Present(void) {
         s_gl.EndDraw();
         return;
     }
+#endif
     int dw = 0, dh = 0;
     SDL_GetCurrentRenderOutputSize(ren, &dw, &dh);
     SnesDisplayViewport vp;
@@ -1150,7 +1354,8 @@ static void Present(void) {
         if (!tex) return;
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
     }
-    SDL_SetTextureScaleMode(tex, s_smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+    const int shaded = TlkGpuShaderActive();
+    SDL_SetTextureScaleMode(tex, (shaded ? TlkGpuShaderFilterLinear() : s_smooth) ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
     if (ww || sc > 1) {
         void *px;
         int pitch;
@@ -1161,7 +1366,12 @@ static void Present(void) {
     } else SDL_UpdateTexture(tex, NULL, s_screen, kWidth * kBpp);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
+    if (shaded) TlkGpuShaderBegin(ren, tw, th, vp.width, vp.height);
     SDL_RenderTexture(ren, tex, NULL, &dst);
+    if (shaded) SDL_SetGPURenderState(ren, NULL);
+    else DrawScanlines(&dst);
+    DrawTouchPad(dw, dh);
+    if (s_menu_open && s_menu_imgui) TlkMenuImguiDraw(s_ui, &s_about);
     if (s_dump_req) {   /* --dump-window: the rendered window, as with OpenGL */
         SDL_Surface *shot = SDL_RenderReadPixels(ren, NULL), *xrgb = NULL;
         if (shot) xrgb = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_XRGB8888);
@@ -1174,10 +1384,14 @@ static void Present(void) {
 
 static void SetVsync(void) {
     int on = (s_vsync && pace) ? 1 : 0;
+#ifndef __ANDROID__
     if (s_gl_on) {
         snesrecomp_opengl_set_vsync(on);
         if (s_gl.Reconfigure) s_gl.Reconfigure();
-    } else SDL_SetRenderVSync(ren, on);
+        return;
+    }
+#endif
+    SDL_SetRenderVSync(ren, on);
 }
 
 /* OpenGL 3.3 presenter when allowed and available, else the SDL renderer
@@ -1186,6 +1400,7 @@ static int OpenVideo(void) {
     Uint32 flags = SDL_WINDOW_RESIZABLE | (s_fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
     int w = WindowWidth(), h = kHeight * s_scale;
     ApplyVideoConfig();
+#ifndef __ANDROID__
     if (s_opengl) {
         OpenGLRenderer_Create(&s_gl);   /* sets the GL 3.3 core attributes */
         win = SDL_CreateWindow("The Lion King", w, h, flags | SDL_WINDOW_OPENGL);
@@ -1197,11 +1412,12 @@ static int OpenVideo(void) {
             snesrecomp_opengl_set_viewport(ComputeViewport);
             s_gl_on = s_gl.Initialize(win);
         }
+        if (s_gl_on) ApplyShaderParams();
         if (s_gl_on) {   /* the presenter's context is current here */
             char font[1200];
             TlkAssetPath("assets/fonts/LatoLatin-Regular.ttf", font, sizeof font);
-            s_menu_gl = TlkMenuImguiInit(win, font, 18.0f);   /* recomp-ui's theme size */
-            if (!s_menu_gl) fprintf(stderr, "menu: Dear ImGui did not start; drawing it in the game picture\n");
+            s_menu_imgui = TlkMenuImguiInit(win, NULL, font, 18.0f);   /* recomp-ui's theme size */
+            if (!s_menu_imgui) fprintf(stderr, "menu: Dear ImGui did not start; drawing it in the game picture\n");
             snesrecomp_opengl_set_overlay(DrawOverlay);
         }
         if (!s_gl_on) {
@@ -1210,15 +1426,28 @@ static int OpenVideo(void) {
             win = NULL;
         }
     }
+#endif
     if (!s_gl_on) {
         SDL_GL_ResetAttributes();
         win = SDL_CreateWindow("The Lion King", w, h, flags);
-        ren = win ? SDL_CreateRenderer(win, NULL) : NULL;
+#ifdef __ANDROID__
+        /* SDL's GPU renderer (Vulkan) runs the shader presets; a phone without it gets the default renderer. */
+        ren = win ? SDL_CreateRenderer(win, "gpu") : NULL;
+        if (!ren && win) ren = SDL_CreateRenderer(win, NULL);
+#else
+        ren = win ? SDL_CreateRenderer(win, NULL) : NULL;   /* SDL_RENDER_DRIVER=gpu picks the GPU renderer */
+#endif
         if (!ren) { fprintf(stderr, "SDL window: %s\n", SDL_GetError()); return 0; }
         SDL_SetRenderVSync(ren, (s_vsync && pace) ? 1 : 0);
         /* The PPU leaves the top byte 0: an alpha format would draw every pixel transparent. */
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth, kHeight);
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+        s_gpu_shaders = TlkGpuShaderInit(ren);
+        ApplyGpuShader();
+        char font[1200];
+        TlkAssetPath("assets/fonts/LatoLatin-Regular.ttf", font, sizeof font);
+        s_menu_imgui = TlkMenuImguiInit(win, ren, font, 18.0f);
+        if (!s_menu_imgui) fprintf(stderr, "menu: Dear ImGui did not start; drawing it in the game picture\n");
     }
     return 1;
 }
@@ -1270,13 +1499,239 @@ static int TurboHeld(void) {
     return s_turbo_held || (s_pad && !s_pad_hold && SDL_GetGamepadButton(s_pad, s_pad_btn[kTurbo]));
 }
 
+/* ── Touchscreen pad (tlk_touch.c) ──────────────────────────────────────── */
+enum { kMaxFingers = 10 };
+static struct { SDL_FingerID id; TlkTouchFinger f; } s_fingers[kMaxFingers];
+static int s_finger_n;
+static int s_touchscreen;     /* a touchscreen is there, or a finger has been seen */
+static SDL_AtomicInt s_background;   /* the app is off screen (Android); the loop takes no frames */
+
+static bool SDLCALL WatchLifecycle(void *ud, SDL_Event *ev) {
+    (void)ud;
+    if (ev->type == SDL_EVENT_DID_ENTER_BACKGROUND) SDL_SetAtomicInt(&s_background, 1);
+    if (ev->type == SDL_EVENT_WILL_ENTER_FOREGROUND) SDL_SetAtomicInt(&s_background, 0);
+    return true;
+}
+static uint16_t s_touch_held;
+static int s_touch_hold;   /* the menu closed under a finger: send the game no touch button until every finger lifts */
+
+static int TouchShown(void) {
+    if (s_gl_on) return 0;   /* the OpenGL presenter has no pass for it */
+    if (s_menu_open && s_menu_imgui) return 0;   /* the menu takes taps */
+    return s_touch_mode == 1 || (s_touch_mode == 0 && s_touchscreen && !s_pad);
+}
+
+/* Laid out clear of the system bars and the cutout. */
+static void TouchLayoutNow(TlkTouchLayout *l, int dw, int dh) {
+    SDL_Rect safe = { 0, 0, 0, 0 };
+    int ww = 0, wh = 0;
+    if (win && !(SDL_GetWindowSafeArea(win, &safe) && SDL_GetWindowSize(win, &ww, &wh))) ww = wh = 0;
+    TlkTouchRect a = tlk_touch_area(dw, dh, ww, wh, safe.x, safe.y, safe.w, safe.h);
+    tlk_touch_layout(l, a.x, a.y, a.w, a.h, tlk_touch_unit(win ? SDL_GetWindowDisplayScale(win) : 1.0f, s_touch_size));
+}
+
+static void RenderOutputSize(int *dw, int *dh) {
+    *dw = *dh = 0;
+    if (ren) SDL_GetCurrentRenderOutputSize(ren, dw, dh);
+    else if (win) SDL_GetWindowSizeInPixels(win, dw, dh);
+}
+
+static uint16_t TouchPadState(void) {
+    if (!TouchShown() || !s_finger_n) return s_touch_held = 0;
+    int dw, dh;
+    RenderOutputSize(&dw, &dh);
+    TlkTouchLayout l;
+    TouchLayoutNow(&l, dw, dh);
+    TlkTouchFinger f[kMaxFingers];
+    for (int i = 0; i < s_finger_n; i++) f[i] = s_fingers[i].f;
+    return s_touch_held = tlk_touch_buttons(&l, f, s_finger_n);
+}
+
+static uint16_t TouchGameState(void) {
+    uint16_t w = TouchPadState();
+    if (s_touch_hold) {
+        if (s_finger_n) return 0;
+        s_touch_hold = 0;
+    }
+    return w;
+}
+
+static void TouchReset(void) {
+    s_finger_n = 0;
+    s_touch_held = 0;
+}
+
+static void OpenMenu(void);
+static void CloseMenu(void);
+
+/* While the menu is open the touch pad drives it, one input per press. */
+static void TouchMenuInput(uint16_t before, uint16_t now) {
+    static const struct { uint16_t bit; RecompRuntimeUiInput in; } kMap[] = {
+        { TLK_PAD_UP, RECOMP_RUNTIME_UI_INPUT_UP }, { TLK_PAD_DOWN, RECOMP_RUNTIME_UI_INPUT_DOWN },
+        { TLK_PAD_LEFT, RECOMP_RUNTIME_UI_INPUT_LEFT }, { TLK_PAD_RIGHT, RECOMP_RUNTIME_UI_INPUT_RIGHT },
+        { TLK_PAD_A, RECOMP_RUNTIME_UI_INPUT_ACCEPT }, { TLK_PAD_B, RECOMP_RUNTIME_UI_INPUT_BACK },
+        { TLK_PAD_START, RECOMP_RUNTIME_UI_INPUT_TOGGLE } };
+    uint16_t pressed = now & (uint16_t)~before;
+    for (size_t i = 0; i < SDL_arraysize(kMap); i++)
+        if (pressed & kMap[i].bit) recomp_runtime_ui_handle_input(s_ui, kMap[i].in, 1, 0);
+}
+
+static SDL_Haptic *s_haptic;
+static int s_haptic_tried, s_haptic_ticks;
+
+/* The phone's vibrator, SDL's VIBRATOR_SERVICE haptic. Where there is none, as on a desktop, nothing ticks. */
+static void HapticTick(void) {
+    s_haptic_ticks++;
+    if (!s_haptic_tried) {
+        s_haptic_tried = 1;
+        int n = 0;
+        SDL_HapticID *ids = SDL_InitSubSystem(SDL_INIT_HAPTIC) ? SDL_GetHaptics(&n) : NULL;
+        SDL_HapticID pick = 0;
+        for (int i = 0; i < n && !pick; i++) {
+            const char *name = SDL_GetHapticNameForID(ids[i]);
+            if (name && !strcmp(name, "VIBRATOR_SERVICE")) pick = ids[i];
+        }
+        SDL_free(ids);
+        s_haptic = pick ? SDL_OpenHaptic(pick) : NULL;
+        if (s_haptic && !SDL_InitHapticRumble(s_haptic)) {
+            SDL_CloseHaptic(s_haptic);
+            s_haptic = NULL;
+        }
+    }
+    if (s_haptic) SDL_PlayHapticRumble(s_haptic, 0.5f, 10);
+}
+
+static void HandleFinger(const SDL_TouchFingerEvent *te) {
+    s_touchscreen = 1;
+    int dw, dh;
+    RenderOutputSize(&dw, &dh);
+    float x = te->x * (float)dw, y = te->y * (float)dh;
+    TlkTouchLayout l;
+    TouchLayoutNow(&l, dw, dh);
+    int i = 0;
+    while (i < s_finger_n && s_fingers[i].id != te->fingerID) i++;
+    uint16_t before = s_touch_held;
+    if (te->type == SDL_EVENT_FINGER_UP || te->type == SDL_EVENT_FINGER_CANCELED) {
+        if (i < s_finger_n) s_fingers[i] = s_fingers[--s_finger_n];
+    } else if (i < s_finger_n) {
+        s_fingers[i].f.x = x;
+        s_fingers[i].f.y = y;
+    } else if (te->type == SDL_EVENT_FINGER_DOWN) {
+        if (TouchShown() && tlk_touch_on_menu(&l, x, y)) {
+            if (s_menu_open) CloseMenu();
+            else OpenMenu();
+            return;
+        }
+        if (s_finger_n == kMaxFingers) return;
+        s_fingers[s_finger_n].id = te->fingerID;
+        s_fingers[s_finger_n].f = (TlkTouchFinger){ x, y, tlk_touch_on_dpad(&l, x, y) };
+        s_finger_n++;
+    }
+    uint16_t now = TouchPadState();
+    if (s_menu_open) TouchMenuInput(before, now);
+    else if (s_touch_haptics && !s_touch_hold && (now & (uint16_t)~before)) HapticTick();
+}
+
+/* A convex outline around (cx, cy), filled as a fan: n points, each from point(i). */
+static void FillFan(float cx, float cy, int n, void (*point)(int i, const float *args, float *x, float *y),
+                    const float *args, SDL_FColor c) {
+    enum { kMax = 64 };
+    SDL_Vertex v[kMax + 1];
+    int idx[kMax * 3];
+    if (n > kMax) n = kMax;
+    v[0] = (SDL_Vertex){ { cx, cy }, c, { 0, 0 } };
+    for (int i = 0; i < n; i++) {
+        float x, y;
+        point(i, args, &x, &y);
+        v[i + 1] = (SDL_Vertex){ { x, y }, c, { 0, 0 } };
+        idx[i * 3] = 0;
+        idx[i * 3 + 1] = i + 1;
+        idx[i * 3 + 2] = (i + 1) % n + 1;
+    }
+    SDL_RenderGeometry(ren, NULL, v, n + 1, idx, n * 3);
+}
+
+enum { kArc = 32 };
+
+/* args: cx, cy, radius */
+static void CirclePoint(int i, const float *a, float *x, float *y) {
+    float t = (float)i * 2.0f * SDL_PI_F / kArc;
+    *x = a[0] + a[2] * SDL_cosf(t);
+    *y = a[1] + a[2] * SDL_sinf(t);
+}
+
+/* args: cx, cy, half the straight length, radius. Half the points round the right end, half the left. */
+static void PillPoint(int i, const float *a, float *x, float *y) {
+    int half = kArc / 2, right = i < half;
+    float t = -SDL_PI_F / 2 + (float)(right ? i : i - half) * SDL_PI_F / (half - 1) + (right ? 0 : SDL_PI_F);
+    *x = a[0] + (right ? a[2] : -a[2]) + a[3] * SDL_cosf(t);
+    *y = a[1] + a[3] * SDL_sinf(t);
+}
+
+static void FillCircle(float cx, float cy, float rad, SDL_FColor c) {
+    const float args[] = { cx, cy, rad };
+    FillFan(cx, cy, kArc, CirclePoint, args, c);
+}
+
+static void FillPill(float cx, float cy, float w, float h, SDL_FColor c) {
+    const float args[] = { cx, cy, SDL_max(0.0f, w / 2 - h / 2), h / 2 };
+    FillFan(cx, cy, kArc, PillPoint, args, c);
+}
+
+/* SDL's 8x8 debug font, centred on (cx, cy) and scaled to `px` pixels tall. */
+static void Label(float cx, float cy, float px, const char *text) {
+    float sc = SDL_max(0.5f, px / 8.0f);
+    SDL_SetRenderScale(ren, sc, sc);
+    SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+    SDL_RenderDebugText(ren, cx / sc - 4.0f * (float)SDL_strlen(text), cy / sc - 4.0f, text);
+    SDL_SetRenderScale(ren, 1.0f, 1.0f);
+}
+
+static void DrawTouchPad(int dw, int dh) {
+    if (!TouchShown() || dw <= 0 || dh <= 0) return;
+    TlkTouchLayout l;
+    TouchLayoutNow(&l, dw, dh);
+    float a = (float)s_touch_opacity / 100.0f;
+    SDL_FColor idle = { 1, 1, 1, 0.35f * a }, held = { 1, 0.82f, 0.4f, 0.8f * a }, dark = { 0, 0, 0, 0.35f * a };
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+
+    FillCircle(l.dpad_x, l.dpad_y, l.dpad_r, dark);
+    float arm = 0.38f * l.dpad_r;
+    static const struct { uint16_t bit; float dx, dy; } kArms[] = {
+        { TLK_PAD_UP, 0, -1 }, { TLK_PAD_DOWN, 0, 1 }, { TLK_PAD_LEFT, -1, 0 }, { TLK_PAD_RIGHT, 1, 0 } };
+    for (size_t i = 0; i < SDL_arraysize(kArms); i++)
+        FillCircle(l.dpad_x + kArms[i].dx * 0.6f * l.dpad_r, l.dpad_y + kArms[i].dy * 0.6f * l.dpad_r, arm,
+                   (s_touch_held & kArms[i].bit) ? held : idle);
+
+    for (int i = 0; i < TLK_TOUCH_BUTTONS; i++) {
+        const TlkTouchButton *b = &l.buttons[i];
+        SDL_FColor c = (s_touch_held & b->bit) ? held : idle;
+        if (b->shape == TLK_TOUCH_ROUND) FillCircle(b->x, b->y, b->w, c);
+        else FillPill(b->x, b->y, b->w, b->h, c);
+        float h = b->shape == TLK_TOUCH_ROUND ? b->w : b->h, w = b->shape == TLK_TOUCH_ROUND ? 2 * b->w : b->w;
+        Label(b->x, b->y, SDL_min(0.6f * h, 0.8f * w / (float)SDL_strlen(b->label)), b->label);
+    }
+
+    FillCircle(l.menu_x, l.menu_y, l.menu_r, dark);
+    SDL_SetRenderDrawColorFloat(ren, 1, 1, 1, 0.7f * a);
+    for (int i = -1; i <= 1; i++) {
+        SDL_FRect bar = { l.menu_x - 0.5f * l.menu_r, l.menu_y + (float)i * 0.35f * l.menu_r - 0.06f * l.menu_r,
+                          l.menu_r, 0.12f * l.menu_r };
+        SDL_RenderFillRect(ren, &bar);
+    }
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+}
+
 /* ── Settings menu: recomp-ui's runtime menu ───────────────────────────── */
 /* The rows, in order; sections appear in first-use order. Every change is
  * applied at once and saved to the ini (the menu calls MenuSave after it). */
+enum { kSlots = 4 };
 enum {
-    R_SCALE, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
-    R_SHADER, R_HD_MODE7, R_WIDE, R_WIDE_HUD, R_WIDE_SPAWN, R_SMOOTH, R_INTEGER,
+    R_SAVE0, R_LOAD0 = R_SAVE0 + kSlots,
+    R_SCALE = R_LOAD0 + kSlots, R_FULLSCREEN, R_VSYNC, R_ASPECT, R_DIM, R_OPACITY,
+    R_SHADER, R_SCANLINES, R_HD_MODE7, R_WIDE, R_WIDE_HUD, R_WIDE_SPAWN, R_SMOOTH, R_INTEGER,
     R_AUDIO, R_VOLUME,
+    R_TOUCH, R_TOUCH_SIZE, R_TOUCH_OPACITY, R_TOUCH_HAPTICS,
     R_LEVEL, R_INVUL, R_START, R_PRACTICE,
     R_BIND0, R_RESET = R_BIND0 + kBindings,
     R_RESUME, R_QUIT,
@@ -1290,9 +1745,12 @@ static const char *s_shader_names[kShaderCount + 1];
 static char s_shader_custom[1024];
 /* Binding rows show their binding in the label ("B:  Z  /  Bottom"). */
 static char s_bind_label[kBindings][64];
+/* Save states rows name what each slot holds ("Save 2:  Pride Rock  14:02"). */
+static char s_slot_label[2 * kSlots][64];
+static int s_slot_loadable[kSlots];
 /* The level select's action row names the level it goes to. */
 static char s_start_label[48];
-/* About: the first row opens tlk_menu_imgui.cpp's About window (OpenGL menu
+/* About: the first row opens tlk_menu_imgui.cpp's About window (ImGui menu
  * only); the author and source rows open their page in the browser. */
 #define AUTHOR_URL "https://kinduff.com"
 #define SOURCE_URL "https://github.com/kinduff/TLKRecomp"
@@ -1301,7 +1759,27 @@ static char s_start_label[48];
     { key, sec, label, desc, RECOMP_RUNTIME_UI_##type, lo, hi, step, ch, n, NULL }
 #define BIND_ROW(i) MENU_ROW("tlk.bind", "Controls", s_bind_label[i], \
     "Enter, then the new key or button.", ACTION, 0, 0, 0, NULL, 0)
+/* A phone has no F keys, and draws without OpenGL. */
+#ifdef __ANDROID__
+#define SAVE_KEYS NULL
+#define LOAD_KEYS NULL
+#define TOUCH_AUTO "Auto: shown while no gamepad is connected."
+#define SCANLINES_DESC "Dark gaps between the game's lines, percent. 0 is off. Off while a shader is on."
+#define SHADER_DESC "Picture filters. PVM looks like a Sony Trinitron monitor."
+#else
+#define SAVE_KEYS "Also F1-F4."
+#define LOAD_KEYS "Also F5-F8."
+#define TOUCH_AUTO "Auto: shown on a touchscreen while no gamepad is connected. Needs opengl = 0 in the ini."
+#define SCANLINES_DESC "Dark gaps between lines, percent; 0 is off. Needs opengl = 0 and no shader."
+#define SHADER_DESC "Presets in assets/shaders; parameters are shader_param lines in the ini."
+#endif
+#define SAVE_ROW(i) MENU_ROW("tlk.save_slot", "Save states", s_slot_label[i], \
+    SAVE_KEYS, ACTION, 0, 0, 0, NULL, 0)
+#define LOAD_ROW(i) MENU_ROW("tlk.load_slot", "Save states", s_slot_label[kSlots + i], \
+    LOAD_KEYS, ACTION, 0, 0, 0, NULL, 0)
 static RecompRuntimeUiItem s_rows[R_COUNT] = {
+    [R_SAVE0 + 0] = SAVE_ROW(0), [R_SAVE0 + 1] = SAVE_ROW(1), [R_SAVE0 + 2] = SAVE_ROW(2), [R_SAVE0 + 3] = SAVE_ROW(3),
+    [R_LOAD0 + 0] = LOAD_ROW(0), [R_LOAD0 + 1] = LOAD_ROW(1), [R_LOAD0 + 2] = LOAD_ROW(2), [R_LOAD0 + 3] = LOAD_ROW(3),
     [R_SCALE] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE, "Display", "Window scale",
                          "Window height, times 224 pixels.", INT, 1, 8, 1, NULL, 0),
     [R_FULLSCREEN] = MENU_ROW("tlk.fullscreen", "Display", "Fullscreen",
@@ -1315,10 +1793,12 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
     [R_OPACITY] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_MENU_OPACITY, "Display", "Menu opacity",
                            "How solid the menu's background is.", INT, 0, 100, 10, NULL, 0),
     [R_SHADER] = MENU_ROW("tlk.shader", "Graphics", "Shader",
-                          "Presets in assets/shaders.", CHOICE, 0, kShaderCount - 1, 1,
+                          SHADER_DESC, CHOICE, 0, kShaderCount - 1, 1,
                           s_shader_names, kShaderCount),
+    [R_SCANLINES] = MENU_ROW("tlk.scanlines", "Graphics", "Scanlines",
+                             SCANLINES_DESC, INT, 0, 100, 10, NULL, 0),
     [R_HD_MODE7] = MENU_ROW("tlk.hd_mode7", "Graphics", "HD Mode 7",
-                            "Mode 7 scenes drawn at a finer resolution.", CHOICE, 0, 3, 1,
+                            "Mode 7 scenes drawn at a finer resolution. Off while a shader is on.", CHOICE, 0, 3, 1,
                             kHdMode7Choices, 4),
     [R_WIDE] = MENU_ROW("tlk.widescreen", "Graphics", "Widescreen",
                         "Experimental. Levels drawn wider; other screens stay 4:3.", CHOICE, 0, 3, 1, kWideChoices, 4),
@@ -1335,6 +1815,14 @@ static RecompRuntimeUiItem s_rows[R_COUNT] = {
                          "Sound on or off.", BOOL, 0, 1, 1, NULL, 0),
     [R_VOLUME] = MENU_ROW(RECOMP_RUNTIME_UI_KEY_VOLUME, "Audio", "Volume",
                           "Percent.", INT, 0, 100, 10, NULL, 0),
+    [R_TOUCH] = MENU_ROW("tlk.touch", "Touch", "Touch pad",
+                         TOUCH_AUTO, CHOICE, 0, 2, 1, kTouchChoices, 3),
+    [R_TOUCH_SIZE] = MENU_ROW("tlk.touch_size", "Touch", "Size",
+                              "Percent.", INT, 50, 150, 10, NULL, 0),
+    [R_TOUCH_OPACITY] = MENU_ROW("tlk.touch_opacity", "Touch", "Opacity",
+                                 "Percent.", INT, 10, 100, 10, NULL, 0),
+    [R_TOUCH_HAPTICS] = MENU_ROW("tlk.touch_haptics", "Touch", "Vibrate",
+                                 "On a phone, a short vibration on each press.", BOOL, 0, 1, 1, NULL, 0),
     [R_LEVEL] = MENU_ROW("tlk.level", "Level select", "Level",
                          "Nothing happens until Start below.", CHOICE, 0, 13, 1, kSelectNames, 14),
     [R_INVUL] = MENU_ROW("tlk.invul", "Level select", "Invulnerable",
@@ -1403,6 +1891,7 @@ static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
     case R_DIM: *v = s_menu_dim; break;
     case R_OPACITY: *v = s_menu_opacity; break;
     case R_SHADER: { int sh = ShaderIndex(); *v = sh >= 0 ? sh : kShaderCount; break; }
+    case R_SCANLINES: *v = s_scanlines; break;
     case R_HD_MODE7: *v = s_hd_mode7 ? s_hd_mode7 - 1 : 0; break;
     case R_WIDE: *v = s_wide; break;
     case R_WIDE_HUD: *v = s_wide_hud; break;
@@ -1412,6 +1901,10 @@ static int MenuGet(void *ctx, const RecompRuntimeUiItem *item, int *v) {
     case R_AUDIO: *v = s_audio; break;
     case R_VOLUME: *v = s_volume; break;
     case R_PRACTICE: *v = s_practice; break;
+    case R_TOUCH: *v = s_touch_mode; break;
+    case R_TOUCH_SIZE: *v = s_touch_size; break;
+    case R_TOUCH_OPACITY: *v = s_touch_opacity; break;
+    case R_TOUCH_HAPTICS: *v = s_touch_haptics; break;
     case R_LEVEL: *v = s_sel_level; break;
     case R_INVUL: *v = s_sel_invul; break;
     default: return 0;
@@ -1432,8 +1925,12 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
     case R_SHADER:
         snprintf(s_shader, sizeof s_shader, "%s", v < kShaderCount ? kShaders[v][0] : s_shader_custom);
         ApplyVideoConfig();
-        if (s_gl.Reconfigure) s_gl.Reconfigure();
+#ifndef __ANDROID__
+        if (s_gl_on && s_gl.Reconfigure) { s_gl.Reconfigure(); ApplyShaderParams(); }
+#endif
+        ApplyGpuShader();
         break;
+    case R_SCANLINES: s_scanlines = v; break;
     case R_HD_MODE7: s_hd_mode7 = v ? v + 1 : 0; ApplyHdMode7(); break;
     case R_WIDE: s_wide = v; TlkWideEnable(s_wide != 0); SizeWindow(); break;
     case R_WIDE_HUD: s_wide_hud = v; break;
@@ -1446,6 +1943,10 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
         s_practice = v;
         if (s_practice) PrEnable();
         break;
+    case R_TOUCH: s_touch_mode = v; break;
+    case R_TOUCH_SIZE: s_touch_size = v; break;
+    case R_TOUCH_OPACITY: s_touch_opacity = v; break;
+    case R_TOUCH_HAPTICS: s_touch_haptics = v; break;
     case R_LEVEL: case R_INVUL:   /* not in the ini; 0 keeps this hint in place of "Saved" */
         if (r == R_LEVEL) s_sel_level = v;
         else s_sel_invul = v;
@@ -1460,8 +1961,11 @@ static int MenuSet(void *ctx, const RecompRuntimeUiItem *item, int v) {
 static int MenuEnabled(void *ctx, const RecompRuntimeUiItem *item) {
     (void)ctx;
     switch ((int)(item - s_rows)) {
-    case R_SHADER: return s_gl_on;
-    case R_ABOUT: return s_menu_gl;
+    case R_SHADER: return s_gl_on || s_gpu_shaders;
+    case R_SCANLINES: return !s_gl_on && !PresetOn();
+    case R_HD_MODE7: return !PresetOn();
+    case R_ABOUT: return s_menu_imgui;
+    case R_LOAD0: case R_LOAD0 + 1: case R_LOAD0 + 2: case R_LOAD0 + 3: return s_slot_loadable[item - s_rows - R_LOAD0];
     default: return 1;
     }
 }
@@ -1481,8 +1985,20 @@ static void MenuShown(void *ctx, int open) {
     s_key_wait = 0;
     s_about = 0;
     BindLabels();
-    if (open) { s_kbd_pad = 0; s_turbo_held = 0; TlkMenuImguiOpened(); }
-    else s_pad_hold = 1;
+    if (open) { s_kbd_pad = 0; s_turbo_held = 0; SlotLabels(); TlkMenuImguiOpened(); }
+    else {
+        s_pad_hold = 1;
+        s_touch_hold = s_finger_n > 0;
+    }
+}
+
+/* A Save states row: 1 when it loaded a slot, so the menu closes; a save keeps it open to show it saved. */
+static int SlotRow(int r, char *msg, size_t n) {
+    if (r < R_LOAD0) {
+        SaveSlot(r - R_SAVE0 + 1, msg, n);
+        return 0;
+    }
+    return LoadSlot(r - R_LOAD0 + 1, msg, n);
 }
 
 static int MenuRun(void *ctx, const RecompRuntimeUiItem *item) {
@@ -1493,6 +2009,13 @@ static int MenuRun(void *ctx, const RecompRuntimeUiItem *item) {
         s_key_wait = 1;
         BindLabels();
         return 0;
+    }
+    if (r >= R_SAVE0 && r < R_LOAD0 + kSlots) {
+        char msg[64];
+        if (!SlotRow(r, msg, sizeof msg)) { recomp_runtime_ui_set_status(s_ui, msg); return 0; }
+        CloseMenu();
+        Toast(msg);
+        return 1;
     }
     switch (r) {
     case R_START: PrStartLevel(s_sel_level); return 1;
@@ -1537,6 +2060,7 @@ static void MenuCreate(void) {
     }
     BindLabels();
     StartLabel();
+    SlotLabels();
     RecompRuntimeUiConfig c;
     memset(&c, 0, sizeof c);
     c.title = "The Lion King";
@@ -1552,6 +2076,9 @@ static void MenuCreate(void) {
     c.theme = "snes";
     c.accept_label = "Enter/A";
     c.back_label = "Esc/B";
+#ifdef __ANDROID__
+    c.presentation_flags = RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY;
+#endif
     s_ui = recomp_runtime_ui_create(&c);
     ApplyBackdrop();
 }
@@ -1562,18 +2089,109 @@ static void MenuOpenSection(int section) {
     for (int i = 0; i < section; i++) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_DOWN, 1, 0);
     recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
 }
-enum { kSectionLevel = 3, kSectionControls = 5, kSectionAbout = 7 };   /* Display, Graphics, Audio, Level select, Practice, Controls, System, About */
+/* A section's place in the menu: the menu lists sections in the order their first row comes in s_rows. */
+static int SectionOf(int row) {
+    int n = 0;
+    for (int i = 0; strcmp(s_rows[i].section, s_rows[row].section); i++) {
+        int first = 1;
+        for (int j = 0; j < i && first; j++) first = strcmp(s_rows[j].section, s_rows[i].section) != 0;
+        n += first;
+    }
+    return n;
+}
 
-/* Load a savestate during play (F5-F8, F9). */
+static void SlotLabels(void) {
+    for (int i = 0; i < kSlots; i++) {
+        char path[1100], what[48];
+        SlotPath(i + 1, path, sizeof path);
+        TlkSaveInfo info;
+        FILE *f = fopen(path, "rb");
+        if (f) fclose(f);
+        int who = tlk_saveinfo_check(path, TLK_BUILD_ID, &info);
+        s_slot_loadable[i] = f && who != TLK_SAVE_OTHER_BUILD;
+        if (!f) snprintf(what, sizeof what, "empty");
+        else if (who == TLK_SAVE_OTHER_BUILD) snprintf(what, sizeof what, "another build's");
+        else if (who == TLK_SAVE_NO_INFO) snprintf(what, sizeof what, "saved");
+        else {
+            time_t t = (time_t)info.saved_unix;
+            struct tm *lt = localtime(&t);
+            snprintf(what, sizeof what, "%s  %02d:%02d", info.level_name, lt ? lt->tm_hour : 0, lt ? lt->tm_min : 0);
+        }
+        snprintf(s_slot_label[i], sizeof s_slot_label[i], "Save %d:  %s", i + 1, what);
+        snprintf(s_slot_label[kSlots + i], sizeof s_slot_label[i], "Load %d:  %s", i + 1, what);
+    }
+}
+
+/* ── Autosave ──────────────────────────────────────────────────────────── */
+/* tlk_autosave.state, which the launcher's Continue loads: written on going to the background, on quitting,
+ * and every autosave_seconds of play. Only at a place a player would resume, so a new game left on its
+ * title keeps the last game's autosave. */
+static char s_autosave_path[1100];   /* empty: autosave off */
+static long s_autosave_played;       /* frames played since the last autosave or load */
+
+/* $0008: 0 or $8000 while loading, then 4 or 6 in play. The title and the attract demo count as no level. */
+static void AutosaveTrack(void) {
+    uint16_t st = Wram16(0x0008), lvl = Wram16(0x1FF9E);
+    int demo = (Wram16(0x1E03) & 0x8000) != 0;
+    if (st == 0 || st == 0x8000) { s_level_loading = 1; s_level_on = 0; }
+    if (st != 0 && st != 0x8000 && s_level_loading) { s_level_loading = 0; s_level_on = !demo && lvl != 0x0E; }
+}
+
+static int AutosaveSpot(void) { return s_level_on && s_macro_i >= s_macro_n; }
+
+/* After a state load: count from here, and take whether a level is on from the state's RAM. */
+static void AutosaveRestart(void) {
+    s_autosave_played = 0;
+    s_level_loading = 1;
+    s_level_on = 0;
+    AutosaveTrack();
+}
+
+static void Autosave(void) {
+    if (!s_autosave_path[0] || s_autosave_played == 0 || !AutosaveSpot()) return;
+    if (!SaveStateFiles(s_autosave_path)) { fprintf(stderr, "cannot write the autosave %s\n", s_autosave_path); return; }
+    printf("autosave=%s at_frame=%ld\n", s_autosave_path, frame);
+    s_autosave_played = 0;
+}
+
+static void AutosaveTick(void) {
+    AutosaveTrack();
+    if (s_level_on) s_autosave_played++;
+    if (s_autosave_seconds > 0 && s_autosave_played >= (long)(s_autosave_seconds * NTSC_FPS)) Autosave();
+}
+
+/* Load a savestate during play (F5-F8, F9): 1 loaded, 0 none or unreadable, -1 from another build. */
 static int LoadStateLive(const char *path) {
     uint32_t hf = 0;
+    if (!StateFromThisBuild(path)) return -1;
     if (!tlk_state_load(path, &hf)) return 0;
+    AutosaveRestart();
     TlkWideReset();
     if (input_path && !s_polled) frame = (long)hf;
     RecStop("a savestate was loaded (the recording replays only up to here)");
     audio_acc = 0;
     if (astream) SDL_ClearAudioStream(astream);
     return 1;
+}
+
+/* F1-F8 and the Save states rows. `msg` gets what happened, short enough for a toast. */
+static int SaveSlot(int slot, char *msg, size_t n) {
+    char path[1100];
+    SlotPath(slot, path, sizeof path);
+    int ok = SaveStateFiles(path);
+    snprintf(msg, n, ok ? "Saved slot %d" : "Slot %d: save failed", slot);
+    SlotLabels();
+    return ok;
+}
+static int LoadSlot(int slot, char *msg, size_t n) {
+    char path[1100];
+    SlotPath(slot, path, sizeof path);
+    int r = LoadStateLive(path);
+    if (r > 0) {
+        if (s_practice) PrAfterLoad(0);
+        snprintf(msg, n, "Loaded slot %d", slot);
+    } else snprintf(msg, n, r < 0 ? "Slot %d: from another build" : "Slot %d: no state", slot);
+    return r > 0;
 }
 
 static void HandleKey(const SDL_KeyboardEvent *ke) {
@@ -1592,7 +2210,7 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
         }
         RecompRuntimeUiInput in;
         if (k == SDLK_TAB) in = RECOMP_RUNTIME_UI_INPUT_TOGGLE;
-        else if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) in = RECOMP_RUNTIME_UI_INPUT_BACK;
+        else if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE || k == SDLK_AC_BACK) in = RECOMP_RUNTIME_UI_INPUT_BACK;
         else if (k == SDLK_UP) in = RECOMP_RUNTIME_UI_INPUT_UP;
         else if (k == SDLK_DOWN) in = RECOMP_RUNTIME_UI_INPUT_DOWN;
         else if (k == SDLK_LEFT) in = RECOMP_RUNTIME_UI_INPUT_LEFT;
@@ -1603,7 +2221,7 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
         return;
     }
     if (down && !ke->repeat) {
-        if (k == SDLK_ESCAPE || k == SDLK_TAB) { OpenMenu(); return; }
+        if (k == SDLK_ESCAPE || k == SDLK_TAB || k == SDLK_AC_BACK) { OpenMenu(); return; }
         if (k == SDLK_F11 || (k == SDLK_RETURN && (ke->mod & SDL_KMOD_ALT))) {
             s_fullscreen = !s_fullscreen;
             SDL_SetWindowFullscreen(win, s_fullscreen);
@@ -1612,23 +2230,15 @@ static void HandleKey(const SDL_KeyboardEvent *ke) {
         if (k == SDLK_F9 && s_practice) {
             char path[1100];
             PrRestartPath(path, sizeof path);
-            if (LoadStateLive(path)) { PrAfterLoad(1); Toast("Restart level"); }
+            if (LoadStateLive(path) > 0) { PrAfterLoad(1); Toast("Restart level"); }
             else Toast("No level start yet");
             return;
         }
         int fn = k >= SDLK_F1 && k <= SDLK_F8 ? (int)(k - SDLK_F1) : -1;
         if (fn >= 0) {
-            int load = fn >= 4 || (ke->mod & SDL_KMOD_SHIFT);
-            int slot = fn % 4 + 1;
-            char path[1100], msg[64];
-            SlotPath(slot, path, sizeof path);
-            if (load) {
-                if (LoadStateLive(path)) {
-                    if (s_practice) PrAfterLoad(0);
-                    snprintf(msg, sizeof msg, "Loaded slot %d", slot);
-                } else snprintf(msg, sizeof msg, "Slot %d: no state", slot);
-            } else
-                snprintf(msg, sizeof msg, tlk_state_save(path, (uint32_t)frame) ? "Saved slot %d" : "Slot %d: save failed", slot);
+            char msg[64];
+            if (fn >= 4 || (ke->mod & SDL_KMOD_SHIFT)) LoadSlot(fn % 4 + 1, msg, sizeof msg);
+            else SaveSlot(fn % 4 + 1, msg, sizeof msg);
             Toast(msg);
             return;
         }
@@ -1695,6 +2305,10 @@ static void HandleEvent(const SDL_Event *ev) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: HandleKey(&ev->key); break;
     case SDL_EVENT_WINDOW_FOCUS_LOST: s_kbd_pad = 0; s_turbo_held = 0; break;
+    case SDL_EVENT_FINGER_DOWN:
+    case SDL_EVENT_FINGER_MOTION:
+    case SDL_EVENT_FINGER_UP:
+    case SDL_EVENT_FINGER_CANCELED: HandleFinger(&ev->tfinger); break;
     default: break;
     }
 }
@@ -1730,6 +2344,19 @@ static void StPadEvent(SDL_GamepadButton b) {   /* button event without a device
     StPump();
 }
 
+/* A finger event at (x, y) in the window's pixels. */
+static void StFinger(SDL_EventType type, SDL_FingerID id, float x, float y) {
+    int dw, dh;
+    RenderOutputSize(&dw, &dh);
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = type;
+    ev.tfinger.fingerID = id;
+    ev.tfinger.x = x / (float)dw;
+    ev.tfinger.y = y / (float)dh;
+    HandleEvent(&ev);
+}
+
 static int RemapSelfTest(void) {
     /* Save/reload goes to a scratch ini so the player's settings are never touched. */
     static char st_ini[512];
@@ -1740,12 +2367,16 @@ static int RemapSelfTest(void) {
     snprintf(st_ini, sizeof st_ini, "%s/tlk_sdl_selftest.ini", tmp && *tmp ? tmp : "/tmp");
     s_cfg_path = st_ini;
     StCheck(!s_menu_open, "menu starts closed");
+    StTap(SDLK_AC_BACK);
+    StCheck(s_menu_open, "Android's Back opens the settings menu");
+    StTap(SDLK_AC_BACK);
+    StCheck(!s_menu_open, "Back again closes it");
     StKey(SDLK_Z, 1);
     StCheck(s_kbd_pad == 1u, "default Z presses B");
     StKey(SDLK_Z, 0);
     StTap(SDLK_TAB);
     StCheck(s_menu_open, "Tab opens the settings menu");
-    for (int i = 0; i < kSectionControls; i++) StTap(SDLK_DOWN);
+    for (int i = 0; i < SectionOf(R_BIND0); i++) StTap(SDLK_DOWN);
     StTap(SDLK_RETURN);
     StTap(SDLK_RETURN);
     StCheck(s_key_wait && s_key_sel == 0, "Controls opens on B, Enter waits for a key");
@@ -1861,6 +2492,184 @@ static int RemapSelfTest(void) {
     StTap(SDLK_ESCAPE);
     StCheck(!s_menu_open, "Esc twice backs out of System and closes");
 
+    /* The touch pad, with fingers on its buttons where this window lays them out. */
+    int touch_mode = s_touch_mode, touch_size = s_touch_size, touch_opacity = s_touch_opacity, touch_haptics = s_touch_haptics, dw, dh;
+    s_touch_mode = 1;
+    RenderOutputSize(&dw, &dh);
+    TlkTouchLayout tl;
+    TouchLayoutNow(&tl, dw, dh);
+    const TlkTouchButton *tb = NULL, *ts = NULL;
+    for (int i = 0; i < TLK_TOUCH_BUTTONS; i++) {
+        if (tl.buttons[i].bit == TLK_PAD_B) tb = &tl.buttons[i];
+        if (tl.buttons[i].bit == TLK_PAD_START) ts = &tl.buttons[i];
+    }
+    int ticks = s_haptic_ticks;
+    StFinger(SDL_EVENT_FINGER_DOWN, 1, tb->x, tb->y);
+    StCheck(TouchGameState() == TLK_PAD_B, "a finger on touch B presses B");
+    StFinger(SDL_EVENT_FINGER_MOTION, 1, tb->x + 1, tb->y);
+    StCheck(s_haptic_ticks == ticks + 1, "pressing B ticks once, and moving on it no more");
+    StFinger(SDL_EVENT_FINGER_MOTION, 1, ts->x, ts->y);
+    StCheck(TouchGameState() == TLK_PAD_START, "sliding it onto Start presses Start instead");
+    StCheck(s_haptic_ticks == ticks + 2, "sliding onto Start ticks again");
+    StFinger(SDL_EVENT_FINGER_UP, 1, ts->x, ts->y);
+    StCheck(TouchGameState() == 0, "lifting it presses nothing");
+    s_touch_haptics = 0;
+    StFinger(SDL_EVENT_FINGER_DOWN, 1, tb->x, tb->y);
+    StFinger(SDL_EVENT_FINGER_UP, 1, tb->x, tb->y);
+    StCheck(s_haptic_ticks == ticks + 2, "with touch_haptics off a press does not tick");
+    s_touch_haptics = 1;
+    MenuSet(NULL, &s_rows[R_TOUCH_HAPTICS], 0);
+    int shown_v = -1;
+    MenuGet(NULL, &s_rows[R_TOUCH_HAPTICS], &shown_v);
+    StCheck(!s_touch_haptics && shown_v == 0, "the Vibrate row sets and shows touch_haptics");
+    s_touch_haptics = 1;
+    StFinger(SDL_EVENT_FINGER_DOWN, 2, tl.dpad_x + tl.dpad_r, tl.dpad_y);
+    StFinger(SDL_EVENT_FINGER_MOTION, 2, tl.dpad_x + 4 * tl.dpad_r, tl.dpad_y);
+    StCheck(TouchGameState() == TLK_PAD_RIGHT, "a finger that slides off the d-pad keeps pressing right");
+    StFinger(SDL_EVENT_FINGER_CANCELED, 2, 0, 0);
+    StCheck(TouchGameState() == 0, "a cancelled finger presses nothing");
+    int imgui = s_menu_imgui;
+    s_menu_imgui = 0;   /* the menu drawn in the picture, which the pad drives */
+    StFinger(SDL_EVENT_FINGER_DOWN, 3, tl.menu_x, tl.menu_y);
+    StFinger(SDL_EVENT_FINGER_UP, 3, tl.menu_x, tl.menu_y);
+    StCheck(s_menu_open, "the touch menu button opens the menu");
+    StFinger(SDL_EVENT_FINGER_DOWN, 4, ts->x, ts->y);
+    StCheck(!s_menu_open, "touch Start closes it");
+    StCheck(TouchGameState() == 0, "touch Start still held after closing is not sent to the game");
+    StFinger(SDL_EVENT_FINGER_UP, 4, ts->x, ts->y);
+    TouchGameState();
+    StCheck(imgui, "the ImGui menu started on the SDL renderer");
+    s_menu_imgui = 1;   /* the ImGui menu, which takes taps */
+    OpenMenu();
+    StCheck(!TouchShown(), "the ImGui menu hides the touch pad");
+    StFinger(SDL_EVENT_FINGER_DOWN, 4, ts->x, ts->y);
+    StCheck(s_menu_open && TouchGameState() == 0, "a tap where Start was leaves the ImGui menu open");
+    CloseMenu();   /* as its Resume button does, under the finger */
+    StCheck(TouchGameState() == 0, "a finger that closed the ImGui menu is not sent to the game");
+    ticks = s_haptic_ticks;
+    StFinger(SDL_EVENT_FINGER_MOTION, 4, tb->x, tb->y);
+    StCheck(s_haptic_ticks == ticks, "nor does it tick, sliding onto another button");
+    StFinger(SDL_EVENT_FINGER_UP, 4, ts->x, ts->y);
+    s_menu_imgui = imgui;
+    TouchGameState();
+    StFinger(SDL_EVENT_FINGER_DOWN, 5, ts->x, ts->y);
+    StCheck(TouchGameState() == TLK_PAD_START, "after release, touch Start reaches the game again");
+    StFinger(SDL_EVENT_FINGER_UP, 5, ts->x, ts->y);
+    StFinger(SDL_EVENT_FINGER_DOWN, 6, tb->x, tb->y);
+    TouchReset();
+    StCheck(s_finger_n == 0 && s_touch_held == 0 && TouchGameState() == 0,
+            "TouchReset drops every finger and held button");
+    s_touch_mode = 2;
+    StFinger(SDL_EVENT_FINGER_DOWN, 7, tb->x, tb->y);
+    StCheck(TouchGameState() == 0, "with touch off a finger presses nothing");
+    StFinger(SDL_EVENT_FINGER_UP, 7, tb->x, tb->y);
+    s_touch_size = 150;
+    s_touch_opacity = 70;
+    s_touch_haptics = 0;
+    SaveConfig();
+    s_touch_mode = 0, s_touch_size = 100, s_touch_opacity = 40, s_touch_haptics = 1;
+    LoadConfig(s_cfg_path);
+    StCheck(s_touch_mode == 2 && s_touch_size == 150 && s_touch_opacity == 70 && !s_touch_haptics,
+            "touch settings were saved to the ini");
+    s_touch_mode = touch_mode, s_touch_size = touch_size, s_touch_opacity = touch_opacity, s_touch_haptics = touch_haptics;
+    TouchReset();
+
+    /* The picture's ini lines: scanlines and shader_param. */
+    {
+        int scanlines = s_scanlines, param_count = s_shader_param_count;
+        s_scanlines = 70;
+        s_shader_param_count = 1;
+        snprintf(s_shader_params[0].name, sizeof s_shader_params[0].name, "BEAM_MAX");
+        s_shader_params[0].value = 0.9f;
+        SaveConfig();
+        s_scanlines = 0;
+        s_shader_param_count = 0;
+        LoadConfig(s_cfg_path);
+        StCheck(s_scanlines == 70 && s_shader_param_count == 1 && !strcmp(s_shader_params[0].name, "BEAM_MAX")
+                && s_shader_params[0].value == 0.9f, "scanlines and shader_param were saved to the ini");
+        char ini[1100];
+        snprintf(ini, sizeof ini, "%s.selftest", s_cfg_path);
+        FILE *f = fopen(ini, "w");
+        if (f) {
+            fputs("scanlines = 150\nshader_param = MASK 0.2\nshader_param = broken\nshader_param = MASK 0.4\n", f);
+            fclose(f);
+        }
+        s_shader_param_count = 0;
+        LoadConfig(ini);
+        remove(ini);
+        StCheck(s_scanlines == 100, "scanlines over 100 reads as 100");
+        StCheck(s_shader_param_count == 1 && !strcmp(s_shader_params[0].name, "MASK") && s_shader_params[0].value == 0.4f,
+                "a repeated shader_param keeps the last value, and a line without a value is dropped");
+        s_scanlines = scanlines;
+        s_shader_param_count = param_count;
+        SaveConfig();
+    }
+
+#ifndef __ANDROID__
+    /* A preset on the OpenGL presenter turns the Scanlines and HD Mode 7 rows off. */
+    {
+        char shader[sizeof s_shader];
+        int gl_on = s_gl_on;
+        snprintf(shader, sizeof shader, "%s", s_shader);
+        s_gl_on = 1;
+        snprintf(s_shader, sizeof s_shader, "%s", kShaders[1][0]);
+        StCheck(!MenuEnabled(NULL, &s_rows[R_SCANLINES]) && !MenuEnabled(NULL, &s_rows[R_HD_MODE7]),
+                "a preset turns the Scanlines and HD Mode 7 rows off");
+        s_shader[0] = 0;
+        StCheck(MenuEnabled(NULL, &s_rows[R_HD_MODE7]), "without a preset the HD Mode 7 row is on");
+        s_gl_on = gl_on;
+        snprintf(s_shader, sizeof s_shader, "%s", shader);
+    }
+#endif
+
+    /* Save states rows, from sidecars written here: the emulator is not running, so nothing loads. */
+    {
+        char path[1100], msg[64];
+        TlkSaveInfo info;
+        memset(&info, 0, sizeof info);
+        info.level = 4;
+        snprintf(info.level_name, sizeof info.level_name, "Exile");
+        for (int i = 1; i <= kSlots; i++) {
+            SlotPath(i, path, sizeof path);
+            remove(path);
+            tlk_saveinfo_remove(path);
+            if (i == 1) continue;   /* empty */
+            FILE *f = fopen(path, "wb");
+            if (f) fclose(f);
+            snprintf(info.build, sizeof info.build, "%s", i == 3 ? "another" : TLK_BUILD_ID);
+            if (i != 4) tlk_saveinfo_write(path, &info);   /* 4: no sidecar, as an earlier build leaves it */
+        }
+        SlotLabels();
+        StCheck(!strcmp(s_slot_label[0], "Save 1:  empty") && !s_slot_loadable[0], "an empty slot says so and can't be loaded");
+        StCheck(!strncmp(s_slot_label[kSlots + 1], "Load 2:  Exile  ", 16) && s_slot_loadable[1],
+                "a slot from this build names its level and loads");
+        StCheck(!strcmp(s_slot_label[kSlots + 2], "Load 3:  another build's") && !s_slot_loadable[2],
+                "a slot from another build is greyed out");
+        StCheck(!strcmp(s_slot_label[kSlots + 3], "Load 4:  saved") && s_slot_loadable[3], "a slot with no sidecar loads");
+        StCheck(!MenuEnabled(NULL, &s_rows[R_LOAD0 + 2]) && MenuEnabled(NULL, &s_rows[R_LOAD0 + 1]), "the menu greys out what can't load");
+        StCheck(!LoadSlot(3, msg, sizeof msg) && !strcmp(msg, "Slot 3: from another build"), "loading another build's slot is refused");
+        StCheck(!LoadSlot(1, msg, sizeof msg) && !strcmp(msg, "Slot 1: no state"), "loading an empty slot is refused");
+        StCheck(!SlotRow(R_LOAD0 + 2, msg, sizeof msg) && !strcmp(msg, "Slot 3: from another build"),
+                "the Load 3 row loads slot 3, and reports it didn't when it can't");
+        SlotPath(2, path, sizeof path);
+        tlk_saveinfo_remove(path);
+        SlotRow(R_SAVE0, msg, sizeof msg);
+        StCheck(!strcmp(s_slot_label[1], "Save 2:  saved"), "a Save row refreshes every slot's label");
+        for (int i = 1; i <= kSlots; i++) {
+            SlotPath(i, path, sizeof path);
+            remove(path);
+            tlk_saveinfo_remove(path);
+        }
+        int autosave_seconds = s_autosave_seconds;
+        s_autosave_seconds = 25;
+        SaveConfig();
+        s_autosave_seconds = 0;
+        LoadConfig(s_cfg_path);
+        StCheck(s_autosave_seconds == 25, "autosave_seconds was saved to the ini");
+        s_autosave_seconds = autosave_seconds;
+        StCheck(SectionOf(R_SAVE0) == 0, "Save states is the menu's first section");
+    }
+
     /* Hotplug and live state with an SDL virtual gamepad. */
     SDL_VirtualJoystickDesc desc;
     SDL_INIT_INTERFACE(&desc);
@@ -1941,8 +2750,8 @@ static void Usage(void) {
         "               [--input tape | --input-polled tape | --input-raw rec] [--no-record] [--lle] [--interp-targets f]\n"
         "               [--frames N] [--hash-at a,b,..] [--dump-png path] [--no-pace]\n"
         "               [--no-audio] [--wav path [--wav-seconds S]]\n"
-        "               [--save-at N state] [--load state] [--load-at N state]\n"
-        "               [--menu-at N [--menu-page controls|level|about]] [--selftest-remap]\n"
+        "               [--save-at N state] [--load state] [--load-at N state] [--autosave state] [--device name] [--build-id]\n"
+        "               [--menu-at N [--menu-page saves|controls|level|about]] [--selftest-remap]\n"
         "               [--speedrun off|practice] [--practice-level N [--invul N]] [--dump-window path]\n"
         "               [--list-drivers]\n"
         "Without --rom (or rom= in the ini) the .sfc/.smc files next to the binary and in the\n"
@@ -2126,6 +2935,11 @@ int main(int argc, char **argv) {
     const char *hash_at = NULL;
     const char *cfg_path = getenv("TLK_SDL_INI") ? getenv("TLK_SDL_INI") : "tlk_sdl.ini";
     const char *save_path = NULL, *load_path = NULL, *load_at_path = NULL;
+#ifdef __ANDROID__
+    /* GameActivity kills the process once main returns, so stdout never gets exit()'s flush.
+     * Line buffering keeps a proof run's hashes. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+#endif
     long frames = 0, save_at = -1, load_at = -1, menu_at = -1;
     int practice_level = -1, menu_shown = 0;
     const char *dump_window = NULL;
@@ -2134,6 +2948,11 @@ int main(int argc, char **argv) {
     double wav_seconds = 10.0;
 
     int selftest = 0, menu_page = -1;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--build-id")) {
+            printf("%s %s\n", TLK_BUILD_ID, TLK_BUILD_VERSION);
+            return 0;
+        }
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--list-drivers")) {
             int v = SDL_GetVersion();
@@ -2185,11 +3004,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--save-at") && v && i + 2 < argc) { save_at = atol(v); save_path = argv[i + 2]; i += 2; }
         else if (!strcmp(a, "--load-at") && v && i + 2 < argc) { load_at = atol(v); load_at_path = argv[i + 2]; i += 2; }
         else if (!strcmp(a, "--load") && v) { load_path = v; i++; }
+        else if (!strcmp(a, "--device") && v) { snprintf(s_device, sizeof s_device, "%s", v); i++; }
+        else if (!strcmp(a, "--autosave") && v) { snprintf(s_autosave_path, sizeof s_autosave_path, "%s", v); i++; }
         else if (!strcmp(a, "--menu-at") && v) { menu_at = atol(v); i++; }
         else if (!strcmp(a, "--menu-page") && v) {
-            menu_page = !strcmp(v, "controls") || !strcmp(v, "keys") ? kSectionControls
-                      : !strcmp(v, "level") ? kSectionLevel
-                      : !strcmp(v, "about") ? kSectionAbout : -1;
+            menu_page = !strcmp(v, "saves") ? SectionOf(R_SAVE0)
+                      : !strcmp(v, "controls") || !strcmp(v, "keys") ? SectionOf(R_BIND0)
+                      : !strcmp(v, "level") ? SectionOf(R_LEVEL)
+                      : !strcmp(v, "about") ? SectionOf(R_ABOUT) : -1;
             i++;
         }
         else if (!strcmp(a, "--selftest-remap")) selftest = 1;
@@ -2208,6 +3030,10 @@ int main(int argc, char **argv) {
     if (s_volume < 0) s_volume = 0;
     if (s_volume > 100) s_volume = 100;
 
+#ifdef __ANDROID__
+    /* The loop pauses itself in the background (WatchLifecycle), at a frame boundary. */
+    SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 3;
@@ -2216,6 +3042,12 @@ int main(int argc, char **argv) {
      * game runs silent. */
     int audio_ok = !s_audio || SDL_InitSubSystem(SDL_INIT_AUDIO);
     if (!audio_ok) fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError());
+    SDL_AddEventWatch(WatchLifecycle, NULL);
+    {
+        int touch_devices = 0;
+        SDL_free(SDL_GetTouchDevices(&touch_devices));
+        s_touchscreen = touch_devices > 0;
+    }
 
     size_t rom_size = 0;
     char err[256], found[2048];
@@ -2289,16 +3121,25 @@ int main(int argc, char **argv) {
     s_snes_ready = 1;
 
     frame = 0;
+    if (!s_autosave_path[0] && interactive && s_autosave_seconds > 0)
+        SidePath("tlk_autosave.state", s_autosave_path, sizeof s_autosave_path);
     if (load_path) {
         uint32_t hf = 0;
-        if (!tlk_state_load(load_path, &hf)) { fprintf(stderr, "cannot load state %s\n", load_path); return 8; }
-        frame = (long)hf;
-        printf("loaded_state=%s at_frame=%ld\n", load_path, frame);
+        if (StateFromThisBuild(load_path) && tlk_state_load(load_path, &hf)) {
+            frame = (long)hf;
+            AutosaveRestart();
+            printf("loaded_state=%s at_frame=%ld\n", load_path, frame);
+        } else {
+            fprintf(stderr, "cannot load state %s\n", load_path);
+            if (!interactive) return 8;
+            load_path = NULL;   /* a player gets a new game, and the power-on state below */
+            Toast("Can't resume: new game");
+        }
     }
     if (!load_path && (interactive || practice_level >= 0)) {   /* power-on state for level select */
         char boot[1100];
         PrBootPath(boot, sizeof boot);
-        tlk_state_save(boot, 0);
+        SaveStateFiles(boot);
     }
     if (s_practice) PrEnable();
     /* --frames runs are scripted proof runs: they must not clobber a player's recording. */
@@ -2327,6 +3168,17 @@ int main(int argc, char **argv) {
         while (SDL_PollEvent(&ev)) HandleEvent(&ev);
         if (!running) break;
 
+        if (SDL_GetAtomicInt(&s_background)) {
+            Autosave();   /* Android may end the process from here on */
+            if (astream) SDL_PauseAudioStreamDevice(astream);
+            while (running && SDL_GetAtomicInt(&s_background))
+                if (SDL_WaitEventTimeout(&ev, 100)) HandleEvent(&ev);
+            if (astream) { SDL_ClearAudioStream(astream); SDL_ResumeAudioStreamDevice(astream); }
+            TouchReset();
+            deadline = SDL_GetTicksNS();
+            continue;
+        }
+
         if (s_menu_open) {   /* paused: keep presenting the last frame plus the overlay */
             Present();
             if (dump_window && menu_shown) { DumpWindow(dump_window); running = 0; }   /* --menu-at screenshots */
@@ -2337,7 +3189,7 @@ int main(int argc, char **argv) {
         int macro = s_macro_i < s_macro_n;   /* level select: fast-forward its input */
         uint32_t pad = macro ? s_macro[s_macro_i++]
                      : input_path ? (s_polled ? TapePolled() : TapeFrame(frame))
-                                  : (uint32_t)(s_kbd_pad | GamepadState());
+                                  : (uint32_t)(s_kbd_pad | GamepadState() | TouchGameState());
         if (s_rec) {
             uint8_t b[2] = { (uint8_t)pad, (uint8_t)(pad >> 8) };
             fwrite(b, 1, 2, s_rec);
@@ -2350,16 +3202,18 @@ int main(int argc, char **argv) {
         TlkWideEndFrame(s_pixels);
         frame++;
         if (s_practice) PracticeFrame((uint16_t)pad);
+        AutosaveTick();
         s_polls_frame = 0;
         if (g_fail) { fprintf(stderr, "runtime failure (g_fail) at frame %ld\n", frame); break; }
         if (save_path && frame == save_at) {
-            if (!tlk_state_save(save_path, (uint32_t)frame)) { fprintf(stderr, "cannot save state %s\n", save_path); return 8; }
+            if (!SaveStateFiles(save_path)) { fprintf(stderr, "cannot save state %s\n", save_path); return 8; }
             printf("saved_state=%s at_frame=%ld\n", save_path, frame);
         }
         if (load_at_path && frame == load_at) {
             uint32_t hf = 0;
-            if (!tlk_state_load(load_at_path, &hf)) { fprintf(stderr, "cannot load state %s\n", load_at_path); return 8; }
+            if (!StateFromThisBuild(load_at_path) || !tlk_state_load(load_at_path, &hf)) { fprintf(stderr, "cannot load state %s\n", load_at_path); return 8; }
             TlkWideReset();
+            AutosaveRestart();
             printf("loaded_state=%s at_frame=%ld -> %u\n", load_at_path, frame, hf);
             frame = (long)hf;
             if (s_practice) PrAfterLoad(0);
@@ -2369,7 +3223,7 @@ int main(int argc, char **argv) {
         if (practice_level >= 0) { PrStartLevel(practice_level % 14); practice_level = -1; }
         if (menu_at >= 0 && frame == menu_at) {
             if (menu_page >= 0) MenuOpenSection(menu_page);
-            if (menu_page == kSectionAbout) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
+            if (menu_page == SectionOf(R_ABOUT)) recomp_runtime_ui_handle_input(s_ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
             else OpenMenu();
             menu_shown = 1;
             menu_at = -1;
@@ -2440,6 +3294,7 @@ int main(int argc, char **argv) {
             else if (now - deadline > 5 * period_ns) { deadline = now; late_resyncs++; }
         }
     }
+    if (!g_fail) Autosave();
     RecStop("session ended");
     double wall = (double)(SDL_GetTicksNS() - t_start) / 1e9;
 
@@ -2460,9 +3315,12 @@ int main(int argc, char **argv) {
     }
     if (astream) SDL_DestroyAudioStream(astream);
     if (s_pad) SDL_CloseGamepad(s_pad);
+    if (s_haptic) SDL_CloseHaptic(s_haptic);
     TlkMenuImguiShutdown();
     recomp_runtime_ui_destroy(s_ui);
     if (tex) SDL_DestroyTexture(tex);
+    if (s_scan_tex) SDL_DestroyTexture(s_scan_tex);
+    TlkGpuShaderQuit();
     if (ren) SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();

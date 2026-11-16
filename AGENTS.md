@@ -112,11 +112,15 @@ The full list, commands and pass strings are in `docs/VERIFYING.md`. Short form,
 | `scripts/check_idle_lle.sh` | IDLE MATCH |
 | `scripts/check_native_decomp.sh 3000` | IDENTICAL |
 | save f3000 / load in new process / f6000 | `946033bd10683657` |
+| `cd build && ctest` | `100% tests passed` |
+| `scripts/check_state_resume.sh build/playtapes/l05_random.tape 9000 600=Title,2 1450=Hakuna,8 4000=Hakuna,6` | RESUME MATCH |
 | TAS sync via `tools/ram_sync_compare.py` | 6987M 36,904, 6781M 37,093, 4735M 38,870 |
 | `scripts/check_allbugs.sh` (~13 min) | ALLBUGS PASS |
 | `scripts/check_exit_mx.py` | 0 WRONG |
 | `SDL_VIDEO_DRIVER=dummy build/tlk_sdl --rom R --no-audio --selftest-remap` | PASS (0 failed). Under Xvfb pad events don't arrive and it fails |
 | `python3 -m pytest -q tools/tests` | no failures (needs the submodule checked out) |
+| `python3 -m pytest -q sync/tests` | no failures |
+| `scripts/check_cross_device_state.sh` (phone on adb, same commit's APK) | CROSS-DEVICE MATCH |
 | run `tlk_sdl` and look at the window | right picture |
 
 `build/tapes/`, `build/playtapes/` and `build-host/out/sync/` are local (gitignored) and regenerated from your own
