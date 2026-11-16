@@ -1764,7 +1764,7 @@ static char s_start_label[48];
 #define SAVE_KEYS NULL
 #define LOAD_KEYS NULL
 #define TOUCH_AUTO "Auto: shown while no gamepad is connected."
-#define SCANLINES_DESC "Dark gaps between the game's lines, percent. 0 is off. Off while a shader is on."
+#define SCANLINES_DESC "Gaps between lines, percent; 0 is off. Off while a shader is on."
 #define SHADER_DESC "Picture filters. PVM looks like a Sony Trinitron monitor."
 #else
 #define SAVE_KEYS "Also F1-F4."

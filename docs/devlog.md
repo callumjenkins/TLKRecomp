@@ -2852,3 +2852,25 @@ Not run on a phone: none was on adb. The desktop runs the same SPIR-V through Vu
 host code, not the phone's driver. HD Mode 7 hands every preset a taller texture, so scanline presets draw HD lines, as
 they already did on the GL path. On the SDL path a `.glslp` of your own named like a bundled preset runs the bundled
 one.
+
+## Task PRESET: what a preset gets
+
+Three choices for presets on the picture (owner's call, 2026-11-16):
+
+- the scanline overlay doesn't draw under a preset, which draws its own lines;
+- a preset gets the native 224 lines, not HD Mode 7's taller texture, on both presenters;
+- an ini `shader =` path that isn't a bundled one but matches a bundled preset by file name runs the bundled preset
+  on the SDL path, and says so: "Bundled shader runs, not yours" on screen, the path in the log.
+
+The Scanlines and HD Mode 7 rows grey out while a preset is on. `--selftest-remap` checks both rows on the OpenGL
+presenter, with a preset and without one.
+
+```
+ctest 9/9; remap self-test PASS (0 failed)
+scripts/compare_modes.sh 600 3000                                  MATCH (57ccb8d5, c897f389)
+scripts/build_android.sh                                           BUILD SUCCESSFUL, build 7f25d1784775-lp64le
+```
+
+Checked on the Fold 7 over adb: PVM draws the title with no overlay over it, and the Graphics page shows Scanlines
+and HD Mode 7 greyed out with their notes. The phone's Scanlines note was shortened to fit the row. The states saved
+by the earlier build show as "another build's", as the build id intends.
