@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds The Lion King for Linux in the release container and for macOS on a Mac, then publishes both to a gameshelf library, where
-# each starts through tlk-play so its saves sync.
+# Builds The Lion King for Linux in the release container and for macOS on a Mac, then publishes both to a gameshelf
+# library, where each starts through tlk-play so its saves sync.
 #
 #   scripts/publish-gameshelf.sh LIBRARY ROM
 #
@@ -24,7 +24,8 @@ if [ "$(sha1sum "$rom" | cut -d' ' -f1)" != e5319132495fd34d03f141962d9d6e3d76fe
 fi
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+remote=
+trap 'rm -rf "$work"; [ -z "$remote" ] || ssh "$mac" "rm -rf '"'"'$remote'"'"'"' EXIT
 
 # Stages one platform's build, from the folder holding tlk_sdl and assets/.
 stage() {
@@ -46,6 +47,7 @@ JSON
     { tail -20 "$work/linux.log" >&2; exit 1; }
 tar -C "$work" -xzf "$here/dist/TLKRecomp-linux-x86_64.tar.gz"
 linux_id=$("$work/TLKRecomp-linux-x86_64/tlk_sdl" --build-id | cut -d' ' -f1)
+[ -n "$linux_id" ] || { echo "The Linux build gave no build id." >&2; exit 1; }
 stage "$work/TLKRecomp-linux-x86_64" "$work/linux"
 
 if [ -n "$mac" ]; then
@@ -57,7 +59,6 @@ if [ -n "$mac" ]; then
     scp -q "$mac:$remote/dist/TLKRecomp-macos-arm64.zip" "$work/"
     mac_id=$(ssh "$mac" "unzip -q -o '$remote/dist/TLKRecomp-macos-arm64.zip' -d '$remote/check' &&
         '$remote/check/TLKRecomp-macos-arm64/tlk_sdl' --build-id" | cut -d' ' -f1)
-    ssh "$mac" "rm -rf '$remote'"
     if [ "$mac_id" != "$linux_id" ]; then
         echo "The Mac build is $mac_id and the Linux build $linux_id, so saves wouldn't move between them." >&2
         exit 1
