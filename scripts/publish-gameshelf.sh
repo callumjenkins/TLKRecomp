@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds The Lion King for Linux here and for macOS on a Mac, then publishes both to a gameshelf library, where
+# Builds The Lion King for Linux in the release container and for macOS on a Mac, then publishes both to a gameshelf library, where
 # each starts through tlk-play so its saves sync.
 #
 #   scripts/publish-gameshelf.sh LIBRARY ROM
@@ -41,7 +41,9 @@ stage() {
 JSON
 }
 
-sh "$here/scripts/package.sh" > "$work/linux.log"
+# The release container's older glibc runs on any current distribution, and has every library SDL3 builds against.
+"$here/scripts/linux_container.sh" sh scripts/package.sh -b build-gameshelf > "$work/linux.log" 2>&1 ||
+    { tail -20 "$work/linux.log" >&2; exit 1; }
 tar -C "$work" -xzf "$here/dist/TLKRecomp-linux-x86_64.tar.gz"
 linux_id=$("$work/TLKRecomp-linux-x86_64/tlk_sdl" --build-id | cut -d' ' -f1)
 stage "$work/TLKRecomp-linux-x86_64" "$work/linux"
