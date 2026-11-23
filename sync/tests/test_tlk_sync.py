@@ -1,9 +1,12 @@
 import http.server
 import json
+import os
+import signal
 import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -68,17 +71,62 @@ def test_tlk_play_loads_the_laptops_autosave_into_tlk_autosave(tmp_path, fake_sd
     store.put("tlk_autosave@cj-cos-laptop", make_save(300, b"from the laptop"))
     saves = tmp_path / "saves"
     loaded = []
-    real_run = tlk_sync.subprocess.run
+    real_popen = tlk_sync.subprocess.Popen
 
-    def run(args: list[str], *a: object, **k: object) -> subprocess.CompletedProcess:
+    def popen(args: list[str], *a: object, **k: object) -> subprocess.Popen:
         if "--load" in args:
             loaded.append((saves / "tlk_autosave.state").read_bytes())
-        return real_run(args, *a, **k)
+        return real_popen(args, *a, **k)
 
-    monkeypatch.setattr(tlk_sync.subprocess, "run", run)
+    monkeypatch.setattr(tlk_sync.subprocess, "Popen", popen)
     tlk_sync.play({"store": str(tmp_path / "store"), "device": "pc", "tlk_sdl": str(fake_sdl)}, saves, False, [],
                   echo=lambda _: None)
     assert loaded == [b"from the laptop"]
+
+
+def test_sigterm_ends_the_game_then_pushes(tmp_path):
+    """A launcher stops tlk-play with SIGTERM, which has to reach tlk_sdl and still push its autosave."""
+    sdl = tmp_path / "tlk_sdl"
+    sdl.write_text(textwrap.dedent(f"""\
+        #!{sys.executable}
+        import hashlib, json, os, signal, sys, time
+        args = sys.argv[1:]
+        if args == ["--build-id"]:
+            print("{BUILD} v0"); sys.exit(0)
+        auto = args[args.index("--autosave") + 1]
+
+        def quit(*_):
+            state = b"stopped by a launcher"
+            open(auto, "wb").write(state)
+            info = {{"build": "{BUILD}", "saved_unix": 6000, "device": "tv",
+                     "state_sha256": hashlib.sha256(state).hexdigest()}}
+            open(auto[:-len(".state")] + ".json", "w").write(json.dumps(info))
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, quit)
+        open({str(tmp_path / "pid")!r}, "w").write(str(os.getpid()))
+        time.sleep(60)
+        """))
+    sdl.chmod(0o755)
+    config = tmp_path / "config" / "tlk-recomp"
+    config.mkdir(parents=True)
+    (config / "sync.json").write_text(json.dumps({"store": str(tmp_path / "store"), "device": "tv",
+                                                  "tlk_sdl": str(sdl)}))
+    play = subprocess.Popen([sys.executable, str(Path(tlk_sync.__file__)), "play", "--new",
+                             "--saves", str(tmp_path / "saves")],
+                            env={**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "config")})
+    pid_file = tmp_path / "pid"
+    deadline = time.monotonic() + 10
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    game = int(pid_file.read_text())
+
+    play.send_signal(signal.SIGTERM)
+    assert play.wait(timeout=10) == 0
+    with pytest.raises(ProcessLookupError):
+        os.kill(game, 0)
+    pushed = tlk_saves.unpack(tlk_saves.DirStore(tmp_path / "store").get("tlk_autosave@tv"))
+    assert pushed[0] == b"stopped by a launcher"
 
 
 def test_tlk_play_new_starts_at_the_title(tmp_path, fake_sdl):

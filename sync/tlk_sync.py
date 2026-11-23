@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -145,7 +146,13 @@ def play(cfg: dict, saves: Path, new: bool, extra: list[str], echo: Callable[[st
     args = [tlk_sdl, "--config", str(ini), "--device", device, "--autosave", str(autosave)]
     if not new and autosave.exists():
         args += ["--load", str(autosave)]
-    code = subprocess.run(args + extra).returncode
+    game = subprocess.Popen(args + extra)
+    # A launcher stopping tlk-play stops the game the same way, so it saves as it quits and the push below runs.
+    previous = signal.signal(signal.SIGTERM, lambda *_: game.terminate())
+    try:
+        code = game.wait()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     if store is not None:
         for line in push(store, saves, device).lines():
             echo(line)
