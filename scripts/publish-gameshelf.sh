@@ -42,7 +42,7 @@ stage() {
 JSON
 }
 
-# The release container's older glibc runs on any current distribution, and has every library SDL3 builds against.
+# The release container's build runs on any current distribution.
 "$here/scripts/linux_container.sh" sh scripts/package.sh -b build-gameshelf > "$work/linux.log" 2>&1 ||
     { tail -20 "$work/linux.log" >&2; exit 1; }
 tar -C "$work" -xzf "$here/dist/TLKRecomp-linux-x86_64.tar.gz"
@@ -52,7 +52,7 @@ stage "$work/TLKRecomp-linux-x86_64" "$work/linux"
 
 if [ -n "$mac" ]; then
     remote=$(ssh "$mac" 'mktemp -d /tmp/tlk-build.XXXXXX')
-    # The generated code, the submodules, and the ROM aren't in git, so the tree goes across as it is.
+    # git archive would leave out the generated code, the submodules, and the ROM, so the tree goes across as it is.
     rsync -a --exclude='/build*' --exclude=/.git --exclude=/android --exclude=/tapes --exclude=/dist \
         --exclude=__pycache__ "$here/" "$mac:$remote/"
     ssh "$mac" "cd '$remote' && PATH=/opt/homebrew/bin:\$PATH sh scripts/package_mac.sh" > "$work/mac.log"
