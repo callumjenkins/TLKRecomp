@@ -77,7 +77,10 @@ Gamepad: any controller SDL knows. Buttons by position: bottom = B,
 right = A, left = Y, top = X, shoulders/triggers = L/R, d-pad or left
 stick to move, Start/Back = Start/Select. Guide (or Back+Start) opens the
 menu; d-pad moves, A selects, B goes back, Start closes. Pads can be
-plugged in while playing.
+plugged in while playing. macOS has no driver for third-party Xbox
+pads, and the macOS build reaches one of them itself: the Razer
+Wolverine V3 Pro on its 2.4 GHz dongle. It works only while Steam is
+closed, because Steam holds such a pad while it runs.
 
 Settings menu: Up/Down pick a section, Enter opens it, Left/Right
 change a value, Esc goes back. Display, Graphics (shader, smoothing,

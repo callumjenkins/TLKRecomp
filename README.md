@@ -310,9 +310,10 @@ compiled into `tlk_sdl` and, when no `assets/` folder sits next to it, unpacked 
 (`%APPDATA%\TLKRecomp`). `cmake --install build --prefix DIR` installs `bin/tlk_sdl` and the same notes.
 
 `scripts/package_mac.sh` builds `dist/TLKRecomp-macos-arm64.dmg` (TLKRecomp.app) and a `.zip` with the bare binary on
-a Mac (Xcode command line tools, cmake, ninja, Python 3, Rust for the generator). Started from Finder the app runs in
-`/`, so `tlk_sdl` keeps its ini and saves in `~/Library/Application Support/TLKRecomp` (any time the current directory
-is not writable). It has been built and run on one Apple Silicon MacBook; it is not notarized and has not been run
+a Mac (Xcode command line tools, cmake, ninja, libusb, Python 3, Rust for the generator). It patches SDL with
+`packaging/sdl3-macos-gip.patch` so the Razer Wolverine V3 Pro's 2.4 GHz dongle works through libusb, which is
+linked in statically. Started from Finder the app runs in `/`, so `tlk_sdl` keeps its ini and saves in
+`~/Library/Application Support/TLKRecomp` (any time the current directory is not writable). It has been built and run on one Apple Silicon MacBook; it is not notarized and has not been run
 through the comparison gates. The icon is original art (`tools/make_icon.py`).
 
 `scripts/release.sh -r ROM` builds the Linux and Windows packages and writes `dist/SHA256SUMS`. Before packing, it

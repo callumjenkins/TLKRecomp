@@ -23,7 +23,30 @@ DIST="$ROOT/dist"
 STAGE="$DIST/stage-mac"
 PKG="$DIST/$NAME"
 
-cmake -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DTLK_STATIC_SDL=ON
+# SDL gets packaging/sdl3-macos-gip.patch, so a third-party Xbox One controller, which macOS has no driver for,
+# works through libusb. libusb links in statically, so players still need nothing installed.
+LIBUSB=$(brew --prefix libusb 2>/dev/null || true)
+[ -f "$LIBUSB/lib/libusb-1.0.a" ] || { echo "Install libusb first: brew install libusb" >&2; exit 1; }
+RUNNER="$ROOT/snesrecomp/runner/runner.cmake"
+SDL_VERSION=$(sed -n 's/^set(SNESRECOMP_SDL3_FETCH_VERSION "\([^"]*\)".*/\1/p' "$RUNNER")
+SDL_SHA256=$(sed -n '/^set(SNESRECOMP_SDL3_FETCH_SHA256/{n;s/^ *"\([0-9a-f]*\)".*/\1/p;}' "$RUNNER")
+[ -n "$SDL_VERSION" ] && [ -n "$SDL_SHA256" ] || { echo "No SDL version or sha256 in $RUNNER" >&2; exit 1; }
+SDL_SRC="$(mkdir -p "$BUILD" && cd "$BUILD" && pwd)/sdl3-gip"
+SDL_STAMP="$SDL_VERSION $(shasum -a 256 "$ROOT/packaging/sdl3-macos-gip.patch" | cut -d' ' -f1)"
+if [ "$(cat "$SDL_SRC/.stamp" 2>/dev/null)" != "$SDL_STAMP" ]; then
+    rm -rf "$SDL_SRC"
+    mkdir -p "$SDL_SRC"
+    curl -sSfL --http1.1 -o "$BUILD/SDL3.tar.gz" \
+        "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz"
+    echo "$SDL_SHA256  $BUILD/SDL3.tar.gz" | shasum -a 256 -c - >/dev/null
+    tar -xzf "$BUILD/SDL3.tar.gz" -C "$SDL_SRC" --strip-components 1
+    patch -s -p1 -d "$SDL_SRC" < "$ROOT/packaging/sdl3-macos-gip.patch"
+    echo "$SDL_STAMP" > "$SDL_SRC/.stamp"
+fi
+
+cmake -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DTLK_STATIC_SDL=ON \
+    -DSNESRECOMP_SDL3_SOURCE_DIR="$SDL_SRC" -DSDL_HIDAPI_LIBUSB_SHARED=OFF \
+    -DLibUSB_LIBRARY="$LIBUSB/lib/libusb-1.0.a" -DLibUSB_INCLUDE_PATH="$LIBUSB/include/libusb-1.0"
 cmake --build "$BUILD" --target tlk_sdl -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 rm -rf "$STAGE" "$PKG"
 cmake --install "$BUILD" --prefix "$STAGE"
