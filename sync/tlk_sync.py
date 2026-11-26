@@ -96,11 +96,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("command", choices=["play", "pull", "push", "status"])
     ap.add_argument("--new", action="store_true", help="play: start at the title, not the newest autosave")
     ap.add_argument("--saves", type=Path, default=DATA / "saves")
-    ap.add_argument("extra", nargs="*", help="play: options passed on to tlk_sdl, after --")
-    args = ap.parse_args(argv)
+    # Split by hand: before 3.12, argparse rejects what follows "--" once an option sits between it and the command,
+    # and the Mac's python3 is 3.9.
+    argv = sys.argv[1:] if argv is None else argv
+    own, extra = (argv[:argv.index("--")], argv[argv.index("--") + 1:]) if "--" in argv else (argv, [])
+    args = ap.parse_args(own)
     cfg = load_config()
     if args.command == "play":
-        return play(cfg, args.saves, args.new, args.extra, echo=_tell)
+        return play(cfg, args.saves, args.new, extra, echo=_tell)
     if not cfg.get("store"):
         print(f"no store in {CONFIG}", file=sys.stderr)
         return 2

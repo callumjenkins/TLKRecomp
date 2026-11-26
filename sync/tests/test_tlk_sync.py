@@ -137,6 +137,21 @@ def test_tlk_play_new_starts_at_the_title(tmp_path, fake_sdl):
     assert "--load" not in args and args[-2:] == ["--scale", "3"]
 
 
+@pytest.mark.parametrize("own, new", [
+    pytest.param(["--saves", "SAVES"], False, id="saves"),
+    pytest.param(["--new"], True, id="new"),
+    pytest.param([], False, id="nothing"),
+])
+def test_play_hands_tlk_sdl_everything_after_the_separator(tmp_path, monkeypatch, own, new):
+    monkeypatch.setattr(tlk_sync, "CONFIG", tmp_path / "sync.json")
+    calls = []
+    monkeypatch.setattr(tlk_sync, "play", lambda _cfg, saves, new, extra, echo: calls.append((saves, new, extra)) or 0)
+    own = [str(tmp_path / "saves") if arg == "SAVES" else arg for arg in own]
+    assert tlk_sync.main(["play", *own, "--", "--rom", "Lion King, The (USA).sfc", "--fullscreen"]) == 0
+    saves = tmp_path / "saves" if "--saves" in own else tlk_sync.DATA / "saves"
+    assert calls == [(saves, new, ["--rom", "Lion King, The (USA).sfc", "--fullscreen"])]
+
+
 def test_tlk_play_writes_a_60_second_autosave_ini_once(tmp_path, fake_sdl):
     saves = tmp_path / "saves"
     tlk_sync.play({"tlk_sdl": str(fake_sdl), "device": "pc"}, saves, True, [], echo=lambda _: None)
