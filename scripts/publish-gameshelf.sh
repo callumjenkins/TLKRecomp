@@ -55,7 +55,8 @@ if [ -n "$mac" ]; then
     # git archive would leave out the generated code, the submodules, and the ROM, so the tree goes across as it is.
     rsync -a --exclude='/build*' --exclude=/.git --exclude=/android --exclude=/tapes --exclude=/dist \
         --exclude=__pycache__ "$here/" "$mac:$remote/"
-    ssh "$mac" "cd '$remote' && PATH=/opt/homebrew/bin:\$PATH sh scripts/package_mac.sh" > "$work/mac.log"
+    ssh "$mac" "cd '$remote' && PATH=/opt/homebrew/bin:\$PATH sh scripts/package_mac.sh" > "$work/mac.log" 2>&1 ||
+        { tail -30 "$work/mac.log" >&2; exit 1; }
     scp -q "$mac:$remote/dist/TLKRecomp-macos-arm64.zip" "$work/"
     mac_id=$(ssh "$mac" "unzip -q -o '$remote/dist/TLKRecomp-macos-arm64.zip' -d '$remote/check' &&
         '$remote/check/TLKRecomp-macos-arm64/tlk_sdl' --build-id" | cut -d' ' -f1)

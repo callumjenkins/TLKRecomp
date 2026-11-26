@@ -24,7 +24,8 @@ STAGE="$DIST/stage-mac"
 PKG="$DIST/$NAME"
 
 # SDL gets packaging/sdl3-macos-gip.patch, so a third-party Xbox One controller, which macOS has no driver for,
-# works through libusb. libusb links in statically, so players still need nothing installed.
+# works through libusb. libusb links in statically, so players still need nothing installed, and its entitlement
+# check needs the Security framework.
 LIBUSB=$(brew --prefix libusb 2>/dev/null || true)
 [ -f "$LIBUSB/lib/libusb-1.0.a" ] || { echo "Install libusb first: brew install libusb" >&2; exit 1; }
 RUNNER="$ROOT/snesrecomp/runner/runner.cmake"
@@ -46,7 +47,8 @@ fi
 
 cmake -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DTLK_STATIC_SDL=ON \
     -DSNESRECOMP_SDL3_SOURCE_DIR="$SDL_SRC" -DSDL_HIDAPI_LIBUSB_SHARED=OFF \
-    -DLibUSB_LIBRARY="$LIBUSB/lib/libusb-1.0.a" -DLibUSB_INCLUDE_PATH="$LIBUSB/include/libusb-1.0"
+    -DLibUSB_LIBRARY="$LIBUSB/lib/libusb-1.0.a" -DLibUSB_INCLUDE_PATH="$LIBUSB/include/libusb-1.0" \
+    -DCMAKE_EXE_LINKER_FLAGS="-framework Security"
 cmake --build "$BUILD" --target tlk_sdl -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 rm -rf "$STAGE" "$PKG"
 cmake --install "$BUILD" --prefix "$STAGE"
