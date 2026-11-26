@@ -20,14 +20,24 @@ BUILD = "b1"
 
 @pytest.fixture
 def fake_sdl(tmp_path: Path) -> Path:
-    """Stands in for tlk_sdl: prints a build id, records its arguments, and writes an autosave as it exits."""
+    """Stands in for tlk_sdl: prints a build id, records its arguments, and writes an autosave as it exits.
+
+    A run with --practice-level writes only tlk_practice_boot.state and its json beside the ini, and records its
+    arguments and video driver in tmp_path/boot.json."""
     path = tmp_path / "tlk_sdl"
     path.write_text(textwrap.dedent(f"""\
         #!{sys.executable}
-        import hashlib, json, sys
+        import hashlib, json, os, sys
         args = sys.argv[1:]
         if args == ["--build-id"]:
             print("{BUILD} v0"); sys.exit(0)
+        if "--practice-level" in args:
+            open({str(tmp_path / "boot.json")!r}, "w").write(json.dumps([os.environ.get("SDL_VIDEO_DRIVER"), args]))
+            boot = os.path.join(os.path.dirname(args[args.index("--config") + 1]), "tlk_practice_boot")
+            open(boot + ".state", "wb").write(b"power on")
+            info = {{"build": "{BUILD}", "state_sha256": hashlib.sha256(b"power on").hexdigest()}}
+            open(boot + ".json", "w").write(json.dumps(info))
+            sys.exit(0)
         open({str(tmp_path / "args.json")!r}, "w").write(json.dumps(args))
         auto = args[args.index("--autosave") + 1]
         state = b"played on " + args[args.index("--device") + 1].encode()
@@ -150,6 +160,48 @@ def test_play_hands_tlk_sdl_everything_after_the_separator(tmp_path, monkeypatch
     assert tlk_sync.main(["play", *own, "--", "--rom", "Lion King, The (USA).sfc", "--fullscreen"]) == 0
     saves = tmp_path / "saves" if "--saves" in own else tlk_sync.DATA / "saves"
     assert calls == [(saves, new, ["--rom", "Lion King, The (USA).sfc", "--fullscreen"])]
+
+
+@pytest.mark.parametrize("boot", [
+    pytest.param(None, id="none yet"),
+    pytest.param({"build": "b0", "rewritten": False}, id="from another build"),
+    pytest.param({"build": BUILD, "rewritten": True}, id="state changed after its json"),
+])
+def test_a_resumed_game_gets_the_power_on_state_level_select_needs(tmp_path, fake_sdl, boot):
+    saves = tmp_path / "saves"
+    put_local(saves, "tlk_autosave", 100)
+    if boot is not None:
+        state = b"other" if boot["rewritten"] else b"power on"
+        (saves / "tlk_practice_boot.state").write_bytes(state)
+        info = {"build": boot["build"], "state_sha256": tlk_saves.sha256(b"power on")}
+        (saves / "tlk_practice_boot.json").write_text(json.dumps(info))
+    extra = ["--rom", "Lion King, The (USA).sfc", "--fullscreen"]
+    tlk_sync.play({"tlk_sdl": str(fake_sdl), "device": "pc"}, saves, False, extra, echo=lambda _: None)
+    driver, args = json.loads((tmp_path / "boot.json").read_text())
+    assert driver == "dummy"
+    assert args[args.index("--config") + 1] == str(saves / "tlk_sdl.ini") and "--frames" in args
+    assert args[-3:] == extra and "--load" not in args
+    assert (saves / "tlk_practice_boot.state").read_bytes() == b"power on"
+    assert "--load" in json.loads((tmp_path / "args.json").read_text())
+
+
+@pytest.mark.parametrize("new, autosave, boot", [
+    pytest.param(False, False, False, id="no autosave yet"),
+    pytest.param(True, True, False, id="new game"),
+    pytest.param(False, True, True, id="power-on state from this build"),
+])
+def test_tlk_play_writes_no_power_on_state_when_tlk_sdl_will_or_one_is_there(tmp_path, fake_sdl, new, autosave,
+                                                                             boot):
+    saves = tmp_path / "saves"
+    saves.mkdir()
+    if autosave:
+        put_local(saves, "tlk_autosave", 100)
+    if boot:
+        (saves / "tlk_practice_boot.state").write_bytes(b"power on")
+        info = {"build": BUILD, "state_sha256": tlk_saves.sha256(b"power on")}
+        (saves / "tlk_practice_boot.json").write_text(json.dumps(info))
+    tlk_sync.play({"tlk_sdl": str(fake_sdl), "device": "pc"}, saves, new, [], echo=lambda _: None)
+    assert not (tmp_path / "boot.json").exists()
 
 
 def test_tlk_play_writes_a_60_second_autosave_ini_once(tmp_path, fake_sdl):

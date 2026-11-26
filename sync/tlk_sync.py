@@ -30,6 +30,7 @@ from tlk_saves import AUTOSAVE, PARTS, SLOTS, BadSave, Conflict, SaveStore, Stor
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "tlk-recomp" / "sync.json"
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "tlk-recomp"
 OFFLINE = "Not synced: {store} not reachable. Is Tailscale on?"
+POWER_ON = "tlk_practice_boot"
 
 
 @dataclass
@@ -149,6 +150,7 @@ def play(cfg: dict, saves: Path, new: bool, extra: list[str], echo: Callable[[st
     args = [tlk_sdl, "--config", str(ini), "--device", device, "--autosave", str(autosave)]
     if not new and autosave.exists():
         args += ["--load", str(autosave)]
+        _write_power_on_state(tlk_sdl, ini, saves, extra)
     game = subprocess.Popen(args + extra)
     # A launcher stopping tlk-play stops the game the same way, so it saves as it quits and the push below runs.
     previous = signal.signal(signal.SIGTERM, lambda *_: game.terminate())
@@ -246,6 +248,25 @@ def _write(path: Path, data: bytes) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
+
+
+def _write_power_on_state(tlk_sdl: str, ini: Path, saves: Path, extra: list[str]) -> None:
+    """Writes the power-on state level select starts from, unless this build's is there.
+
+    tlk_sdl writes it only when it starts a new game, so a game that always resumes would never get one. The game plays
+    even when this run fails.
+    """
+    info = local_info(saves, POWER_ON)
+    if info is not None and info["sha_ok"] and info.get("build") == build_id(tlk_sdl):
+        return
+    # A one-frame scripted run with a level to start writes the state and records nothing. The dummy driver keeps its
+    # window off screen.
+    headless = {**os.environ, "SDL_VIDEO_DRIVER": "dummy"}
+    try:
+        subprocess.run([tlk_sdl, "--config", str(ini), "--no-audio", "--practice-level", "0", "--frames", "1", *extra],
+                       env=headless, capture_output=True, timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 if __name__ == "__main__":
